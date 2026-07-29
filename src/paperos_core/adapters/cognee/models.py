@@ -1,0 +1,296 @@
+"""Canonical-to-Cognee DataPoint mapping using shared canonical IDs."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from paperos_core.domain.canonical import CanonicalBundle
+from paperos_core.domain.datapoints import (
+    ChunkDataPoint,
+    ClaimDataPoint,
+    ConceptRelationDataPoint,
+    DocumentDataPoint,
+    ElementDataPoint,
+    EntityDataPoint,
+    PaperOSDataPoint,
+    ReferenceDataPoint,
+    SectionDataPoint,
+    SummaryDataPoint,
+    cognee_uuid,
+)
+from paperos_core.domain.knowledge import SemanticEnrichment
+from paperos_core.domain.provenance import RelationRecord, RelationType
+
+
+@dataclass(slots=True)
+class DataPointGraph:
+    nodes: list[PaperOSDataPoint]
+    relations: list[RelationRecord]
+
+    @property
+    def id_mapping(self) -> dict[str, str]:
+        return {node.canonical_id: str(node.id) for node in self.nodes}
+
+
+def canonical_to_datapoints(
+    bundle: CanonicalBundle, enrichment: SemanticEnrichment
+) -> DataPointGraph:
+    snapshot = bundle.snapshot
+    common = {
+        "canonical_snapshot_id": snapshot.id,
+        "source_file_id": snapshot.source_file_id,
+        "parse_run_id": snapshot.parse_run_id,
+    }
+    document = bundle.document
+    nodes: list[PaperOSDataPoint] = [
+        DocumentDataPoint(
+            id=cognee_uuid(document.id),
+            canonical_id=document.id,
+            title=document.title,
+            document_type=document.document_type,
+            language=document.language,
+            doi=document.doi,
+            year=document.year,
+            **common,
+        )
+    ]
+    nodes.extend(
+        SectionDataPoint(
+            id=cognee_uuid(section.id),
+            canonical_id=section.id,
+            document_id=document.id,
+            title=section.title,
+            path=section.path,
+            level=section.level,
+            **common,
+        )
+        for section in bundle.sections
+    )
+    nodes.extend(
+        ChunkDataPoint(
+            id=cognee_uuid(chunk.id),
+            canonical_id=chunk.id,
+            document_id=document.id,
+            section_id=chunk.section_id,
+            section_path=chunk.section_path,
+            text=chunk.text,
+            page_start=chunk.page_start,
+            page_end=chunk.page_end,
+            source_chunk_ids=[chunk.id],
+            derived_from_ids=chunk.element_ids,
+            **common,
+        )
+        for chunk in bundle.chunks
+    )
+    chunks_by_element: dict[str, list[str]] = {}
+    for chunk in bundle.chunks:
+        for element_id in chunk.element_ids:
+            chunks_by_element.setdefault(element_id, []).append(chunk.id)
+    nodes.extend(
+        ElementDataPoint(
+            id=cognee_uuid(element.id),
+            canonical_id=element.id,
+            document_id=document.id,
+            section_id=element.section_id,
+            element_type=element.element_type.value,
+            text=element.text or element.latex,
+            page=element.page,
+            source_chunk_ids=chunks_by_element.get(element.id, []),
+            **common,
+        )
+        for element in bundle.elements
+    )
+    nodes.extend(
+        ReferenceDataPoint(
+            id=cognee_uuid(reference.id),
+            canonical_id=reference.id,
+            document_id=document.id,
+            raw_text=reference.raw_text,
+            doi=reference.doi,
+            year=reference.year,
+            resolved_document_id=reference.resolved_document_id,
+            resolution_status=reference.resolution_status.value,
+            source_chunk_ids=chunks_by_element.get(reference.source_element_id or "", []),
+            derived_from_ids=([reference.source_element_id] if reference.source_element_id else []),
+            **common,
+        )
+        for reference in bundle.references
+    )
+    nodes.extend(
+        EntityDataPoint(
+            id=cognee_uuid(entity.id),
+            canonical_id=entity.id,
+            entity_type=entity.entity_type,
+            name=entity.name,
+            description=entity.description,
+            status=entity.status.value,
+            confidence=entity.confidence,
+            source_chunk_ids=entity.source_chunk_ids,
+            derived_from_ids=entity.derived_from_ids,
+            **common,
+        )
+        for entity in enrichment.entities
+    )
+    nodes.extend(
+        ClaimDataPoint(
+            id=cognee_uuid(claim.id),
+            canonical_id=claim.id,
+            text=claim.text,
+            claim_type=claim.claim_type,
+            status=claim.status.value,
+            confidence=claim.confidence,
+            source_chunk_ids=claim.source_chunk_ids,
+            derived_from_ids=claim.derived_from_ids,
+            **common,
+        )
+        for claim in enrichment.claims
+    )
+    nodes.extend(
+        ConceptRelationDataPoint(
+            id=cognee_uuid(relation.id),
+            canonical_id=relation.id,
+            relation_type=relation.relation_type,
+            source_object_id=relation.source_object_id,
+            target_object_id=relation.target_object_id,
+            description=relation.description,
+            status=relation.status.value,
+            confidence=relation.confidence,
+            source_chunk_ids=relation.source_chunk_ids,
+            derived_from_ids=relation.derived_from_ids,
+            **common,
+        )
+        for relation in enrichment.relations
+    )
+    nodes.extend(
+        SummaryDataPoint(
+            id=cognee_uuid(summary.id),
+            canonical_id=summary.id,
+            summary_type=summary.summary_type,
+            text=summary.text,
+            status=summary.status.value,
+            source_chunk_ids=summary.source_chunk_ids,
+            derived_from_ids=summary.derived_from_ids,
+            **common,
+        )
+        for summary in enrichment.summaries
+    )
+    relations = _canonical_relations(bundle) + _semantic_relations(bundle, enrichment)
+    return DataPointGraph(nodes=nodes, relations=relations)
+
+
+def _canonical_relations(bundle: CanonicalBundle) -> list[RelationRecord]:
+    document_id = bundle.document.id
+    relations: list[RelationRecord] = []
+    for section in bundle.sections:
+        relations.append(
+            RelationRecord(
+                source_id=document_id,
+                target_id=section.id,
+                relation_type=RelationType.HAS_SECTION,
+            )
+        )
+    for chunk in bundle.chunks:
+        relations.append(
+            RelationRecord(
+                source_id=chunk.section_id or document_id,
+                target_id=chunk.id,
+                relation_type=RelationType.HAS_CHUNK,
+                source_chunk_ids=[chunk.id],
+            )
+        )
+        relations.extend(
+            RelationRecord(
+                source_id=chunk.id,
+                target_id=element_id,
+                relation_type=RelationType.HAS_ELEMENT,
+                source_chunk_ids=[chunk.id],
+            )
+            for element_id in chunk.element_ids
+        )
+    relations.extend(
+        RelationRecord(
+            source_id=document_id,
+            target_id=reference.id,
+            relation_type=RelationType.HAS_REFERENCE,
+        )
+        for reference in bundle.references
+    )
+    return relations
+
+
+def _semantic_relations(
+    bundle: CanonicalBundle, enrichment: SemanticEnrichment
+) -> list[RelationRecord]:
+    relations: list[RelationRecord] = []
+    for entity in enrichment.entities:
+        _append_provenance_relations(
+            relations,
+            entity.id,
+            entity.source_chunk_ids,
+            entity.derived_from_ids,
+        )
+    for claim in enrichment.claims:
+        _append_provenance_relations(
+            relations,
+            claim.id,
+            claim.source_chunk_ids,
+            claim.derived_from_ids,
+        )
+    for summary in enrichment.summaries:
+        _append_provenance_relations(
+            relations,
+            summary.id,
+            summary.source_chunk_ids,
+            summary.derived_from_ids,
+        )
+    for relation in enrichment.relations:
+        try:
+            kind = RelationType(relation.relation_type)
+        except ValueError:
+            kind = RelationType.RELATED_TO
+        relations.extend(
+            [
+                RelationRecord(
+                    source_id=relation.source_object_id,
+                    target_id=relation.target_object_id,
+                    relation_type=kind,
+                    source_chunk_ids=relation.source_chunk_ids,
+                    derived_from_ids=relation.derived_from_ids,
+                )
+            ]
+        )
+        _append_provenance_relations(
+            relations,
+            relation.id,
+            relation.source_chunk_ids,
+            relation.derived_from_ids,
+        )
+    relations.extend(
+        RelationRecord(
+            source_id=summary.id,
+            target_id=bundle.document.id,
+            relation_type=RelationType.SUMMARIZES,
+            source_chunk_ids=summary.source_chunk_ids,
+            derived_from_ids=summary.derived_from_ids,
+        )
+        for summary in enrichment.summaries
+    )
+    return relations
+
+
+def _append_provenance_relations(
+    relations: list[RelationRecord],
+    object_id: str,
+    source_chunk_ids: list[str],
+    derived_from_ids: list[str],
+) -> None:
+    relations.extend(
+        RelationRecord(
+            source_id=object_id,
+            target_id=chunk_id,
+            relation_type=RelationType.DERIVED_FROM,
+            source_chunk_ids=[chunk_id],
+            derived_from_ids=derived_from_ids,
+        )
+        for chunk_id in source_chunk_ids
+    )

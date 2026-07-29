@@ -1,0 +1,1 @@
+"""adapters/cognee package."""

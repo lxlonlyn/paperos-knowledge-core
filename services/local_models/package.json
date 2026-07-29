@@ -1,0 +1,18 @@
+{
+  "name": "@paperos/local-model-gateway",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "test": "node --test dist/**/*.test.js"
+  },
+  "dependencies": {
+    "node-llama-cpp": "3.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0"
+  }
+}

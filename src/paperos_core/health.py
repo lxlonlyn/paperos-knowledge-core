@@ -1,0 +1,109 @@
+"""Dependency-aware application health reporting."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from paperos_core.adapters.cognee.repository import CogneeRepository
+from paperos_core.adapters.llm import DeepSeekClient
+from paperos_core.adapters.mineru.client import MinerUClient
+from paperos_core.adapters.models.client import LocalModelGatewayProcess
+from paperos_core.indexes.manager import IndexManager
+from paperos_core.ingestion.canonical_repository import CanonicalRepository
+from paperos_core.ingestion.registry import SourceRegistry
+from paperos_core.jobs.queue import JobQueue
+from paperos_core.paths import DataPaths
+
+
+class HealthService:
+    def __init__(
+        self,
+        paths: DataPaths,
+        registry: SourceRegistry,
+        canonical_repository: CanonicalRepository,
+        mineru: MinerUClient,
+        deepseek: DeepSeekClient,
+        model_process: LocalModelGatewayProcess,
+        cognee: CogneeRepository,
+        indexes: IndexManager,
+        queue: JobQueue,
+    ) -> None:
+        self.paths = paths
+        self.registry = registry
+        self.canonical_repository = canonical_repository
+        self.mineru = mineru
+        self.deepseek = deepseek
+        self.model_process = model_process
+        self.cognee = cognee
+        self.indexes = indexes
+        self.queue = queue
+
+    async def report(self) -> dict[str, Any]:
+        components: dict[str, Any] = {}
+        try:
+            components["mineru"] = {
+                "status": "healthy",
+                **await self.mineru.provider.health_check(),
+            }
+        except Exception as exc:  # noqa: BLE001 - health reports component failures.
+            components["mineru"] = {
+                "status": "unavailable",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        try:
+            models = await self.deepseek.health_check()
+            components["deepseek"] = {
+                "status": "healthy",
+                "model_count": len(models.get("data", [])),
+            }
+        except Exception as exc:  # noqa: BLE001 - health reports component failures.
+            components["deepseek"] = {
+                "status": "unavailable",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        try:
+            local = await self.model_process.start()
+            components["local_models"] = {"status": "healthy", **local}
+        except Exception as exc:  # noqa: BLE001 - health reports component failures.
+            components["local_models"] = {
+                "status": "unavailable",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        components["lexical"] = {
+            "status": "healthy",
+            **self.indexes.lexical.status(),
+        }
+        components["vector"] = {
+            "status": "healthy",
+            **self.indexes.vector.status(),
+        }
+        bundles = self.canonical_repository.list_bundles()
+        try:
+            if bundles:
+                await self.cognee.get_datapoint(bundles[-1].document.id)
+            components["cognee_graph"] = {
+                "status": "healthy",
+                "document_count": len(bundles),
+            }
+        except Exception as exc:  # noqa: BLE001 - health reports component failures.
+            components["cognee_graph"] = {
+                "status": "degraded",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        registry = self.registry.status()
+        components["job_database"] = {
+            "status": "healthy",
+            "ingestion_jobs": registry["ingestion_job_count"],
+            "operational_jobs": len(self.queue.list_jobs()),
+        }
+        components["data_paths"] = {
+            "status": "healthy",
+            "root": str(self.paths.root),
+            "all_within_root": True,
+        }
+        overall = (
+            "healthy"
+            if all(item["status"] == "healthy" for item in components.values())
+            else "degraded"
+        )
+        return {"status": overall, "components": components}

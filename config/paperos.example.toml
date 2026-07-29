@@ -1,0 +1,98 @@
+[project]
+data_dir = "~/paperos-knowledge-core/data"
+dataset = "papers"
+
+[api]
+host = "127.0.0.1"
+port = 8000
+
+[worker]
+concurrency = 1
+poll_interval_seconds = 1.0
+
+[mineru_ocr]
+provider = "mineru_cloud"
+endpoint = ""
+api_key_env = "MINERU_API_KEY"
+# Set this only in config/paperos.toml, which is ignored by Git.
+# A non-empty MINERU_API_KEY environment variable overrides this value.
+api_key = ""
+use_async_tasks = true
+poll_interval_seconds = 2.0
+timeout_seconds = 1800
+preferred_backend = "auto"
+
+[ingestion]
+max_file_mb = 200
+retain_parser_debug_files = true
+chunk_target_tokens = 900
+chunk_overlap_tokens = 135
+chunk_boundary_window_tokens = 200
+resolve_references = true
+semantic_enrichment = true
+
+[models]
+gateway_endpoint = "http://127.0.0.1:8081"
+request_timeout_seconds = 120
+
+[models.embedding]
+enabled = true
+model_path = "models/embedding/embeddinggemma-300M-Q8_0.gguf"
+dimensions = 768
+max_tokens = 2048
+
+[models.reranker]
+enabled = true
+model_path = "models/reranker/qwen3-reranker-0.6b-q8_0.gguf"
+candidate_limit = 40
+
+[models.query_expansion]
+enabled = true
+model_path = "models/query-expansion/qmd-query-expansion-1.7B-q4_k_m.gguf"
+max_output_tokens = 512
+
+[indexes.lexical]
+path = "indexes/lexical.sqlite"
+fts_table = "chunk_fts"
+
+[retrieval]
+default_profile = "comprehensive"
+top_k = 12
+candidate_pool_size = 40
+graph_depth = 2
+max_chunks_per_document = 3
+max_chunks_per_section = 2
+
+[retrieval.profiles.comprehensive]
+lexical_weight = 1.0
+semantic_weight = 1.0
+graph_weight = 1.0
+global_context_weight = 0.6
+confirmed_knowledge_weight = 1.2
+
+[retrieval.profiles.truth]
+lexical_weight = 1.4
+semantic_weight = 1.2
+graph_weight = 0.6
+global_context_weight = 0.3
+confirmed_knowledge_weight = 1.5
+
+[retrieval.profiles.associative]
+lexical_weight = 0.7
+semantic_weight = 1.0
+graph_weight = 1.5
+global_context_weight = 1.2
+confirmed_knowledge_weight = 1.0
+
+[testing]
+corpus_dir = "test-corpus/pdfs"
+expected_dir = "test-corpus/expected"
+queries_dir = "test-corpus/queries"
+run_dir = "test-runs"
+require_real_pdf = true
+require_live_mineru = true
+require_live_cognee = true
+require_live_local_models = true
+require_live_deepseek = true
+fail_on_missing_dependency = true
+minimum_pdf_count = 1
