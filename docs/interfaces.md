@@ -745,25 +745,6 @@ GET    /api/v1/visualize?dataset_id={dataset_id}
 
 Authentication is not required.
 
-## CLI interface
-
-Expected commands:
-
-```
-paperos init
-paperos serve
-paperos worker
-paperos model-gateway
-paperos ingest
-paperos query
-paperos status
-paperos rebuild
-paperos reprocess
-paperos improve
-```
-
-CLI commands call application services. They must not duplicate application logic.
-
 ## Failure contract
 
 External and internal failures must use typed errors.

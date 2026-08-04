@@ -10,14 +10,9 @@ import re
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from typer.testing import CliRunner
-
 from paperos_core.api.app import create_app
 from paperos_core.bootstrap import build_application
-from paperos_core.cli import app
 from paperos_core.retrieval.candidates import QueryRequest, QueryResponse
-
-runner = CliRunner()
 
 
 def _file_hashes(roots: list[Path]) -> dict[str, str]:
@@ -181,7 +176,7 @@ async def _run_live_gate5(
         await application.aclose()
 
 
-def test_gate5_live_corpus_query_cli_and_http(
+def test_gate5_live_corpus_query_http(
     gate1_run_dir: Path,
     configured_data_dir: Path,
     corpus_manifest: dict,
@@ -203,24 +198,18 @@ def test_gate5_live_corpus_query_cli_and_http(
         "comprehensive",
     }
 
-    cli_result = runner.invoke(
-        app,
-        [
-            "query",
-            "What are the four papers' main geometric representations?",
-            "--profile",
-            "comprehensive",
-            "--data-dir",
-            str(run_root),
-        ],
-    )
-    assert cli_result.exit_code == 0, cli_result.output
-    cli_payload = json.loads(cli_result.stdout)
-    assert cli_payload["provenance_complete"] is True
-    assert cli_payload["distinct_documents"] == 4
-    (logs / "cli-query.json").write_text(cli_result.stdout, encoding="utf-8")
-
     with TestClient(create_app(data_dir=run_root)) as client:
+        comprehensive_response = client.post(
+            "/api/v1/query",
+            json={
+                "query": "What are the four papers' main geometric representations?",
+                "profile": "comprehensive",
+            },
+        )
+        assert comprehensive_response.status_code == 200, comprehensive_response.text
+        comprehensive_payload = comprehensive_response.json()
+        assert comprehensive_payload["provenance_complete"] is True
+        assert comprehensive_payload["distinct_documents"] == 4
         http_response = client.post(
             "/api/v1/query",
             json={
@@ -232,6 +221,10 @@ def test_gate5_live_corpus_query_cli_and_http(
     http_payload = http_response.json()
     assert http_payload["provenance_complete"] is True
     assert http_payload["distinct_documents"] >= 2
+    (logs / "http-comprehensive-query.json").write_text(
+        json.dumps(comprehensive_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     (logs / "http-query.json").write_text(
         json.dumps(http_payload, ensure_ascii=False, indent=2),
         encoding="utf-8",

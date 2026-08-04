@@ -746,7 +746,7 @@ Every relation derived through an LLM must preserve evidence and model provenanc
 Cognee DataPoint declarations must be centralized in:
 
 ```
-src/paperos_core/domain/datapoints.py
+paperos_core/domain/datapoints.py
 ```
 
 DataPoint models may reference canonical domain models but must not redefine them independently.

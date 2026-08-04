@@ -9,16 +9,10 @@ import os
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from typer.testing import CliRunner
-
 from paperos_core.api.app import create_app
 from paperos_core.bootstrap import build_application
-from paperos_core.cli import app
 from paperos_core.feedback.models import FeedbackRequest, FeedbackType
 from paperos_core.retrieval.candidates import QueryRequest, RetrievalProfile
-
-runner = CliRunner()
-
 
 def _hash_files(roots: list[Path]) -> dict[str, str]:
     return {
@@ -284,29 +278,6 @@ def test_gate6_live_feedback_improve_rebuild_and_operations(
         _run_gate6(run_root, configured_data_dir, corpus_manifest, logs)
     )
 
-    cli_feedback = runner.invoke(
-        app,
-        [
-            "feedback",
-            str(result["target_id"]),
-            "--type",
-            "confirm",
-            "--evidence-id",
-            str(result["evidence_id"]),
-            "--comment",
-            "CLI confirmation against retained source evidence.",
-            "--data-dir",
-            str(run_root),
-        ],
-    )
-    assert cli_feedback.exit_code == 0, cli_feedback.output
-    cli_improve = runner.invoke(
-        app, ["improve", "--data-dir", str(run_root)]
-    )
-    assert cli_improve.exit_code == 0, cli_improve.output
-    (logs / "cli-feedback.json").write_text(cli_feedback.stdout, encoding="utf-8")
-    (logs / "cli-improve.json").write_text(cli_improve.stdout, encoding="utf-8")
-
     with TestClient(create_app(data_dir=run_root)) as client:
         documents = client.get("/api/v1/documents")
         assert documents.status_code == 200
@@ -340,6 +311,8 @@ def test_gate6_live_feedback_improve_rebuild_and_operations(
             "/api/v1/improve",
             "/api/v1/health",
         } <= routes
+        deletion = client.delete(f"/api/v1/documents/{result['document_id']}")
+        assert deletion.status_code == 200, deletion.text
     (logs / "api-feedback.json").write_text(
         json.dumps(api_feedback.json(), ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -349,20 +322,12 @@ def test_gate6_live_feedback_improve_rebuild_and_operations(
         encoding="utf-8",
     )
 
-    deletion = runner.invoke(
-        app,
-        [
-            "delete-document",
-            str(result["document_id"]),
-            "--data-dir",
-            str(run_root),
-        ],
-    )
-    assert deletion.exit_code == 0, deletion.output
-    deletion_payload = json.loads(deletion.stdout)
+    deletion_payload = deletion.json()
     assert deletion_payload["status"] == "deleted"
     assert deletion_payload["source_evidence_retained"] is True
-    (logs / "cli-delete.json").write_text(deletion.stdout, encoding="utf-8")
+    (logs / "api-delete.json").write_text(
+        json.dumps(deletion_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     deleted_application = build_application(data_dir=run_root)
     try:

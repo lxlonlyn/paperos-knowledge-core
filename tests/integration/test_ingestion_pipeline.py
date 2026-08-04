@@ -7,48 +7,32 @@ import sqlite3
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from typer.testing import CliRunner
-
 from paperos_core.adapters.cognee.repository import (
     GRAPH_SEED_VECTOR_COLLECTIONS,
     SEMANTIC_VECTOR_COLLECTIONS,
 )
 from paperos_core.api.app import create_app
 from paperos_core.bootstrap import build_application
-from paperos_core.cli import app
 from paperos_core.domain.provenance import RelationType
 from paperos_core.ingestion.expected_validation import (
     expected_path_for_source,
     validate_expected_case,
 )
 
-runner = CliRunner()
-
-
-def _json_output(result) -> dict:
-    assert result.exit_code == 0, result.output
-    return json.loads(result.stdout)
-
-
-def test_gate4_real_pdf_through_live_cumulative_cli_and_rebuild(
+def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
     real_pdf_case, gate1_run_dir: Path, configured_data_dir: Path
 ) -> None:
     pdf_path, case = real_pdf_case
     run_root = gate1_run_dir / "gate4-live"
 
-    result = _json_output(
-        runner.invoke(
-            app,
-            [
-                "ingest",
-                str(pdf_path),
-                "--dataset",
-                "papers",
-                "--data-dir",
-                str(run_root),
-            ],
+    with TestClient(create_app(data_dir=run_root)) as client, pdf_path.open("rb") as stream:
+        response = client.post(
+            "/api/v1/ingest",
+            params={"dataset": "papers"},
+            files={"file": (pdf_path.name, stream, "application/pdf")},
         )
-    )
+    assert response.status_code == 200, response.text
+    result = response.json()
 
     assert result["duplicate"] is False
     assert result["status"] == "completed"
@@ -269,18 +253,13 @@ def test_gate4_real_pdf_through_live_cumulative_cli_and_rebuild(
         for path in root.rglob("*")
         if path.is_file()
     }
-    rebuild = _json_output(
-        runner.invoke(
-            app,
-            [
-                "rebuild",
-                "--snapshot-id",
-                snapshot_id,
-                "--data-dir",
-                str(run_root),
-            ],
-        )
-    )
+    rebuild_application = build_application(data_dir=run_root)
+    try:
+        rebuild = asyncio.run(
+            rebuild_application.rebuilder.rebuild(snapshot_id=snapshot_id)
+        ).model_dump(mode="json")
+    finally:
+        asyncio.run(rebuild_application.aclose())
     assert rebuild["rebuilt_snapshot_ids"] == [snapshot_id]
     assert rebuild["reports"][0]["rebuilt"] is True
     assert rebuild["reports"][0]["consistency_valid"] is True
@@ -320,25 +299,22 @@ def test_gate4_real_pdf_through_live_cumulative_cli_and_rebuild(
         assert visualize_response.status_code == 200
         assert "html" in visualize_response.headers["content-type"]
 
-    status = _json_output(runner.invoke(app, ["status", "--data-dir", str(run_root)]))
+    status = application.ingestion.status()
     assert status["source_file_count"] == 1
     assert status["ingestion_job_count"] == 1
     assert status["jobs_by_status"] == {"completed": 1}
 
-    job_status = _json_output(
-        runner.invoke(
-            app,
-            ["status", "--job-id", result["job_id"], "--data-dir", str(run_root)],
-        )
-    )
-    assert job_status["job"]["source_file_id"] == source.id
+    assert application.ingestion.get_job(result["job_id"]).source_file_id == source.id
 
 
-def test_gate1_cli_reports_invalid_pdf(gate1_run_dir: Path, configured_data_dir: Path) -> None:
+def test_gate1_api_reports_invalid_pdf(gate1_run_dir: Path, configured_data_dir: Path) -> None:
     non_pdf = configured_data_dir / "test-corpus" / "manifest.json"
     run_root = gate1_run_dir / "invalid-input"
-    result = runner.invoke(app, ["ingest", str(non_pdf), "--data-dir", str(run_root)])
-    assert result.exit_code == 2
-    payload = json.loads(result.stderr)
+    with TestClient(create_app(data_dir=run_root)) as client, non_pdf.open("rb") as stream:
+        response = client.post(
+            "/api/v1/ingest",
+            files={"file": (non_pdf.name, stream, "application/json")},
+        )
+    assert response.status_code == 400
+    payload = response.json()
     assert payload["error"]["code"] == "invalid_pdf"
-    assert str(non_pdf) == payload["error"]["affected"]

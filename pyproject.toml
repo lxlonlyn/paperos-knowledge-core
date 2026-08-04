@@ -1,39 +1,7 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[project]
-name = "paperos-knowledge-core"
-version = "0.1.0"
-description = "Unified PaperOS ingestion and comprehensive research retrieval over Cognee."
-requires-python = ">=3.11,<3.13"
-dependencies = [
-  "cognee",
-  "fastapi",
-  "uvicorn",
-  "httpx",
-  "pydantic>=2",
-  "pydantic-settings",
-  "python-multipart",
-  "typer",
-  "rich",
-  "aiosqlite",
-  "tenacity",
-  "orjson",
-]
-
-[project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "pytest-cov", "respx", "ruff", "mypy"]
-
-[project.scripts]
-paperos = "paperos_core.cli:app"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/paperos_core"]
-
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
@@ -43,3 +11,11 @@ target-version = "py311"
 python_version = "3.11"
 strict = true
 packages = ["paperos_core"]
+
+[tool.coverage.run]
+branch = true
+source = ["paperos_core"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

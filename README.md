@@ -38,7 +38,7 @@ It accepts genuine academic PDF files, parses them through MinerU OCR, converts 
 ## System overview
 
 ```
-User / AstrBot / CLI / HTTP API
+User / AstrBot / Agent / HTTP API
                 |
                 v
       PaperOS application layer
@@ -60,8 +60,8 @@ raw parser output    unified knowledge layer
                 |
       ┌─────────┼─────────┐
       v         v         v
-   Cognee     SQLite     local models
-   stores      FTS       gateway
+   Cognee     SQLite     private local
+   stores      FTS       inference
 ```
 
 ## Source-of-truth rules
@@ -77,39 +77,23 @@ raw parser output    unified knowledge layer
 
 ## Repository configuration
 
-The project uses two configuration files with separate ownership.
-
-### `.env`
-
-`.env` contains Cognee configuration only.
-
-It defines:
-
-* DeepSeek LLM provider;
-* Cognee embedding provider;
-* relational database configuration;
-* vector database configuration;
-* graph database configuration;
-* Cognee runtime directories.
-
-PaperOS code must not place MinerU or PaperOS-specific settings in `.env`.
-
-### `config/paperos.toml`
+`config/paperos.toml` is the only structured configuration file. Secrets are
+provided through `MINERU_API_KEY` and `DEEPSEEK_API_KEY` environment variables.
+`.env` is not a second Cognee configuration source.
 
 `config/paperos.toml` contains PaperOS configuration.
 
 It defines:
 
 * data directory;
-* MinerU provider, endpoint, and optional project-local API credential;
+* MinerU provider and endpoint;
 * ingestion options;
 * canonical processing options;
 * chunking options;
 * local model paths;
 * lexical index path;
 * retrieval profiles;
-* API and Worker settings;
-* test corpus paths.
+* API settings.
 
 ## Default data directory
 
@@ -122,8 +106,7 @@ The default data directory is:
 The final directory is resolved in this order:
 
 ```
-command-line --data-dir
-→ PAPEROS_DATA_DIR
+PAPEROS_DATA_DIR
 → config/paperos.toml
 → ~/paperos-knowledge-core/data
 ```
@@ -187,23 +170,13 @@ MinerU OCR is treated as an external parsing service.
 
 The default configuration uses MinerU Cloud.
 
-For persistent project-local configuration, set the key once in the Git-ignored
-`config/paperos.toml`:
-
-```toml
-[mineru_ocr]
-api_key = "your-token"
-```
-
-An environment variable remains available as a higher-priority override:
+Supply the API key to the process environment:
 
 ```
 export MINERU_API_KEY="your-token"
 ```
 
-The environment variable name is configured by `mineru_ocr.api_key_env` and defaults
-to `MINERU_API_KEY`. Secret values are represented with Pydantic `SecretStr` and must
-not be emitted by status or configuration serialization.
+Secret values must not be emitted by status or configuration serialization.
 
 A self-hosted MinerU-compatible endpoint may be configured in `paperos.toml`.
 
@@ -218,13 +191,15 @@ DeepSeek is the external LLM provider used by Cognee for:
 * query planning when required;
 * final answer synthesis.
 
-DeepSeek configuration belongs in `.env`.
+Non-secret DeepSeek configuration belongs in `config/paperos.toml`; its secret
+is supplied as `DEEPSEEK_API_KEY`.
 
 PaperOS does not start a local generative LLM service.
 
-### Local model gateway
+### Private local inference runtime
 
-The PaperOS local model gateway loads manually provided GGUF files.
+The PaperOS server owns a private Node child process that loads manually
+provided GGUF files.
 
 It provides:
 
@@ -245,7 +220,7 @@ DATA_DIR/models/query-expansion/
 └── qmd-query-expansion-1.7B-q4_k_m.gguf
 ```
 
-The gateway must never download a missing model.
+The runtime must never download a missing model.
 
 A missing file must produce an actionable startup error containing the expected path.
 
@@ -259,7 +234,7 @@ The default local Cognee deployment uses:
 
 All three stores reside under `DATA_DIR/cognee/`.
 
-`project.dataset` (or `paperos ingest --dataset`) is materialized as an actual
+The configured dataset (or the dataset supplied to the HTTP ingest API) is materialized as an actual
 Cognee Dataset. Each immutable source PDF is registered as a Cognee Data item,
 and every structured write carries Cognee's default single-user principal,
 Dataset, Data item, and PipelineRun in a `PipelineContext`. The official
@@ -290,116 +265,37 @@ Python 3.11
 Node.js 22
 ```
 
-The project is installed in editable mode.
-
-Codex must use the existing environment and must not install dependencies, create environments, or download models.
+PaperOS runs directly from source and is not installed as a wheel or editable
+distribution.
 
 ## Initial configuration
 
 From the repository root:
 
 ```
-cp .env.example .env
 cp config/paperos.example.toml config/paperos.toml
 ```
-
-Edit `.env` with:
-
-* DeepSeek endpoint;
-* DeepSeek model;
-* DeepSeek API key;
-* Cognee database paths;
-* local embedding endpoint.
 
 Edit `config/paperos.toml` with:
 
 * absolute data-directory path;
-* MinerU provider and persistent API key when required;
+* MinerU and DeepSeek endpoints and models;
 * local model paths;
 * API port;
 * retrieval settings.
 
-## Startup order
+## Start PaperOS
 
-The following commands become available after implementation is complete.
-
-### 1. Start the local model gateway
-
-```
+```bash
+conda env create -f environment.yml
 conda activate paperos
-cd ~/paperos-knowledge-core
-paperos model-gateway
+python scripts/setup_runtime.py
+python server.py
 ```
 
-The command runs in the foreground and keeps the existing Node gateway alive
-until Ctrl+C, SIGINT, or SIGTERM. Host and port may be overridden explicitly:
-
-```
-paperos model-gateway --host 127.0.0.1 --port 8081
-```
-
-Default endpoint:
-
-```
-http://127.0.0.1:8081
-```
-
-Expected routes:
-
-```
-GET  /health
-GET  /v1/models
-POST /v1/embeddings
-POST /v1/rerank
-POST /v1/query-expansion
-```
-
-### 2. Initialize runtime storage
-
-```
-source ~/.config/paperos/runtime.env
-conda activate paperos
-cd ~/paperos-knowledge-core
-paperos init
-```
-
-Initialization creates and validates:
-
-* runtime directories;
-* job database;
-* Cognee paths;
-* lexical index schema;
-* model-file paths;
-* schema manifests.
-
-Initialization must not download anything.
-
-### 3. Start the Worker
-
-```
-source ~/.config/paperos/runtime.env
-conda activate paperos
-cd ~/paperos-knowledge-core
-paperos worker
-```
-
-The Worker handles:
-
-* serialized feedback/improvement jobs;
-* document reprocessing jobs;
-* derived-data rebuild jobs.
-
-The default Worker concurrency is one and a process lock prevents two local
-workers from owning the lifecycle simultaneously.
-
-### 4. Start the API
-
-```
-source ~/.config/paperos/runtime.env
-conda activate paperos
-cd ~/paperos-knowledge-core
-paperos serve
-```
+MinerU and DeepSeek must already be available. Users place the three local
+model files manually. The server initializes local storage and automatically
+owns both the private Node inference child process and the background Worker.
 
 Default endpoint:
 
@@ -407,107 +303,9 @@ Default endpoint:
 http://127.0.0.1:8000
 ```
 
-No authentication is required because the deployment is single-user.
-
-## CLI usage
-
-### Ingest one PDF
-
-```
-paperos ingest /path/to/paper.pdf
-```
-
-Specify a dataset:
-
-```
-paperos ingest /path/to/paper.pdf --dataset papers
-```
-
-### Query
-
-Default comprehensive query:
-
-```
-paperos query "这些论文如何处理拓扑变化？"
-```
-
-Truth-oriented query:
-
-```
-paperos query "请给出论文中的直接证据" --profile truth
-```
-
-Association-oriented query:
-
-```
-paperos query "这些方法之间有哪些潜在联系？" --profile associative
-```
-
-Limit a query to a configured Cognee dataset:
-
-```
-paperos query "这些方法之间有哪些潜在联系？" --dataset papers
-```
-
-### Status
-
-```
-paperos status
-```
-
-Status reports:
-
-* MinerU availability;
-* DeepSeek configuration;
-* local-model status;
-* Cognee store status;
-* lexical-index status;
-* document and chunk counts;
-* pending and failed jobs.
-
-### Rebuild derived data
-
-```
-paperos rebuild indexes
-```
-
-Rebuildable data includes:
-
-* canonical snapshots when explicitly requested;
-* Cognee local stores;
-* vector indexes;
-* lexical indexes;
-* summaries;
-* query caches;
-* exports.
-
-Original PDFs and raw MinerU parser output must remain unchanged.
-
-### Reprocess one document
-
-```
-paperos reprocess <document_id>
-```
-
-Reprocessing creates a new versioned parse or canonical run.
-
-### Delete one document
-
-```
-paperos delete-document <document_id>
-```
-
-Deletion removes active lexical/vector projections and creates a logical
-tombstone. Immutable PDFs, parser artifacts, and canonical evidence remain
-retained; a later rebuild excludes the tombstoned document.
-
-### Improve knowledge
-
-```
-paperos improve
-```
-
-Improvement operates only on derived knowledge, feedback, confirmations, corrections, and summaries.
+No authentication is required because the deployment is single-user. All
+business operations use `/api/v1/*` HTTP endpoints; agents must not import
+repositories or databases directly.
 
 ## Ingestion flow
 
