@@ -11,7 +11,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from paperos_core.api.app import create_app
-from paperos_core.bootstrap import build_application
+from paperos_core.application import application_from_config
+from paperos_core.config import load_settings
 from paperos_core.retrieval.candidates import QueryRequest, QueryResponse
 
 
@@ -98,7 +99,7 @@ async def _run_live_gate5(
     papers: list[dict],
     logs: Path,
 ) -> list[QueryResponse]:
-    application = build_application(data_dir=run_root)
+    application = application_from_config(data_dir=run_root)
     try:
         reuse_ingestion = os.getenv("PAPEROS_GATE5_REUSE_INGESTION") == "true"
         if reuse_ingestion:
@@ -198,7 +199,7 @@ def test_gate5_live_corpus_query_http(
         "comprehensive",
     }
 
-    with TestClient(create_app(data_dir=run_root)) as client:
+    with TestClient(create_app(load_settings(data_dir=run_root))) as client:
         comprehensive_response = client.post(
             "/api/v1/query",
             json={

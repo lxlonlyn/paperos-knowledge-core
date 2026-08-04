@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ from paperos_core.jobs.locking import WorkerLifecycleLock
 from paperos_core.jobs.queue import JobQueue, OperationalJob
 
 if TYPE_CHECKING:
-    from paperos_core.bootstrap import Application
+    from paperos_core.application import Application
 
 
 class Worker:
@@ -19,12 +20,35 @@ class Worker:
         self.application = application
         self.queue = queue
         self.record_path = application.paths.jobs / "worker-process.json"
+        self._stop_event = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
 
     def lifecycle_lock(self) -> WorkerLifecycleLock:
         return WorkerLifecycleLock(self.application.paths)
 
-    def stop(self) -> None:
+    async def start(self) -> None:
+        if self._task is not None and not self._task.done():
+            return
+        self._stop_event.clear()
+        self._task = asyncio.create_task(self.run(), name="paperos-worker")
+
+    async def stop(self) -> None:
+        self._stop_event.set()
+        if self._task is not None:
+            await self._task
+            self._task = None
         self._record("stopped")
+
+    async def run(self) -> None:
+        while not self._stop_event.is_set():
+            await self.run_once()
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=self.application.settings.worker.poll_interval_seconds,
+                )
+            except TimeoutError:
+                pass
 
     async def run_once(self) -> OperationalJob | None:
         self._record("running")

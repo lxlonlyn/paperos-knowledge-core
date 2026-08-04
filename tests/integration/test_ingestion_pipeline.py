@@ -12,7 +12,8 @@ from paperos_core.adapters.cognee.repository import (
     SEMANTIC_VECTOR_COLLECTIONS,
 )
 from paperos_core.api.app import create_app
-from paperos_core.bootstrap import build_application
+from paperos_core.application import application_from_config
+from paperos_core.config import load_settings
 from paperos_core.domain.provenance import RelationType
 from paperos_core.ingestion.expected_validation import (
     expected_path_for_source,
@@ -25,7 +26,7 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
     pdf_path, case = real_pdf_case
     run_root = gate1_run_dir / "gate4-live"
 
-    with TestClient(create_app(data_dir=run_root)) as client, pdf_path.open("rb") as stream:
+    with TestClient(create_app(load_settings(data_dir=run_root))) as client, pdf_path.open("rb") as stream:
         response = client.post(
             "/api/v1/ingest",
             params={"dataset": "papers"},
@@ -73,7 +74,7 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
         "asset",
     } <= artifact_types
 
-    application = build_application(data_dir=run_root)
+    application = application_from_config(data_dir=run_root)
     source = application.ingestion.get_source(result["source_file_id"])
     stored = source.storage_path
     assert stored.is_relative_to(run_root.resolve())
@@ -253,7 +254,7 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
         for path in root.rglob("*")
         if path.is_file()
     }
-    rebuild_application = build_application(data_dir=run_root)
+    rebuild_application = application_from_config(data_dir=run_root)
     try:
         rebuild = asyncio.run(
             rebuild_application.rebuilder.rebuild(snapshot_id=snapshot_id)
@@ -275,7 +276,7 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
         Path(rebuild["reports"][0]["cognee_manifest_path"]).read_text()
     )
 
-    api = create_app(data_dir=run_root)
+    api = create_app(load_settings(data_dir=run_root))
     with TestClient(api) as client:
         datasets_response = client.get("/api/v1/datasets")
         assert datasets_response.status_code == 200
@@ -310,7 +311,7 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
 def test_gate1_api_reports_invalid_pdf(gate1_run_dir: Path, configured_data_dir: Path) -> None:
     non_pdf = configured_data_dir / "test-corpus" / "manifest.json"
     run_root = gate1_run_dir / "invalid-input"
-    with TestClient(create_app(data_dir=run_root)) as client, non_pdf.open("rb") as stream:
+    with TestClient(create_app(load_settings(data_dir=run_root))) as client, non_pdf.open("rb") as stream:
         response = client.post(
             "/api/v1/ingest",
             files={"file": (non_pdf.name, stream, "application/json")},

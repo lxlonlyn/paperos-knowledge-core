@@ -11,20 +11,22 @@ from typing import Annotated
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import JSONResponse
 
-from paperos_core.bootstrap import Application, build_application
+from paperos_core.application import Application, create_application
+from paperos_core.config import RuntimeSettings
 from paperos_core.errors import PaperOSError
 from paperos_core.feedback.models import FeedbackRequest
 from paperos_core.retrieval.candidates import QueryRequest, QueryResponse
 
 
-def create_app(
-    *,
-    config_path: Path | None = None,
-    data_dir: Path | None = None,
-) -> FastAPI:
+def create_app(settings: RuntimeSettings) -> FastAPI:
+    application: Application | None = None
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        application = build_application(config_path=config_path, data_dir=data_dir)
+        nonlocal application
+        if application is not None:
+            raise RuntimeError("PaperOS Application was already constructed for this server.")
+        application = create_application(settings)
         app.state.paperos = application
         if not getattr(app.state, "cognee_routes_attached", False):
             from cognee.api.v1.datasets.routers import (  # type: ignore[import-untyped]
@@ -55,6 +57,7 @@ def create_app(
             )
             app.state.cognee_routes_attached = True
         try:
+            await application.start()
             yield
         finally:
             await application.aclose()
@@ -73,7 +76,7 @@ def create_app(
     @api.post("/api/v1/query", response_model=QueryResponse)
     async def query(request: Request, body: QueryRequest) -> QueryResponse:
         application: Application = request.app.state.paperos
-        return await application.retrieval.query(body)
+        return await application.services.retrieval.query(body)
 
     @api.post("/api/v1/ingest")
     async def ingest(
@@ -90,7 +93,7 @@ def create_app(
             with temporary.open("wb") as stream:
                 while chunk := await file.read(1024 * 1024):
                     stream.write(chunk)
-            result = await application.ingestion.ingest_pdf_to_knowledge(
+            result = await application.services.ingestion.ingest_pdf_to_knowledge(
                 temporary, dataset=dataset
             )
             return result.public_dict()
@@ -102,14 +105,14 @@ def create_app(
     @api.get("/api/v1/ingest/{job_id}")
     async def ingestion_status(request: Request, job_id: str) -> dict[str, object]:
         application: Application = request.app.state.paperos
-        return application.ingestion.get_job(job_id).model_dump(mode="json")
+        return application.services.ingestion.get_job(job_id).model_dump(mode="json")
 
     @api.get("/api/v1/documents")
     async def list_documents(request: Request) -> list[dict[str, object]]:
         application: Application = request.app.state.paperos
         return [
             item.model_dump(mode="json")
-            for item in application.documents.list_documents()
+            for item in application.services.documents.list_documents()
         ]
 
     @api.get("/api/v1/documents/{document_id}")
@@ -117,7 +120,7 @@ def create_app(
         request: Request, document_id: str
     ) -> dict[str, object]:
         application: Application = request.app.state.paperos
-        return application.documents.inspect(document_id).model_dump(mode="json")
+        return application.services.documents.inspect(document_id).model_dump(mode="json")
 
     @api.delete("/api/v1/documents/{document_id}")
     async def delete_document(
@@ -125,7 +128,7 @@ def create_app(
     ) -> dict[str, object]:
         application: Application = request.app.state.paperos
         return (
-            await application.documents.delete(document_id)
+            await application.services.documents.delete(document_id)
         ).model_dump(mode="json")
 
     @api.post("/api/v1/documents/{document_id}/reprocess")
@@ -133,24 +136,24 @@ def create_app(
         request: Request, document_id: str
     ) -> dict[str, object]:
         application: Application = request.app.state.paperos
-        return await application.documents.reprocess(document_id)
+        return await application.services.documents.reprocess(document_id)
 
     @api.post("/api/v1/feedback")
     async def feedback(
         request: Request, body: FeedbackRequest
     ) -> dict[str, object]:
         application: Application = request.app.state.paperos
-        return application.feedback.record(body).model_dump(mode="json")
+        return application.services.feedback.record(body).model_dump(mode="json")
 
     @api.post("/api/v1/improve")
     async def improve(request: Request) -> dict[str, object]:
         application: Application = request.app.state.paperos
-        return application.feedback.improve().model_dump(mode="json")
+        return application.services.feedback.improve().model_dump(mode="json")
 
     @api.get("/api/v1/health")
     @api.get("/health", include_in_schema=False)
     async def health(request: Request) -> dict[str, object]:
         application: Application = request.app.state.paperos
-        return await application.health.report()
+        return await application.services.health.report()
 
     return api

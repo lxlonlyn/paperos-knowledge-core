@@ -170,6 +170,9 @@ class PaperOSConfig(StrictConfigModel):
         return self.project.dataset
 
 
+RuntimeSettings = PaperOSConfig
+
+
 def _resolve_path(value: str | Path, *, base_dir: Path) -> Path:
     expanded = Path(value).expanduser()
     if not expanded.is_absolute():
@@ -249,3 +252,14 @@ def load_config(
             "configured_data_dir": configured_data_dir,
         }
     )
+
+
+def load_settings(
+    path: Path | None = None,
+    *,
+    data_dir: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> RuntimeSettings:
+    """Load the settings used by the source-deployed server application."""
+
+    return load_config(path, data_dir=data_dir, environ=environ)

@@ -10,7 +10,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from paperos_core.api.app import create_app
-from paperos_core.bootstrap import build_application
+from paperos_core.application import application_from_config
+from paperos_core.config import load_settings
 from paperos_core.feedback.models import FeedbackRequest, FeedbackType
 from paperos_core.retrieval.candidates import QueryRequest, RetrievalProfile
 
@@ -37,7 +38,7 @@ async def _run_gate6(
     corpus_manifest: dict,
     logs: Path,
 ) -> dict[str, object]:
-    application = build_application(data_dir=run_root)
+    application = application_from_config(data_dir=run_root)
     protected_roots = [
         application.paths.raw,
         application.paths.parsed,
@@ -278,7 +279,7 @@ def test_gate6_live_feedback_improve_rebuild_and_operations(
         _run_gate6(run_root, configured_data_dir, corpus_manifest, logs)
     )
 
-    with TestClient(create_app(data_dir=run_root)) as client:
+    with TestClient(create_app(load_settings(data_dir=run_root))) as client:
         documents = client.get("/api/v1/documents")
         assert documents.status_code == 200
         inspected = client.get(
@@ -329,7 +330,7 @@ def test_gate6_live_feedback_improve_rebuild_and_operations(
         json.dumps(deletion_payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    deleted_application = build_application(data_dir=run_root)
+    deleted_application = application_from_config(data_dir=run_root)
     try:
         active_ids = {
             item.document_id for item in deleted_application.documents.list_documents()
