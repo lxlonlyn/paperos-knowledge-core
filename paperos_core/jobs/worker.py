@@ -1,4 +1,4 @@
-"""Managed single-user worker lifecycle."""
+"""The single application-owned background job consumer."""
 
 from __future__ import annotations
 
@@ -6,28 +6,41 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from paperos_core.jobs.locking import WorkerLifecycleLock
+from paperos_core.documents import DocumentService
+from paperos_core.feedback.service import FeedbackService
+from paperos_core.indexes.rebuild import DerivedDataRebuilder
+from paperos_core.ingestion.service import IngestionService
 from paperos_core.jobs.queue import JobQueue, OperationalJob
 
-if TYPE_CHECKING:
-    from paperos_core.application import Application
 
-
-class Worker:
-    def __init__(self, application: Application, queue: JobQueue) -> None:
-        self.application = application
+class BackgroundWorker:
+    def __init__(
+        self,
+        queue: JobQueue,
+        ingestion: IngestionService,
+        rebuilder: DerivedDataRebuilder,
+        documents: DocumentService,
+        feedback: FeedbackService,
+        *,
+        poll_interval_seconds: float,
+    ) -> None:
         self.queue = queue
-        self.record_path = application.paths.jobs / "worker-process.json"
+        self.ingestion = ingestion
+        self.rebuilder = rebuilder
+        self.documents = documents
+        self.feedback = feedback
+        self.poll_interval_seconds = poll_interval_seconds
+        self.record_path = queue.paths.jobs / "worker-process.json"
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
-    def lifecycle_lock(self) -> WorkerLifecycleLock:
-        return WorkerLifecycleLock(self.application.paths)
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
 
     async def start(self) -> None:
-        if self._task is not None and not self._task.done():
+        if self.running:
             return
         self._stop_event.clear()
         self._task = asyncio.create_task(self.run(), name="paperos-worker")
@@ -40,41 +53,45 @@ class Worker:
         self._record("stopped")
 
     async def run(self) -> None:
+        self._record("running")
         while not self._stop_event.is_set():
             await self.run_once()
             try:
                 await asyncio.wait_for(
-                    self._stop_event.wait(),
-                    timeout=self.application.settings.worker.poll_interval_seconds,
+                    self._stop_event.wait(), timeout=self.poll_interval_seconds
                 )
             except TimeoutError:
                 pass
 
     async def run_once(self) -> OperationalJob | None:
-        self._record("running")
         job = self.queue.claim_next()
         if job is None:
             self._record("idle")
             return None
         try:
-            if job.job_type == "improve":
-                result = self.application.feedback.improve().model_dump(mode="json")
+            if job.job_type == "ingest":
+                result = await self.ingestion.ingest_pdf_to_knowledge(
+                    Path(str(job.payload["path"])),
+                    dataset=job.payload.get("dataset"),
+                    metadata=job.payload.get("metadata"),
+                )
+                payload = result.public_dict()
+            elif job.job_type == "improve":
+                payload = self.feedback.improve().model_dump(mode="json")
             elif job.job_type == "rebuild":
-                result = (
-                    await self.application.rebuilder.rebuild(
-                        job.payload.get("snapshot_id")
-                    )
+                payload = (
+                    await self.rebuilder.rebuild(job.payload.get("snapshot_id"))
                 ).model_dump(mode="json")
             elif job.job_type == "reprocess":
-                result = await self.application.documents.reprocess(
+                payload = await self.documents.reprocess(
                     str(job.payload["document_id"])
                 )
             else:
                 raise ValueError(f"Unsupported operational job type: {job.job_type}")
-            completed = self.queue.complete(job.id, result)
+            completed = self.queue.complete(job.id, payload)
             self._record("completed", job_id=job.id)
             return completed
-        except Exception as exc:  # noqa: BLE001 - worker persists arbitrary job failures.
+        except Exception as exc:  # noqa: BLE001 - consumer must persist job failures.
             failed = self.queue.fail(job.id, f"{type(exc).__name__}: {exc}")
             self._record("failed", job_id=job.id)
             return failed

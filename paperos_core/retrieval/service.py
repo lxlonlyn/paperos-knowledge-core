@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from paperos_core.adapters.cognee.repository import CogneeRepository
 from paperos_core.adapters.llm import DeepSeekClient
-from paperos_core.adapters.models.client import (
-    LocalModelGatewayClient,
-    LocalModelGatewayProcess,
-)
+from paperos_core.runtime.local_inference.client import LocalInferenceClient
 from paperos_core.config import PaperOSConfig
 from paperos_core.feedback.service import FeedbackService
 from paperos_core.indexes.manager import IndexManager
@@ -50,8 +47,7 @@ class RetrievalService:
         registry: SourceRegistry,
         cognee_repository: CogneeRepository,
         index_manager: IndexManager,
-        model_client: LocalModelGatewayClient,
-        model_process: LocalModelGatewayProcess,
+        model_client: LocalInferenceClient,
         deepseek: DeepSeekClient,
         feedback: FeedbackService,
     ) -> None:
@@ -62,7 +58,6 @@ class RetrievalService:
         self.cognee_repository = cognee_repository
         self.index_manager = index_manager
         self.model_client = model_client
-        self.model_process = model_process
         self.deepseek = deepseek
         self.feedback = feedback
         self.cache = QueryCache(paths, feedback)
@@ -78,7 +73,6 @@ class RetrievalService:
         cached = self.cache.get(cache_key)
         if cached is not None:
             return cached
-        await self.model_process.start()
         document_ids = corpus.filtered_document_ids(
             request.document_ids, dataset_name
         )

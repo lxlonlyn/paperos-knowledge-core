@@ -127,17 +127,17 @@ class CanonicalStorageError(PaperOSError):
     code = "canonical_storage_error"
 
 
-class ModelGatewayConfigurationError(PaperOSError):
-    code = "model_gateway_configuration_error"
+class LocalInferenceConfigurationError(PaperOSError):
+    code = "local_inference_configuration_error"
 
 
-class ModelGatewayUnavailableError(PaperOSError):
-    code = "model_gateway_unavailable"
+class LocalInferenceUnavailableError(PaperOSError):
+    code = "local_inference_unavailable"
     retryable = True
 
 
-class ModelGatewayResponseError(PaperOSError):
-    code = "model_gateway_response_error"
+class LocalInferenceResponseError(PaperOSError):
+    code = "local_inference_response_error"
     retryable = True
 
 

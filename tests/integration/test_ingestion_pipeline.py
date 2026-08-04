@@ -211,7 +211,7 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
     assert not (application.paths.indexes / "vectors.sqlite3").exists()
 
     async def verify_cognee_query_backbone() -> None:
-        await application.model_process.start()
+        await application.start()
         try:
             repository = application.knowledge_pipeline.cognee_repository
             semantic_hits = await repository.search_vectors(
@@ -239,7 +239,9 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
             await application.aclose()
 
     asyncio.run(verify_cognee_query_backbone())
-    process_record = json.loads((application.paths.jobs / "model-gateway-process.json").read_text())
+    process_record = json.loads(
+        (application.paths.jobs / "local-inference-process.json").read_text()
+    )
     assert process_record["status"] == "stopped"
     assert Path(process_record["log_path"]).is_relative_to(run_root.resolve())
 

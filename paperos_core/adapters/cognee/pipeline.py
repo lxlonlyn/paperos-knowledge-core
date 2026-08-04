@@ -13,7 +13,6 @@ from paperos_core.adapters.cognee.models import canonical_to_datapoints
 from paperos_core.adapters.cognee.reference_resolution import resolve_citations
 from paperos_core.adapters.cognee.repository import CogneeRepository
 from paperos_core.adapters.llm import DeepSeekClient
-from paperos_core.adapters.models.client import LocalModelGatewayProcess
 from paperos_core.domain.canonical import CanonicalBundle, CanonicalIngestionResult
 from paperos_core.domain.knowledge import SemanticEnrichment
 from paperos_core.errors import CogneeStorageError
@@ -47,7 +46,6 @@ class CogneePipeline:
         cognee_repository: CogneeRepository,
         index_manager: IndexManager,
         deepseek: DeepSeekClient,
-        model_process: LocalModelGatewayProcess,
     ) -> None:
         self.paths = paths
         self.canonical_repository = canonical_repository
@@ -55,7 +53,6 @@ class CogneePipeline:
         self.cognee_repository = cognee_repository
         self.index_manager = index_manager
         self.deepseek = deepseek
-        self.model_process = model_process
 
     async def ingest_canonical_snapshot(
         self, canonical_result: CanonicalIngestionResult, *, rebuilt: bool = False
@@ -73,7 +70,6 @@ class CogneePipeline:
     ) -> tuple[IndexingReport, Path]:
         """Index one repository-loaded canonical bundle without reconstructing intake."""
         self.canonical_repository.verify_snapshot(bundle.snapshot.id)
-        await self.model_process.start()
         await self.deepseek.health_check()
         enrichment = await self.deepseek.enrich(bundle)
         _validate_semantic_provenance(bundle, enrichment)

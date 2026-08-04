@@ -20,16 +20,14 @@ from paperos_core.paths import DataPaths, build_data_paths
 if TYPE_CHECKING:
     from paperos_core.adapters.cognee.pipeline import CogneePipeline
     from paperos_core.adapters.llm import DeepSeekClient
-    from paperos_core.adapters.models.client import (
-        LocalModelGatewayClient,
-        LocalModelGatewayProcess,
-    )
+    from paperos_core.runtime.local_inference.client import LocalInferenceClient
+    from paperos_core.runtime.local_inference.runtime import LocalInferenceRuntime
     from paperos_core.documents import DocumentService
     from paperos_core.feedback.service import FeedbackService
     from paperos_core.health import HealthService
     from paperos_core.indexes.rebuild import DerivedDataRebuilder
     from paperos_core.jobs.queue import JobQueue
-    from paperos_core.jobs.worker import Worker
+    from paperos_core.jobs.worker import BackgroundWorker
     from paperos_core.retrieval.service import RetrievalService
 
 
@@ -45,8 +43,8 @@ class ApplicationServices:
 
 @dataclass(slots=True)
 class ManagedRuntime:
-    local_inference: LocalModelGatewayProcess
-    worker: Worker
+    local_inference: LocalInferenceRuntime
+    worker: BackgroundWorker
 
 
 @dataclass(slots=True)
@@ -60,7 +58,7 @@ class Application:
     canonical_repository: CanonicalRepository
     canonical_mapper: MinerUCanonicalMapper
     mineru: MinerUClient
-    model_client: LocalModelGatewayClient
+    local_inference_client: LocalInferenceClient
     deepseek: DeepSeekClient
     knowledge_pipeline: CogneePipeline
     queue: JobQueue
@@ -91,7 +89,7 @@ class Application:
         self._closed = True
         await self.runtime.worker.stop()
         await self.runtime.local_inference.stop()
-        await self.model_client.aclose()
+        await self.local_inference_client.aclose()
         await self.deepseek.aclose()
         await self.mineru.aclose()
         self._started = False
@@ -122,28 +120,29 @@ def create_application(settings: RuntimeSettings) -> Application:
     from paperos_core.adapters.cognee.pipeline import CogneePipeline
     from paperos_core.adapters.cognee.repository import CogneeRepository
     from paperos_core.adapters.llm import DeepSeekClient
-    from paperos_core.adapters.models.client import (
-        LocalModelGatewayClient,
-        LocalModelGatewayProcess,
-    )
     from paperos_core.documents import DocumentService
     from paperos_core.feedback.service import FeedbackService
     from paperos_core.health import HealthService
     from paperos_core.indexes.manager import IndexManager
     from paperos_core.indexes.rebuild import DerivedDataRebuilder
     from paperos_core.jobs.queue import JobQueue
-    from paperos_core.jobs.worker import Worker
+    from paperos_core.jobs.worker import BackgroundWorker
+    from paperos_core.runtime.local_inference.client import LocalInferenceClient
+    from paperos_core.runtime.local_inference.runtime import LocalInferenceRuntime
     from paperos_core.retrieval.service import RetrievalService
 
     reassert_cognee_runtime(paths)
-    model_client = LocalModelGatewayClient(
-        settings.models.gateway_endpoint,
-        settings.models.request_timeout_seconds,
+    local = settings.local_inference
+    local_inference_client = LocalInferenceClient(
+        f"http://{local.host}:{local.port}",
+        local.request_timeout_seconds,
     )
-    model_process = LocalModelGatewayProcess(settings, paths, model_client)
+    local_inference_runtime = LocalInferenceRuntime(
+        settings, paths, local_inference_client
+    )
     deepseek = DeepSeekClient(
         cognee_config,
-        timeout_seconds=settings.models.request_timeout_seconds,
+        timeout_seconds=local.request_timeout_seconds,
     )
     cognee_repository = CogneeRepository(paths)
     index_manager = IndexManager(
@@ -158,7 +157,6 @@ def create_application(settings: RuntimeSettings) -> Application:
         cognee_repository,
         index_manager,
         deepseek,
-        model_process,
     )
     rebuilder = DerivedDataRebuilder(paths, canonical_repository, knowledge_pipeline)
     feedback = FeedbackService(paths, canonical_repository)
@@ -170,8 +168,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         registry,
         cognee_repository,
         index_manager,
-        model_client,
-        model_process,
+        local_inference_client,
         deepseek,
         feedback,
     )
@@ -207,7 +204,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         canonical_repository,
         mineru,
         deepseek,
-        model_process,
+        local_inference_client,
         cognee_repository,
         index_manager,
         queue,
@@ -220,24 +217,33 @@ def create_application(settings: RuntimeSettings) -> Application:
         health=health,
         rebuilder=rebuilder,
     )
-    application = Application(
+    worker = BackgroundWorker(
+        queue,
+        ingestion,
+        rebuilder,
+        documents,
+        feedback,
+        poll_interval_seconds=settings.worker.poll_interval_seconds,
+    )
+    runtime = ManagedRuntime(
+        local_inference=local_inference_runtime,
+        worker=worker,
+    )
+    return Application(
         settings=settings,
         services=services,
-        runtime=None,  # type: ignore[arg-type] -- completed below without side effects.
+        runtime=runtime,
         paths=paths,
         registry=registry,
         parser_artifacts=parser_artifacts,
         canonical_repository=canonical_repository,
         canonical_mapper=canonical_mapper,
         mineru=mineru,
-        model_client=model_client,
+        local_inference_client=local_inference_client,
         deepseek=deepseek,
         knowledge_pipeline=knowledge_pipeline,
         queue=queue,
     )
-    worker = Worker(application, queue)
-    application.runtime = ManagedRuntime(local_inference=model_process, worker=worker)
-    return application
 
 
 def application_from_config(

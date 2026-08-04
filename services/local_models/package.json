@@ -1,5 +1,5 @@
 {
-  "name": "@paperos/local-model-gateway",
+  "name": "@paperos/local-inference",
   "private": true,
   "version": "0.1.0",
   "type": "module",

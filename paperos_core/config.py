@@ -93,9 +93,11 @@ class QueryExpansionModelConfig(StrictConfigModel):
     max_output_tokens: int = Field(default=512, gt=0)
 
 
-class ModelsConfig(StrictConfigModel):
-    gateway_endpoint: str = "http://127.0.0.1:8081"
+class LocalInferenceConfig(StrictConfigModel):
+    host: Literal["127.0.0.1", "localhost"] = "127.0.0.1"
+    port: int = Field(default=8081, ge=1, le=65535)
     request_timeout_seconds: int = Field(default=120, gt=0)
+    startup_timeout_seconds: int = Field(default=180, gt=0)
     embedding: EmbeddingModelConfig = Field(default_factory=EmbeddingModelConfig)
     reranker: RerankerModelConfig = Field(default_factory=RerankerModelConfig)
     query_expansion: QueryExpansionModelConfig = Field(default_factory=QueryExpansionModelConfig)
@@ -154,7 +156,7 @@ class PaperOSConfig(StrictConfigModel):
     worker: WorkerConfig = Field(default_factory=WorkerConfig)
     mineru_ocr: MinerUConfig = Field(default_factory=MinerUConfig)
     ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
-    models: ModelsConfig = Field(default_factory=ModelsConfig)
+    local_inference: LocalInferenceConfig = Field(default_factory=LocalInferenceConfig)
     indexes: IndexesConfig = Field(default_factory=IndexesConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     testing: TestingConfig = Field(default_factory=TestingConfig)

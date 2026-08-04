@@ -7,7 +7,7 @@ from typing import Any
 from paperos_core.adapters.cognee.repository import CogneeRepository
 from paperos_core.adapters.llm import DeepSeekClient
 from paperos_core.adapters.mineru.client import MinerUClient
-from paperos_core.adapters.models.client import LocalModelGatewayProcess
+from paperos_core.runtime.local_inference.client import LocalInferenceClient
 from paperos_core.indexes.manager import IndexManager
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.registry import SourceRegistry
@@ -23,7 +23,7 @@ class HealthService:
         canonical_repository: CanonicalRepository,
         mineru: MinerUClient,
         deepseek: DeepSeekClient,
-        model_process: LocalModelGatewayProcess,
+        local_inference: LocalInferenceClient,
         cognee: CogneeRepository,
         indexes: IndexManager,
         queue: JobQueue,
@@ -33,7 +33,7 @@ class HealthService:
         self.canonical_repository = canonical_repository
         self.mineru = mineru
         self.deepseek = deepseek
-        self.model_process = model_process
+        self.local_inference = local_inference
         self.cognee = cognee
         self.indexes = indexes
         self.queue = queue
@@ -62,7 +62,7 @@ class HealthService:
                 "error": f"{type(exc).__name__}: {exc}",
             }
         try:
-            local = await self.model_process.start()
+            local = await self.local_inference.health()
             components["local_models"] = {"status": "healthy", **local}
         except Exception as exc:  # noqa: BLE001 - health reports component failures.
             components["local_models"] = {

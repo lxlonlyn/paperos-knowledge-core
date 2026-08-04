@@ -41,8 +41,8 @@ export function loadConfig(): GatewayConfig {
     "Query expansion",
   );
   return {
-    host: process.env.PAPEROS_MODEL_GATEWAY_HOST ?? "127.0.0.1",
-    port: positiveInteger("PAPEROS_MODEL_GATEWAY_PORT", 8081),
+    host: process.env.PAPEROS_LOCAL_INFERENCE_HOST ?? "127.0.0.1",
+    port: positiveInteger("PAPEROS_LOCAL_INFERENCE_PORT", 8081),
     embeddingModelPath: modelPath,
     embeddingModelName: process.env.PAPEROS_EMBEDDING_MODEL_NAME ?? "embeddinggemma-300M",
     embeddingDimensions: positiveInteger("PAPEROS_EMBEDDING_DIMENSIONS", 768),
