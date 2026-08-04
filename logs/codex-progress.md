@@ -370,3 +370,72 @@
   the real neighborhood traversal in Cognee and applies the same strict typed
   edge whitelist to the returned graph edges. No manifest fallback is used.
 - Next entry: none.
+
+## 2026-08-04T09:31:16Z — Cognee Dataset/Data/PipelineContext integration
+
+- Passed gates: cumulative Gate 1–6 remain passed after making Cognee Dataset
+  provenance part of the real write and query path.
+- Review outcome: the reported gap was confirmed. PaperOS previously passed a
+  dataset name only through SourceFile/IngestionJob; `add_data_points` had no
+  `PipelineContext`, and Cognee had no Dataset, Data, DatasetData, or PipelineRun
+  rows for PaperOS documents.
+- Implementation:
+  - the selected CLI/config dataset is persisted on CanonicalSnapshot and is
+    retained through destructive rebuild;
+  - each write resolves Cognee's default single-user principal, creates or
+    resolves the authorized Dataset, registers the immutable PDF as a Data item,
+    creates DatasetData membership and an official PipelineRun, and passes the
+    complete context to `add_data_points`;
+  - successful ingestion reads Dataset/Data/PipelineRun and graph-native or
+    relational node/edge provenance back before writing mapping-version 3
+    manifests;
+  - index reports persist the Cognee dataset, data item, pipeline run, and
+    provenance-backend identifiers;
+  - query dataset selection is effective in CLI/application retrieval, with
+    cache version 4 and document filtering by canonical dataset;
+  - PaperOS serves Cognee's official Dataset and visualize routers in its
+    existing single-user API. Their dependency is explicitly bound to the same
+    Cognee default user used by writes, avoiding Cognee's import-time auth-cache
+    drift without introducing PaperOS authentication or multi-user support.
+- Commands:
+  - `PAPEROS_TEST_RUN_ID=dataset-live-20260804d LOG_LEVEL=ERROR conda run -n paperos pytest -q tests/integration/test_ingestion_pipeline.py --junitxml=data/test-runs/dataset-live-20260804d/logs/pytest-dataset-integration.xml`;
+  - `LOG_LEVEL=ERROR conda run -n paperos paperos query 'What is the main rendering representation?' --profile truth --dataset papers --top-k 3 --data-dir data/test-runs/dataset-live-20260804d/gate4-live`;
+  - controlled `paperos serve --host 127.0.0.1 --port 18000 ...` plus live HTTP
+    calls to `/api/v1/datasets`, Dataset data/graph, and `/api/v1/visualize`;
+  - `conda run -n paperos ruff check src tests`;
+  - `conda run -n paperos mypy src/paperos_core`;
+  - `conda run -n paperos pytest -q tests/unit tests/contract`.
+- Genuine PDF:
+  `3d_gaussian_splatting_for_real_time_radiance_field_rendering.pdf`
+  (`f4c0c9f27e2d02b0265017f66049d471eb66cb50203bc918f51ba07d20cbbe11`).
+  The immutable saved PDF has the identical checksum after rebuild.
+- Fresh cumulative run:
+  `data/test-runs/dataset-live-20260804d/gate4-live/`. Final Cognee binding:
+  Dataset `papers` (`7c1301ad-b6ec-59ae-94c1-1b57194aea14`), Data item
+  `ea097653-c327-5220-ad5f-c3d693058df8`, PipelineRun
+  `45428b45-5f0d-44d5-bb70-8f339fd0ec3f`; graph-native provenance readback
+  found 401 nodes and 361 edges.
+- API acceptance: official Dataset list returned `papers`; its Data list returned
+  the real PDF and immutable raw path; graph node/edge counts exactly matched the
+  post-rebuild manifest; official visualize returned HTTP 200.
+- Query acceptance: formal CLI query returned `dataset=papers`, 3 evidence
+  records from one in-dataset document, and `provenance_complete=true`; local
+  expansion/embedding/reranking and DeepSeek synthesis all ran live.
+- Tests: final live integration 2 passed, 0 failed, 0 skipped in 226.86 seconds;
+  unit/contract 12 passed, 0 failed, 0 skipped. Ruff and strict mypy passed.
+- Logs:
+  - `data/test-runs/dataset-live-20260804d/logs/pytest-dataset-integration.log`;
+  - `data/test-runs/dataset-live-20260804d/logs/pytest-dataset-integration.xml`;
+  - `data/test-runs/dataset-live-20260804d/logs/query-dataset-papers.log`;
+  - runtime Cognee/model-gateway logs under the run's `gate4-live/logs/`.
+- Protected evidence: rebuild hash checks confirmed raw PDF, MinerU parser
+  artifacts, and canonical files were unchanged.
+- Sensitive configuration: `.env`, `config/paperos.toml`, all runtime `data/`,
+  databases, logs, and model files remain ignored; only
+  `config/paperos.example.toml` is tracked and its API key is empty.
+- Process lifecycle: the test-owned model gateway and port 18000 server exited;
+  no test-owned gateway, API, worker, or pytest process remains.
+- Known limitation: Cognee emits upstream Pydantic deprecation and edge-label
+  fallback warnings for non-indexed Element/Reference nodes; Dataset,
+  provenance, graph, and vector readback remain valid.
+- Next entry: none.

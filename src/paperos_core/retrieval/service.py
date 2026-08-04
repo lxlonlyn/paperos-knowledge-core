@@ -69,6 +69,8 @@ class RetrievalService:
         self.planner = QueryPlanner(config)
 
     async def query(self, request: QueryRequest) -> QueryResponse:
+        dataset_name = (request.dataset or self.config.dataset).strip()
+        request = request.model_copy(update={"dataset": dataset_name})
         corpus = CorpusView.load(
             self.paths, self.canonical_repository, self.registry
         )
@@ -77,7 +79,9 @@ class RetrievalService:
         if cached is not None:
             return cached
         await self.model_process.start()
-        document_ids = corpus.filtered_document_ids(request.document_ids)
+        document_ids = corpus.filtered_document_ids(
+            request.document_ids, dataset_name
+        )
         plan = self.planner.plan(request)
         expansion_result = await self.model_client.expand_query(
             request.query, profile=request.profile.value
@@ -242,6 +246,7 @@ class RetrievalService:
             id=cache_key,
             query=request.query,
             profile=request.profile,
+            dataset=dataset_name,
             answer=answer,
             answer_model=self.deepseek.config.llm_model,
             stages=stages,

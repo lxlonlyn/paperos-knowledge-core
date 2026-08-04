@@ -45,6 +45,18 @@ def test_invalid_config_is_actionable(gate1_run_dir: Path) -> None:
     assert str(config_path) in raised.value.affected
 
 
+def test_blank_project_dataset_is_rejected(gate1_run_dir: Path) -> None:
+    config_path = gate1_run_dir / "config-blank-dataset" / "paperos.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        f'[project]\ndata_dir = "{gate1_run_dir / "blank-dataset"}"\ndataset = "   "\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="project.dataset must not be blank"):
+        load_config(config_path, environ={})
+
+
 def test_mineru_api_key_can_persist_in_project_config(gate1_run_dir: Path) -> None:
     config_path = gate1_run_dir / "config-secret" / "paperos.toml"
     _write_config(

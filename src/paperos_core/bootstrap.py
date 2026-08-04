@@ -127,6 +127,7 @@ def build_application(
     knowledge_pipeline = CogneePipeline(
         paths,
         canonical_repository,
+        registry,
         cognee_repository,
         index_manager,
         deepseek,

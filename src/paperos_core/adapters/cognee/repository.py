@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from paperos_core.adapters.cognee.models import DataPointGraph
 from paperos_core.domain.datapoints import cognee_uuid
+from paperos_core.domain.documents import SourceFile
 from paperos_core.domain.provenance import RelationRecord
 from paperos_core.errors import CogneeStorageError
 from paperos_core.paths import DataPaths
@@ -58,42 +60,427 @@ class CogneeTraversalEvidence:
     score: float
 
 
+@dataclass(frozen=True, slots=True)
+class CogneeDatasetBinding:
+    user_id: str
+    dataset_id: str
+    dataset_name: str
+    data_id: str
+    data_name: str
+    pipeline_id: str
+    pipeline_run_id: str
+    pipeline_name: str
+    provenance_backend: str = "pending"
+    provenance_node_count: int = 0
+    provenance_edge_count: int = 0
+
+
 class CogneeRepository:
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
         self.manifest_root = paths.cognee / "manifests"
         self.manifest_root.mkdir(parents=True, exist_ok=True)
 
+    async def _create_pipeline_context(
+        self,
+        *,
+        dataset_name: str,
+        source: SourceFile,
+        snapshot_id: str,
+        document_id: str,
+        title: str,
+    ) -> tuple[Any, CogneeDatasetBinding, Any, Any]:
+        """Create Cognee's relational User/Dataset/Data/PipelineRun context."""
+        from cognee.modules.data.methods import (  # type: ignore[import-untyped]
+            create_authorized_dataset,
+            get_authorized_dataset_by_name,
+            get_unique_data_id,
+        )
+        from cognee.modules.engine.operations.setup import (  # type: ignore[import-untyped]
+            setup,
+        )
+        from cognee.modules.pipelines.models import (  # type: ignore[import-untyped]
+            PipelineContext,
+        )
+        from cognee.modules.pipelines.utils import (  # type: ignore[import-untyped]
+            generate_pipeline_id,
+        )
+        from cognee.modules.users.methods import (  # type: ignore[import-untyped]
+            get_default_user,
+        )
+
+        selected_dataset = dataset_name.strip()
+        if not selected_dataset:
+            raise CogneeStorageError("Cognee dataset name must not be empty.")
+        try:
+            await setup()
+            user = await get_default_user()
+            dataset = await get_authorized_dataset_by_name(
+                selected_dataset, user, "write"
+            )
+            if dataset is None:
+                dataset = await create_authorized_dataset(selected_dataset, user)
+            data_id = await get_unique_data_id(source.sha256, user)
+            data_item = await self._upsert_data_item(
+                user=user,
+                dataset=dataset,
+                data_id=data_id,
+                source=source,
+                snapshot_id=snapshot_id,
+                document_id=document_id,
+                title=title,
+            )
+            pipeline_name = "paperos_knowledge_ingestion"
+            pipeline_id = generate_pipeline_id(user.id, dataset.id, pipeline_name)
+            pipeline_operations = importlib.import_module(
+                "cognee.modules.pipelines.operations"
+            )
+            pipeline_run = await pipeline_operations.log_pipeline_run_start(
+                pipeline_id,
+                pipeline_name,
+                dataset.id,
+                [data_item],
+            )
+        except CogneeStorageError:
+            raise
+        except Exception as exc:
+            raise CogneeStorageError(
+                f"Cognee failed to establish Dataset/Data provenance context: {exc}",
+                affected=selected_dataset,
+            ) from exc
+        ctx = PipelineContext(
+            user=user,
+            dataset=dataset,
+            data_item=data_item,
+            pipeline_run_id=pipeline_run.pipeline_run_id,
+            pipeline_name=pipeline_name,
+            extras={
+                "paperos_snapshot_id": snapshot_id,
+                "paperos_document_id": document_id,
+                "paperos_source_file_id": source.id,
+            },
+        )
+        binding = CogneeDatasetBinding(
+            user_id=str(user.id),
+            dataset_id=str(dataset.id),
+            dataset_name=str(dataset.name),
+            data_id=str(data_item.id),
+            data_name=str(data_item.name),
+            pipeline_id=str(pipeline_id),
+            pipeline_run_id=str(pipeline_run.pipeline_run_id),
+            pipeline_name=pipeline_name,
+        )
+        return ctx, binding, pipeline_id, data_item
+
+    async def _upsert_data_item(
+        self,
+        *,
+        user: Any,
+        dataset: Any,
+        data_id: Any,
+        source: SourceFile,
+        snapshot_id: str,
+        document_id: str,
+        title: str,
+    ) -> Any:
+        """Register one immutable PaperOS PDF as a Cognee relational Data item."""
+        from cognee.infrastructure.databases.relational import (  # type: ignore[import-untyped]
+            get_relational_engine,
+        )
+        from cognee.modules.data.models import (  # type: ignore[import-untyped]
+            Data,
+            DatasetData,
+        )
+
+        attributes = {
+            "name": source.original_filename,
+            "label": title,
+            "extension": "pdf",
+            "mime_type": source.media_type,
+            "original_extension": "pdf",
+            "original_mime_type": source.media_type,
+            "loader_engine": "paperos_canonical",
+            "raw_data_location": str(source.storage_path),
+            "original_data_location": str(source.storage_path),
+            "owner_id": user.id,
+            "tenant_id": user.tenant_id,
+            "content_hash": source.sha256,
+            "raw_content_hash": source.sha256,
+            "external_metadata": {
+                "paperos": {
+                    "source_file_id": source.id,
+                    "canonical_snapshot_id": snapshot_id,
+                    "document_id": document_id,
+                    "source_sha256": source.sha256,
+                }
+            },
+            "pipeline_status": {"paperos_knowledge_ingestion": "registered"},
+            "token_count": -1,
+            "data_size": source.size_bytes,
+            "importance_weight": 0.5,
+        }
+        engine = get_relational_engine()
+        async with engine.get_async_session() as session:
+            data_item = await session.get(Data, data_id)
+            if data_item is None:
+                data_item = Data(id=data_id, **attributes)
+                session.add(data_item)
+            else:
+                for key, value in attributes.items():
+                    setattr(data_item, key, value)
+            association = await session.get(
+                DatasetData,
+                {"dataset_id": dataset.id, "data_id": data_id},
+            )
+            if association is None:
+                session.add(DatasetData(dataset_id=dataset.id, data_id=data_id))
+            await session.commit()
+            await session.refresh(data_item)
+            return data_item
+
+    async def _record_pipeline_error(
+        self, ctx: Any, pipeline_id: Any, data_item: Any, error: Exception
+    ) -> None:
+        try:
+            pipeline_operations = importlib.import_module(
+                "cognee.modules.pipelines.operations"
+            )
+            await pipeline_operations.log_pipeline_run_error(
+                ctx.pipeline_run_id,
+                pipeline_id,
+                ctx.pipeline_name,
+                ctx.dataset.id,
+                [data_item],
+                error,
+            )
+        except Exception:  # noqa: BLE001
+            # Preserve the structured-write failure as the actionable error.
+            return
+
+    async def verify_dataset_binding(
+        self, binding: CogneeDatasetBinding
+    ) -> CogneeDatasetBinding:
+        """Read Dataset/Data/PipelineRun and graph provenance back from Cognee."""
+        from cognee.infrastructure.databases.graph.get_graph_engine import (  # type: ignore[import-untyped]
+            get_graph_engine,
+        )
+        from cognee.infrastructure.databases.provenance import (  # type: ignore[import-untyped]
+            make_source_ref_key,
+        )
+        from cognee.infrastructure.databases.relational import (
+            get_relational_engine,
+        )
+        from cognee.modules.data.models import (
+            Data,
+            Dataset,
+            DatasetData,
+        )
+        from cognee.modules.graph.models import Edge, Node  # type: ignore[import-untyped]
+        from cognee.modules.pipelines.models import (
+            PipelineRun,
+            PipelineRunStatus,
+        )
+        from sqlalchemy import func, select
+
+        dataset_uuid = UUID(binding.dataset_id)
+        data_uuid = UUID(binding.data_id)
+        run_uuid = UUID(binding.pipeline_run_id)
+        engine = get_relational_engine()
+        async with engine.get_async_session() as session:
+            dataset = await session.get(Dataset, dataset_uuid)
+            data_item = await session.get(Data, data_uuid)
+            association = await session.get(
+                DatasetData,
+                {"dataset_id": dataset_uuid, "data_id": data_uuid},
+            )
+            completed_run = (
+                await session.scalars(
+                    select(PipelineRun).where(
+                        PipelineRun.pipeline_run_id == run_uuid,
+                        PipelineRun.dataset_id == dataset_uuid,
+                        PipelineRun.status
+                        == PipelineRunStatus.DATASET_PROCESSING_COMPLETED,
+                    )
+                )
+            ).first()
+            ledger_nodes = int(
+                await session.scalar(
+                    select(func.count()).select_from(Node).where(
+                        Node.dataset_id == dataset_uuid,
+                        Node.data_id == data_uuid,
+                    )
+                )
+                or 0
+            )
+            ledger_edges = int(
+                await session.scalar(
+                    select(func.count()).select_from(Edge).where(
+                        Edge.dataset_id == dataset_uuid,
+                        Edge.data_id == data_uuid,
+                    )
+                )
+                or 0
+            )
+        failures = []
+        if dataset is None or str(dataset.name) != binding.dataset_name:
+            failures.append("dataset")
+        if data_item is None or str(data_item.name) != binding.data_name:
+            failures.append("data_item")
+        if association is None:
+            failures.append("dataset_data")
+        if completed_run is None:
+            failures.append("pipeline_run")
+        graph_nodes = 0
+        graph_edges = 0
+        try:
+            graph = await get_graph_engine()
+            source_ref = make_source_ref_key(dataset_uuid, data_uuid)
+            graph_nodes = len(await graph.find_nodes_by_source_ref(source_ref))
+            graph_edges = len(await graph.find_edges_by_source_ref(source_ref))
+        except Exception:  # noqa: BLE001
+            # Older/unmarked providers keep the authoritative provenance ledger
+            # in the relational Node/Edge tables instead of graph properties.
+            graph_nodes = 0
+            graph_edges = 0
+        provenance_backend = "graph" if graph_nodes else "relational"
+        node_count = graph_nodes or ledger_nodes
+        edge_count = graph_edges or ledger_edges
+        if node_count == 0 or edge_count == 0:
+            failures.append("node_edge_provenance")
+        if failures:
+            raise CogneeStorageError(
+                "Cognee Dataset/Data/PipelineRun provenance readback failed.",
+                affected=binding.dataset_name,
+                details={"missing": failures},
+            )
+        return replace(
+            binding,
+            provenance_backend=provenance_backend,
+            provenance_node_count=node_count,
+            provenance_edge_count=edge_count,
+        )
+
+    async def list_datasets(self) -> list[dict[str, object]]:
+        """List datasets visible to Cognee's single-user default principal."""
+        from cognee.modules.data.methods import (
+            get_dataset_data,
+        )
+        from cognee.modules.engine.operations.setup import setup
+        from cognee.modules.users.methods import (
+            get_default_user,
+        )
+        from cognee.modules.users.permissions.methods import (  # type: ignore[import-untyped]
+            get_all_user_permission_datasets,
+        )
+
+        await setup()
+        user = await get_default_user()
+        datasets = await get_all_user_permission_datasets(user, "read")
+        result: list[dict[str, object]] = []
+        for dataset in sorted(datasets, key=lambda item: (item.name, str(item.id))):
+            data_items = await get_dataset_data(dataset.id)
+            result.append(
+                {
+                    "id": str(dataset.id),
+                    "name": str(dataset.name),
+                    "ownerId": str(dataset.owner_id),
+                    "tenantId": (
+                        str(dataset.tenant_id) if dataset.tenant_id is not None else None
+                    ),
+                    "createdAt": (
+                        dataset.created_at.isoformat()
+                        if dataset.created_at is not None
+                        else None
+                    ),
+                    "updatedAt": (
+                        dataset.updated_at.isoformat()
+                        if dataset.updated_at is not None
+                        else None
+                    ),
+                    "dataCount": len(data_items),
+                }
+            )
+        return result
+
     async def upsert_document_graph(
-        self, graph: DataPointGraph, *, snapshot_id: str, document_id: str
-    ) -> Path:
+        self,
+        graph: DataPointGraph,
+        *,
+        snapshot_id: str,
+        document_id: str,
+        dataset_name: str,
+        source: SourceFile,
+        title: str,
+    ) -> tuple[Path, CogneeDatasetBinding]:
         from cognee.tasks.storage.add_data_points import (  # type: ignore[import-untyped]
             add_data_points,
         )
 
         custom_edges = [_custom_edge(relation, graph.id_mapping) for relation in graph.relations]
+        ctx, binding, pipeline_id, data_item = await self._create_pipeline_context(
+            dataset_name=dataset_name,
+            source=source,
+            snapshot_id=snapshot_id,
+            document_id=document_id,
+            title=title,
+        )
         try:
             written = await add_data_points(
                 graph.nodes,
                 custom_edges=custom_edges,
                 embed_triplets=False,
+                ctx=ctx,
+            )
+            if len(written) != len(graph.nodes):
+                raise CogneeStorageError(
+                    "Cognee returned an unexpected structured write count.",
+                    affected=snapshot_id,
+                    details={"expected": len(graph.nodes), "actual": len(written)},
+                )
+            pipeline_operations = importlib.import_module(
+                "cognee.modules.pipelines.operations"
+            )
+
+            await pipeline_operations.log_pipeline_run_complete(
+                ctx.pipeline_run_id,
+                pipeline_id,
+                ctx.pipeline_name,
+                ctx.dataset.id,
+                [data_item],
             )
         except Exception as exc:
+            await self._record_pipeline_error(ctx, pipeline_id, data_item, exc)
             raise CogneeStorageError(
                 f"Cognee failed to write structured DataPoints: {exc}",
                 affected=self.paths.cognee,
             ) from exc
-        if len(written) != len(graph.nodes):
-            raise CogneeStorageError(
-                "Cognee returned an unexpected structured write count.",
-                affected=snapshot_id,
-                details={"expected": len(graph.nodes), "actual": len(written)},
-            )
+        binding = await self.verify_dataset_binding(binding)
         manifest_path = self.manifest_root / f"{snapshot_id}.json"
         manifest = {
-            "mapping_version": "2",
+            "mapping_version": "3",
             "canonical_snapshot_id": snapshot_id,
             "document_id": document_id,
+            "dataset": {
+                "id": binding.dataset_id,
+                "name": binding.dataset_name,
+                "owner_id": binding.user_id,
+            },
+            "data_item": {
+                "id": binding.data_id,
+                "name": binding.data_name,
+                "source_file_id": source.id,
+                "source_sha256": source.sha256,
+            },
+            "pipeline": {
+                "id": binding.pipeline_id,
+                "run_id": binding.pipeline_run_id,
+                "name": binding.pipeline_name,
+            },
+            "provenance": {
+                "backend": binding.provenance_backend,
+                "node_count": binding.provenance_node_count,
+                "edge_count": binding.provenance_edge_count,
+            },
             "node_count": len(graph.nodes),
             "relation_count": len(graph.relations),
             "canonical_to_cognee_id": graph.id_mapping,
@@ -101,10 +488,10 @@ class CogneeRepository:
             "relations": [relation.model_dump(mode="json") for relation in graph.relations],
         }
         _atomic_json(manifest_path, manifest)
-        return manifest_path
+        return manifest_path, binding
 
     async def get_datapoint(self, canonical_id: str) -> dict[str, Any]:
-        from cognee.infrastructure.databases.graph.get_graph_engine import (  # type: ignore[import-untyped]
+        from cognee.infrastructure.databases.graph.get_graph_engine import (
             get_graph_engine,
         )
 

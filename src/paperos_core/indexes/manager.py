@@ -7,6 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from paperos_core.adapters.cognee.repository import CogneeDatasetBinding
 from paperos_core.domain.canonical import CanonicalBundle
 from paperos_core.errors import IndexStorageError
 from paperos_core.indexes.lexical_store import LexicalStore
@@ -35,11 +36,17 @@ class IndexManager:
         cognee_object_ids: list[str],
         cognee_vector_object_ids: list[str],
         relation_count: int,
+        dataset_binding: CogneeDatasetBinding,
     ) -> tuple[IndexManifest, Path]:
         lexical_ids = self.lexical.upsert_bundle(bundle)
         manifest = IndexManifest(
             canonical_snapshot_id=bundle.snapshot.id,
             document_id=bundle.document.id,
+            dataset_name=dataset_binding.dataset_name,
+            cognee_dataset_id=dataset_binding.dataset_id,
+            cognee_data_id=dataset_binding.data_id,
+            cognee_pipeline_run_id=dataset_binding.pipeline_run_id,
+            cognee_provenance_backend=dataset_binding.provenance_backend,
             embedding_model=self.embedding_model,
             embedding_dimensions=self.embedding_dimensions,
             lexical_database=self.lexical.path,

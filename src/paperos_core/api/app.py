@@ -26,6 +26,34 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         application = build_application(config_path=config_path, data_dir=data_dir)
         app.state.paperos = application
+        if not getattr(app.state, "cognee_routes_attached", False):
+            from cognee.api.v1.datasets.routers import (  # type: ignore[import-untyped]
+                get_datasets_router,
+            )
+            from cognee.api.v1.users.routers import (  # type: ignore[import-untyped]
+                get_visualize_router,
+            )
+            from cognee.modules.users.methods import (  # type: ignore[import-untyped]
+                get_authenticated_user,
+                get_default_user,
+            )
+
+            # PaperOS is intentionally single-user. Cognee computes its auth
+            # dependency at module import time, so explicitly bind official
+            # routers to the same default principal used by the write path.
+            app.dependency_overrides[get_authenticated_user] = get_default_user
+
+            app.include_router(
+                get_datasets_router(),
+                prefix="/api/v1/datasets",
+                tags=["cognee-datasets"],
+            )
+            app.include_router(
+                get_visualize_router(),
+                prefix="/api/v1/visualize",
+                tags=["cognee-visualize"],
+            )
+            app.state.cognee_routes_attached = True
         try:
             yield
         finally:
@@ -49,7 +77,9 @@ def create_app(
 
     @api.post("/api/v1/ingest")
     async def ingest(
-        request: Request, file: Annotated[UploadFile, File()]
+        request: Request,
+        file: Annotated[UploadFile, File()],
+        dataset: str | None = None,
     ) -> dict[str, object]:
         application: Application = request.app.state.paperos
         filename = Path(file.filename or "upload.pdf").name
@@ -60,7 +90,9 @@ def create_app(
             with temporary.open("wb") as stream:
                 while chunk := await file.read(1024 * 1024):
                     stream.write(chunk)
-            result = await application.ingestion.ingest_pdf_to_knowledge(temporary)
+            result = await application.ingestion.ingest_pdf_to_knowledge(
+                temporary, dataset=dataset
+            )
             return result.public_dict()
         finally:
             temporary.unlink(missing_ok=True)

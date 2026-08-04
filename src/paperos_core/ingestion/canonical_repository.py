@@ -128,6 +128,7 @@ class CanonicalRepository:
             "source_file_id": snapshot.source_file_id,
             "parse_run_id": snapshot.parse_run_id,
             "document_id": snapshot.document_id,
+            "dataset_id": snapshot.dataset_id,
             "counts": {
                 "sections": len(bundle.sections),
                 "elements": len(bundle.elements),

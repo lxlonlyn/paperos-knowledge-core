@@ -168,6 +168,7 @@ class CanonicalSnapshot(DomainModel):
     parse_run_id: str
     document_id: str
     manifest_path: Path
+    dataset_id: str = "papers"
     created_at: datetime = Field(default_factory=utc_now)
     schema_version: str = CANONICAL_SCHEMA_VERSION
     id_version: str = CANONICAL_ID_VERSION

@@ -762,6 +762,23 @@ The mapping must explicitly declare:
 
 Objects that do not have reliable identity information must not be aggressively deduplicated.
 
+## Cognee dataset binding
+
+Every persisted DataPoint graph is bound to Cognee's relational provenance
+models:
+
+* User: Cognee's default principal in the supported single-user deployment;
+* Dataset: the canonical snapshot's `dataset_id` name;
+* Data: one item identified from source SHA-256 and Cognee user identity;
+* DatasetData: membership of that source item in the selected Dataset;
+* PipelineRun: one versioned structured-write execution;
+* PipelineContext: the context passed to every node and custom edge write.
+
+The Cognee manifest records these IDs and the graph/relational provenance
+counts. It is an audit projection, not the source used to infer Dataset
+membership. A rebuild recreates all bindings from the retained canonical
+snapshot and immutable SourceFile.
+
 ## Index representations
 
 Lexical and vector indexes are projections of canonical or semantic objects.

@@ -43,6 +43,10 @@ class ConfigurationError(PaperOSError):
     code = "configuration_error"
 
 
+class InvalidDatasetError(PaperOSError):
+    code = "invalid_dataset"
+
+
 class MissingSourceFileError(PaperOSError):
     code = "missing_source_file"
 

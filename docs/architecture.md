@@ -156,6 +156,8 @@ The Cognee adapter maps canonical and derived objects into Cognee DataPoints.
 Responsibilities include:
 
 * DataPoint declarations;
+* registration of the Cognee default User, Dataset, Data item, and PipelineRun;
+* `PipelineContext` propagation for every DataPoint and custom edge write;
 * identity and embeddable fields;
 * deterministic writes;
 * typed graph relations;
@@ -175,6 +177,13 @@ Triplet DataPoints, resolves those hits to Cognee graph nodes, performs typed
 multi-hop traversal in the configured graph engine, and backtracks graph edge
 provenance to canonical chunks. Cognee manifests and enrichment JSON files are
 rebuild/audit artifacts; retrieval must not scan them as query indexes.
+
+The canonical snapshot stores the selected PaperOS dataset name. The adapter
+creates or resolves that name through Cognee's authorized Dataset API, binds
+one Cognee Data item to each immutable source PDF, and passes the resulting
+context to `add_data_points`. Dataset/Data and pipeline-run rows are verified
+after the graph write. PaperOS remains a single-user deployment and uses
+Cognee's default user; this does not introduce a PaperOS authentication layer.
 
 ## Lexical index
 

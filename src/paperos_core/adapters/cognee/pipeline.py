@@ -20,6 +20,7 @@ from paperos_core.errors import CogneeStorageError
 from paperos_core.indexes.manager import IndexManager
 from paperos_core.indexes.manifest import IndexingReport
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
+from paperos_core.ingestion.registry import SourceRegistry
 from paperos_core.paths import DataPaths
 
 
@@ -42,6 +43,7 @@ class CogneePipeline:
         self,
         paths: DataPaths,
         canonical_repository: CanonicalRepository,
+        source_registry: SourceRegistry,
         cognee_repository: CogneeRepository,
         index_manager: IndexManager,
         deepseek: DeepSeekClient,
@@ -49,6 +51,7 @@ class CogneePipeline:
     ) -> None:
         self.paths = paths
         self.canonical_repository = canonical_repository
+        self.source_registry = source_registry
         self.cognee_repository = cognee_repository
         self.index_manager = index_manager
         self.deepseek = deepseek
@@ -77,10 +80,17 @@ class CogneePipeline:
         enrichment_path = self._persist_enrichment(bundle, enrichment)
         graph = canonical_to_datapoints(bundle, enrichment)
         graph.relations.extend(resolve_citations(bundle, self.canonical_repository.list_bundles()))
-        cognee_manifest = await self.cognee_repository.upsert_document_graph(
+        source = self.source_registry.get_source(bundle.snapshot.source_file_id)
+        (
+            cognee_manifest,
+            dataset_binding,
+        ) = await self.cognee_repository.upsert_document_graph(
             graph,
             snapshot_id=bundle.snapshot.id,
             document_id=bundle.document.id,
+            dataset_name=bundle.snapshot.dataset_id,
+            source=source,
+            title=bundle.document.title,
         )
         await self.cognee_repository.verify_graph(graph)
         cognee_vector_ids = await self.cognee_repository.verify_vector_indexes(graph)
@@ -90,6 +100,7 @@ class CogneePipeline:
             cognee_object_ids=sorted(graph.id_mapping),
             cognee_vector_object_ids=cognee_vector_ids,
             relation_count=len(graph.relations),
+            dataset_binding=dataset_binding,
         )
         report = IndexingReport(
             canonical_snapshot_id=bundle.snapshot.id,
@@ -98,6 +109,11 @@ class CogneePipeline:
             cognee_manifest_path=cognee_manifest,
             lexical_database=index_manifest.lexical_database,
             vector_database=index_manifest.vector_database,
+            dataset_name=dataset_binding.dataset_name,
+            cognee_dataset_id=dataset_binding.dataset_id,
+            cognee_data_id=dataset_binding.data_id,
+            cognee_pipeline_run_id=dataset_binding.pipeline_run_id,
+            cognee_provenance_backend=dataset_binding.provenance_backend,
             cognee_object_count=len(graph.nodes),
             relation_count=len(graph.relations),
             lexical_object_count=len(index_manifest.lexical_object_ids),

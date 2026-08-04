@@ -24,6 +24,14 @@ class ProjectConfig(StrictConfigModel):
     data_dir: Path = DEFAULT_DATA_DIR
     dataset: str = "papers"
 
+    @field_validator("dataset")
+    @classmethod
+    def dataset_must_not_be_blank(cls, value: str) -> str:
+        selected = value.strip()
+        if not selected:
+            raise ValueError("project.dataset must not be blank")
+        return selected
+
 
 class APIConfig(StrictConfigModel):
     host: str = "127.0.0.1"

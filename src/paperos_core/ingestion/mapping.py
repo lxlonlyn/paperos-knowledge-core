@@ -22,4 +22,5 @@ class CanonicalMapper(Protocol):
         parse_run: ParseRun,
         artifacts: list[ParserArtifact],
         manifest_path: Path,
+        dataset_id: str | None = None,
     ) -> CanonicalBundle: ...

@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class RetrievalProfile(StrEnum):
@@ -19,9 +19,19 @@ class QueryRequest(BaseModel):
 
     query: str = Field(min_length=1)
     profile: RetrievalProfile = RetrievalProfile.COMPREHENSIVE
-    dataset: str = "papers"
+    dataset: str | None = Field(default=None, min_length=1)
     top_k: int | None = Field(default=None, gt=0, le=100)
     document_ids: list[str] | None = None
+
+    @field_validator("dataset")
+    @classmethod
+    def normalize_dataset(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        selected = value.strip()
+        if not selected:
+            raise ValueError("dataset must not be blank")
+        return selected
 
 
 class QueryPlan(BaseModel):
@@ -104,6 +114,7 @@ class QueryResponse(BaseModel):
     id: str
     query: str
     profile: RetrievalProfile
+    dataset: str
     answer: str
     answer_model: str
     stages: list[str]

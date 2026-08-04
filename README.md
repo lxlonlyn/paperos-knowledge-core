@@ -259,6 +259,13 @@ The default local Cognee deployment uses:
 
 All three stores reside under `DATA_DIR/cognee/`.
 
+`project.dataset` (or `paperos ingest --dataset`) is materialized as an actual
+Cognee Dataset. Each immutable source PDF is registered as a Cognee Data item,
+and every structured write carries Cognee's default single-user principal,
+Dataset, Data item, and PipelineRun in a `PipelineContext`. The official
+Dataset and visualization APIs can therefore inspect the same nodes written by
+PaperOS; manifests only record the binding for audit and rebuild.
+
 Cognee/LanceDB is the sole semantic vector layer. Chunk text is embedded once
 through `ChunkDataPoint.metadata.index_fields`; PaperOS does not create an
 additional `indexes/vectors.sqlite3`. Semantic, Entity/Claim, Summary, and
@@ -434,6 +441,12 @@ Association-oriented query:
 
 ```
 paperos query "这些方法之间有哪些潜在联系？" --profile associative
+```
+
+Limit a query to a configured Cognee dataset:
+
+```
+paperos query "这些方法之间有哪些潜在联系？" --dataset papers
 ```
 
 ### Status
@@ -657,6 +670,10 @@ POST   /api/v1/documents/{document_id}/reprocess
 POST   /api/v1/feedback
 POST   /api/v1/improve
 GET    /api/v1/health
+GET    /api/v1/datasets
+GET    /api/v1/datasets/{dataset_id}/data
+GET    /api/v1/datasets/{dataset_id}/graph
+GET    /api/v1/visualize?dataset_id={dataset_id}
 ```
 
 ## Completion criteria

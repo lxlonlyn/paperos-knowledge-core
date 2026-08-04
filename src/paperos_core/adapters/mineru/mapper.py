@@ -65,6 +65,7 @@ class MinerUCanonicalMapper:
         parse_run: ParseRun,
         artifacts: list[ParserArtifact],
         manifest_path: Path,
+        dataset_id: str | None = None,
     ) -> CanonicalBundle:
         if parse_run.status != ParseRunStatus.COMPLETED:
             raise CanonicalMappingError(
@@ -87,6 +88,7 @@ class MinerUCanonicalMapper:
             parse_run_id=parse_run.id,
             document_id=document_identifier,
             manifest_path=manifest_path,
+            dataset_id=(dataset_id or source.dataset_id or "papers"),
             created_at=timestamp,
             schema_version=CANONICAL_SCHEMA_VERSION,
             pipeline_version=CANONICAL_PIPELINE_VERSION,

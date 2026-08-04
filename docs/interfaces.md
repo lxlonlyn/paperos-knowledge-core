@@ -272,7 +272,7 @@ The Cognee repository accepts canonical and derived domain objects.
 Expected operations:
 
 ```
-upsert_document_graph(...)
+upsert_document_graph(..., dataset_name, source, title)
 upsert_datapoints(...)
 get_datapoint(...)
 get_document_graph(...)
@@ -293,6 +293,8 @@ search_vectors(...)
 traverse(..., depth, edge_types)
 verify_vector_indexes(...)
 vector_status(...)
+verify_dataset_binding(...)
+list_datasets(...)
 ```
 
 `search_vectors` queries Cognee's configured vector engine and resolves every
@@ -300,6 +302,13 @@ hit through the Cognee graph node carrying the same deterministic ID.
 `traverse` delegates typed multi-hop expansion to the configured Cognee graph
 engine and returns canonical chunk provenance stored on graph nodes and edges.
 Manifest and enrichment JSON files are not retrieval indexes.
+
+`upsert_document_graph` must resolve or create an authorized Cognee Dataset,
+register the immutable PDF as a Cognee Data item, start a Cognee PipelineRun,
+and pass a `PipelineContext(user, dataset, data_item, pipeline_run_id, ...)` to
+`add_data_points`. A successful return requires relational and graph provenance
+readback. The selected dataset comes from the versioned CanonicalSnapshot, so a
+CLI override survives rebuild.
 
 ## Cognee pipeline interface
 
@@ -728,6 +737,10 @@ DELETE /api/v1/documents/{document_id}
 POST   /api/v1/documents/{document_id}/reprocess
 POST   /api/v1/feedback
 GET    /api/v1/health
+GET    /api/v1/datasets
+GET    /api/v1/datasets/{dataset_id}/data
+GET    /api/v1/datasets/{dataset_id}/graph
+GET    /api/v1/visualize?dataset_id={dataset_id}
 ```
 
 Authentication is not required.

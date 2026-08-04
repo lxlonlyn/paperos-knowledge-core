@@ -118,10 +118,15 @@ class CorpusView:
         )
 
     def filtered_document_ids(
-        self, requested_document_ids: list[str] | None
+        self,
+        requested_document_ids: list[str] | None,
+        dataset_name: str,
     ) -> set[str]:
-        return (
-            set(requested_document_ids)
-            if requested_document_ids is not None
-            else set(self.bundles)
-        )
+        dataset_documents = {
+            document_id
+            for document_id, bundle in self.bundles.items()
+            if bundle.snapshot.dataset_id == dataset_name
+        }
+        if requested_document_ids is None:
+            return dataset_documents
+        return dataset_documents.intersection(requested_document_ids)

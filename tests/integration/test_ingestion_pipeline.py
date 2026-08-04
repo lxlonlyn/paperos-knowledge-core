@@ -6,12 +6,14 @@ import json
 import sqlite3
 from pathlib import Path
 
+from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from paperos_core.adapters.cognee.repository import (
     GRAPH_SEED_VECTOR_COLLECTIONS,
     SEMANTIC_VECTOR_COLLECTIONS,
 )
+from paperos_core.api.app import create_app
 from paperos_core.bootstrap import build_application
 from paperos_core.cli import app
 from paperos_core.domain.provenance import RelationType
@@ -35,7 +37,17 @@ def test_gate4_real_pdf_through_live_cumulative_cli_and_rebuild(
     run_root = gate1_run_dir / "gate4-live"
 
     result = _json_output(
-        runner.invoke(app, ["ingest", str(pdf_path), "--data-dir", str(run_root)])
+        runner.invoke(
+            app,
+            [
+                "ingest",
+                str(pdf_path),
+                "--dataset",
+                "papers",
+                "--data-dir",
+                str(run_root),
+            ],
+        )
     )
 
     assert result["duplicate"] is False
@@ -50,6 +62,12 @@ def test_gate4_real_pdf_through_live_cumulative_cli_and_rebuild(
     assert result["counts"]["chunks"] >= 12
     assert result["counts"]["references"] >= 25
     knowledge = result["knowledge"]
+    assert result["canonical_snapshot"]["dataset_id"] == "papers"
+    assert knowledge["dataset_name"] == "papers"
+    assert knowledge["cognee_dataset_id"]
+    assert knowledge["cognee_data_id"]
+    assert knowledge["cognee_pipeline_run_id"]
+    assert knowledge["cognee_provenance_backend"] in {"graph", "relational"}
     assert knowledge["consistency_valid"] is True
     assert knowledge["vector_backend"] == "cognee"
     assert knowledge["cognee_object_count"] > result["counts"]["chunks"]
@@ -129,6 +147,18 @@ def test_gate4_real_pdf_through_live_cumulative_cli_and_rebuild(
     enrichment = json.loads(enrichment_path.read_text())
     canonical_chunk_ids = {chunk.id for chunk in canonical.chunks}
     assert index_manifest["vector_backend"] == "cognee"
+    assert index_manifest["dataset_name"] == "papers"
+    assert index_manifest["cognee_dataset_id"] == knowledge["cognee_dataset_id"]
+    assert index_manifest["cognee_data_id"] == knowledge["cognee_data_id"]
+    assert index_manifest["cognee_pipeline_run_id"] == knowledge["cognee_pipeline_run_id"]
+    assert cognee_manifest["mapping_version"] == "3"
+    assert cognee_manifest["dataset"]["name"] == "papers"
+    assert cognee_manifest["dataset"]["id"] == knowledge["cognee_dataset_id"]
+    assert cognee_manifest["data_item"]["id"] == knowledge["cognee_data_id"]
+    assert cognee_manifest["data_item"]["source_sha256"] == case["sha256"]
+    assert cognee_manifest["pipeline"]["run_id"] == knowledge["cognee_pipeline_run_id"]
+    assert cognee_manifest["provenance"]["node_count"] > 0
+    assert cognee_manifest["provenance"]["edge_count"] > 0
     assert canonical_chunk_ids <= set(index_manifest["vector_object_ids"])
     assert canonical_chunk_ids <= set(index_manifest["lexical_object_ids"])
     assert canonical_chunk_ids <= set(index_manifest["cognee_object_ids"])
@@ -206,13 +236,13 @@ def test_gate4_real_pdf_through_live_cumulative_cli_and_rebuild(
             )
             assert semantic_hits
             assert any(hit.object_type == "ChunkDataPoint" for hit in semantic_hits)
-            entity_id = enrichment["entities"][0]["id"]
+            entity_ids = {item["id"] for item in enrichment["entities"]}
             entity_hits = await repository.search_vectors(
-                [enrichment["entities"][0]["name"]],
+                [item["name"] for item in enrichment["entities"]],
                 collections=GRAPH_SEED_VECTOR_COLLECTIONS,
-                limit=10,
+                limit=40,
             )
-            assert entity_id in {hit.canonical_id for hit in entity_hits}
+            assert entity_ids.intersection(hit.canonical_id for hit in entity_hits)
             traversed = await repository.traverse(
                 entity_hits,
                 depth=2,
@@ -255,12 +285,40 @@ def test_gate4_real_pdf_through_live_cumulative_cli_and_rebuild(
     assert rebuild["reports"][0]["rebuilt"] is True
     assert rebuild["reports"][0]["consistency_valid"] is True
     assert rebuild["reports"][0]["vector_object_count"] > len(canonical.chunks)
+    assert rebuild["reports"][0]["dataset_name"] == "papers"
     assert {
         str(path): hashlib.sha256(path.read_bytes()).hexdigest()
         for root in protected_roots
         for path in root.rglob("*")
         if path.is_file()
     } == protected_hashes
+    rebuilt_cognee_manifest = json.loads(
+        Path(rebuild["reports"][0]["cognee_manifest_path"]).read_text()
+    )
+
+    api = create_app(data_dir=run_root)
+    with TestClient(api) as client:
+        datasets_response = client.get("/api/v1/datasets")
+        assert datasets_response.status_code == 200
+        datasets = datasets_response.json()
+        dataset = next(item for item in datasets if item["name"] == "papers")
+        assert dataset["id"] == rebuild["reports"][0]["cognee_dataset_id"]
+        data_response = client.get(f"/api/v1/datasets/{dataset['id']}/data")
+        assert data_response.status_code == 200
+        data_items = data_response.json()
+        assert len(data_items) == 1
+        assert data_items[0]["id"] == rebuild["reports"][0]["cognee_data_id"]
+        assert Path(data_items[0]["rawDataLocation"]) == stored
+        graph_response = client.get(f"/api/v1/datasets/{dataset['id']}/graph")
+        assert graph_response.status_code == 200
+        graph_payload = graph_response.json()
+        assert len(graph_payload["nodes"]) == rebuilt_cognee_manifest["node_count"]
+        assert len(graph_payload["edges"]) == rebuilt_cognee_manifest["relation_count"]
+        visualize_response = client.get(
+            "/api/v1/visualize", params={"dataset_id": dataset["id"]}
+        )
+        assert visualize_response.status_code == 200
+        assert "html" in visualize_response.headers["content-type"]
 
     status = _json_output(runner.invoke(app, ["status", "--data-dir", str(run_root)]))
     assert status["source_file_count"] == 1

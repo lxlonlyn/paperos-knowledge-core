@@ -174,6 +174,8 @@ def status(
 
 @app.command()
 def serve(
+    host: Annotated[str | None, typer.Option("--host")] = None,
+    port: Annotated[int | None, typer.Option("--port", min=1, max=65535)] = None,
     data_dir: DataDirOption = None,
     config: ConfigOption = None,
 ) -> None:
@@ -183,13 +185,13 @@ def serve(
     from paperos_core.api.app import create_app
 
     configuration = _build(config, data_dir)
-    host = configuration.config.api.host
-    port = configuration.config.api.port
+    selected_host = host or configuration.config.api.host
+    selected_port = port or configuration.config.api.port
     asyncio.run(configuration.aclose())
     uvicorn.run(
         create_app(config_path=config, data_dir=data_dir),
-        host=host,
-        port=port,
+        host=selected_host,
+        port=selected_port,
     )
 
 
@@ -235,6 +237,7 @@ def query(
     document_id: Annotated[
         list[str] | None, typer.Option("--document-id")
     ] = None,
+    dataset: Annotated[str | None, typer.Option("--dataset")] = None,
     data_dir: DataDirOption = None,
     config: ConfigOption = None,
 ) -> None:
@@ -243,6 +246,7 @@ def query(
     request = QueryRequest(
         query=question,
         profile=profile,
+        dataset=dataset,
         top_k=top_k,
         document_ids=document_id,
     )

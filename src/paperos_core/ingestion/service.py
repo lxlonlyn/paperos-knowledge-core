@@ -12,7 +12,7 @@ from paperos_core.domain.canonical import CanonicalIngestionResult
 from paperos_core.domain.documents import IngestionJob, IngestionResult, SourceFile
 from paperos_core.domain.enums import IngestionJobStatus, ParseRunStatus
 from paperos_core.domain.parsing import ParsedIngestionResult
-from paperos_core.errors import PaperOSError
+from paperos_core.errors import InvalidDatasetError, PaperOSError
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.parser_artifacts import ParserArtifactRepository
 from paperos_core.ingestion.registry import SourceRegistry
@@ -56,7 +56,7 @@ class IngestionService:
     ) -> IngestionResult:
         dataset_id = (dataset or self.config.dataset).strip()
         if not dataset_id:
-            raise ValueError("Dataset must not be empty")
+            raise InvalidDatasetError("Dataset must not be empty.", affected="dataset")
         validated = validate_pdf(path, max_file_mb=self.config.ingestion.max_file_mb)
         source, duplicate = self.registry.register_source(
             validated, dataset_id=dataset_id, user_metadata=user_metadata
@@ -227,6 +227,7 @@ class IngestionService:
                 parse_run=parsed.parse_run,
                 artifacts=parsed.artifacts,
                 manifest_path=manifest_path,
+                dataset_id=self.registry.get_job(parsed.ingestion_job_id).dataset_id,
             )
             self.registry.update_job(
                 parsed.ingestion_job_id,
