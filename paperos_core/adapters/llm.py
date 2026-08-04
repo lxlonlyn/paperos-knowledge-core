@@ -103,7 +103,9 @@ class DeepSeekClient:
                 retryable=False,
             )
         try:
-            response = await self.client.get("/models")
+            response = await self.client.get(
+                "/models", timeout=min(self.config.timeout_seconds, 10)
+            )
             response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:

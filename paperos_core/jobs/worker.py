@@ -73,7 +73,7 @@ class BackgroundWorker:
                 result = await self.ingestion.ingest_pdf_to_knowledge(
                     Path(str(job.payload["path"])),
                     dataset=job.payload.get("dataset"),
-                    metadata=job.payload.get("metadata"),
+                    user_metadata=job.payload.get("metadata"),
                 )
                 payload = result.public_dict()
             elif job.job_type == "improve":

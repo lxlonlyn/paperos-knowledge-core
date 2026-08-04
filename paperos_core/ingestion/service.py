@@ -99,7 +99,7 @@ class IngestionService:
             backend = "vlm"
         parse_run = self.parser_artifacts.create_parse_run(
             source,
-            provider=self.config.mineru.provider,
+            provider=self.mineru.provider.name,
             backend=backend,
             request_options=options,
         )

@@ -73,17 +73,30 @@ class HealthService:
             "status": "healthy",
             **self.indexes.lexical.status(),
         }
-        try:
+        bundles = self.canonical_repository.list_bundles()
+        if not bundles:
+            # Constructing Cognee's vector engine can initialize its embedding
+            # provider. Health must remain a read-only check, so an empty store
+            # is validated from PaperOS-owned state without creating that engine.
             components["vector"] = {
                 "status": "healthy",
-                **await self.cognee.vector_status(),
+                "backend": "cognee",
+                "path": str(self.paths.cognee / "vector"),
+                "collection_count": 0,
+                "record_count": 0,
+                "dimensions": self.indexes.embedding_dimensions,
             }
-        except Exception as exc:  # noqa: BLE001 - health reports component failures.
-            components["vector"] = {
-                "status": "degraded",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        bundles = self.canonical_repository.list_bundles()
+        else:
+            try:
+                components["vector"] = {
+                    "status": "healthy",
+                    **await self.cognee.vector_status(),
+                }
+            except Exception as exc:  # noqa: BLE001 - health reports component failures.
+                components["vector"] = {
+                    "status": "degraded",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
         try:
             if bundles:
                 await self.cognee.get_datapoint(bundles[-1].document.id)

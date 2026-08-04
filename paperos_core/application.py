@@ -93,12 +93,25 @@ class Application:
         if self._closed:
             return
         self._closed = True
-        await self.runtime.worker.stop()
-        await self.runtime.local_inference.stop()
-        await self.local_inference_client.aclose()
-        await self.deepseek.aclose()
-        await self.mineru.aclose()
+        failures: list[Exception] = []
+        for close in (
+            self.runtime.worker.stop,
+            self.knowledge_pipeline.cognee_repository.aclose,
+            self.runtime.local_inference.stop,
+            self.local_inference_client.aclose,
+            self.deepseek.aclose,
+            self.mineru.aclose,
+        ):
+            try:
+                await close()
+            except Exception as exc:  # noqa: BLE001 - all owners must still close.
+                failures.append(exc)
         self._started = False
+        if failures:
+            raise RuntimeError(
+                "PaperOS shutdown failed for one or more owned resources: "
+                + "; ".join(f"{type(exc).__name__}: {exc}" for exc in failures)
+            ) from failures[0]
 
 
 def create_application(settings: RuntimeSettings) -> Application:

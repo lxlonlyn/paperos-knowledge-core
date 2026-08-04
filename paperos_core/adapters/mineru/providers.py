@@ -29,6 +29,8 @@ _QUOTA_CODES = {"-60018", "-60019"}
 
 
 class MinerUProvider(Protocol):
+    name: str
+
     async def health_check(self) -> dict[str, Any]: ...
 
     async def submit_pdf(
@@ -84,11 +86,31 @@ class MinerUCloudProvider:
         }
 
     async def health_check(self) -> dict[str, Any]:
-        self._require_key()
+        key = self._require_key()
+        try:
+            response = await self._client.get(
+                self.endpoint,
+                headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+                timeout=10,
+            )
+            if response.status_code in {401, 403}:
+                raise MinerUAuthenticationError(
+                    "MinerU rejected MINERU_API_KEY during health check.",
+                    affected=self.endpoint,
+                )
+            if response.status_code >= 500:
+                response.raise_for_status()
+        except MinerUAuthenticationError:
+            raise
+        except httpx.HTTPError as exc:
+            raise MinerUProviderError(
+                f"MinerU health check failed: {exc}", affected=self.endpoint
+            ) from exc
         return {
             "provider": self.name,
             "endpoint": self.endpoint,
             "configured": True,
+            "reachable": True,
         }
 
     async def _request(

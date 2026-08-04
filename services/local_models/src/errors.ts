@@ -16,8 +16,8 @@ export function errorPayload(error: unknown): object {
   return {
     error: {
       message,
-      type: "model_gateway_error",
-      code: "model_gateway_error",
+      type: "local_inference_error",
+      code: "local_inference_error",
     },
   };
 }

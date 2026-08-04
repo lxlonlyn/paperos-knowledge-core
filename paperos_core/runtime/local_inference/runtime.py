@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from paperos_core.config import RuntimeSettings
+from paperos_core.config import RuntimeSettings, resolve_local_model_path
 from paperos_core.errors import (
     LocalInferenceConfigurationError,
     LocalInferenceUnavailableError,
@@ -50,12 +50,7 @@ class LocalInferenceRuntime:
     def _model_path(
         self, configured: Path, *, label: str, expected_sha256: str | None
     ) -> Path:
-        configured = configured.expanduser()
-        if configured.is_absolute():
-            result = configured
-        else:
-            result = self.paths.root / configured
-        result = result.resolve(strict=False)
+        result = resolve_local_model_path(self.settings, configured)
         if not result.is_file():
             raise LocalInferenceConfigurationError(
                 f"Configured local {label} model file does not exist.",
@@ -169,8 +164,9 @@ class LocalInferenceRuntime:
             except LocalInferenceUnavailableError as exc:
                 last_error = exc
                 await asyncio.sleep(1)
-        exit_code = self.process.returncode
+        exited_before_timeout = self.process.returncode is not None
         await self.stop()
+        exit_code = self.process.returncode
         raise LocalInferenceUnavailableError(
             "Local inference did not become healthy within "
             f"{local.startup_timeout_seconds} seconds.",
@@ -178,6 +174,7 @@ class LocalInferenceRuntime:
             details={
                 "last_error": str(last_error) if last_error else None,
                 "exit_code": exit_code,
+                "exited_before_timeout": exited_before_timeout,
             },
             retryable=False,
         )

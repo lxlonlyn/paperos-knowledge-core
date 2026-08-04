@@ -5,9 +5,11 @@ import hashlib
 import json
 import os
 import sqlite3
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+
 from paperos_core.adapters.cognee.repository import (
     GRAPH_SEED_VECTOR_COLLECTIONS,
     SEMANTIC_VECTOR_COLLECTIONS,
@@ -27,6 +29,19 @@ def _application(run_root: Path):
         load_settings(environ={**os.environ, "PAPEROS_DATA_DIR": str(run_root)})
     )
 
+
+def _wait_job(client: TestClient, job_id: str, timeout: float = 2_400) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/v1/jobs/{job_id}")
+        assert response.status_code == 200, response.text
+        job = response.json()
+        if job["status"] in {"completed", "failed"}:
+            return job
+        time.sleep(2)
+    raise AssertionError(f"Job {job_id} did not finish within {timeout}s")
+
+
 def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
     real_pdf_case, gate1_run_dir: Path, configured_data_dir: Path
 ) -> None:
@@ -42,8 +57,10 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
             params={"dataset": "papers"},
             files={"file": (pdf_path.name, stream, "application/pdf")},
         )
-    assert response.status_code == 200, response.text
-    result = response.json()
+        assert response.status_code == 202, response.text
+        queued = _wait_job(client, response.json()["job_id"])
+    assert queued["status"] == "completed", queued["error"]
+    result = queued["result"]
 
     assert result["duplicate"] is False
     assert result["status"] == "completed"
@@ -267,12 +284,19 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
         if path.is_file()
     }
     rebuild_application = _application(run_root)
-    try:
-        rebuild = asyncio.run(
-            rebuild_application.services.rebuilder.rebuild(snapshot_id=snapshot_id)
-        ).model_dump(mode="json")
-    finally:
-        asyncio.run(rebuild_application.aclose())
+
+    async def run_rebuild() -> dict:
+        await rebuild_application.start()
+        try:
+            return (
+                await rebuild_application.services.rebuilder.rebuild(
+                    snapshot_id=snapshot_id
+                )
+            ).model_dump(mode="json")
+        finally:
+            await rebuild_application.aclose()
+
+    rebuild = asyncio.run(run_rebuild())
     assert rebuild["rebuilt_snapshot_ids"] == [snapshot_id]
     assert rebuild["reports"][0]["rebuilt"] is True
     assert rebuild["reports"][0]["consistency_valid"] is True
@@ -336,6 +360,7 @@ def test_gate1_api_reports_invalid_pdf(gate1_run_dir: Path, configured_data_dir:
             "/api/v1/ingest",
             files={"file": (non_pdf.name, stream, "application/json")},
         )
-    assert response.status_code == 400
-    payload = response.json()
-    assert payload["error"]["code"] == "invalid_pdf"
+        assert response.status_code == 202
+        job = _wait_job(client, response.json()["job_id"], timeout=30)
+    assert job["status"] == "failed"
+    assert "InvalidPDFError" in job["error"]

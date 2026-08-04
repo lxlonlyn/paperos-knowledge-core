@@ -6,9 +6,11 @@ import asyncio
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+
 from paperos_core.api.app import create_app
 from paperos_core.application import create_application
 from paperos_core.config import load_settings
@@ -20,6 +22,19 @@ def _application(run_root: Path):
     return create_application(
         load_settings(environ={**os.environ, "PAPEROS_DATA_DIR": str(run_root)})
     )
+
+
+def _wait_job(client: TestClient, job_id: str, timeout: float = 120) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/v1/jobs/{job_id}")
+        assert response.status_code == 200, response.text
+        job = response.json()
+        if job["status"] in {"completed", "failed"}:
+            return job
+        time.sleep(1)
+    raise AssertionError(f"Job {job_id} did not finish within {timeout}s")
+
 
 def _hash_files(roots: list[Path]) -> dict[str, str]:
     return {
@@ -45,6 +60,7 @@ async def _run_gate6(
     logs: Path,
 ) -> dict[str, object]:
     application = _application(run_root)
+    await application.start()
     protected_roots = [
         application.paths.raw,
         application.paths.parsed,
@@ -127,11 +143,8 @@ async def _run_gate6(
                 )
             ),
         ]
-        queued = application.queue.enqueue("improve")
-        completed = await application.runtime.worker.run_once()
-        assert completed is not None
-        assert completed.id == queued.id and completed.status == "completed"
-        assert completed.result is not None
+        completed = application.services.feedback.improve()
+        assert completed.processed_feedback_ids
         improvements = application.services.feedback.confirmed_improvements()
         correction = next(
             item
@@ -305,19 +318,22 @@ def test_gate6_live_feedback_improve_rebuild_and_operations(
         )
         assert api_feedback.status_code == 200, api_feedback.text
         api_improve = client.post("/api/v1/improve")
-        assert api_improve.status_code == 200, api_improve.text
+        assert api_improve.status_code == 202, api_improve.text
+        improve_job = _wait_job(client, api_improve.json()["job_id"])
+        assert improve_job["status"] == "completed", improve_job["error"]
         api_health = client.get("/api/v1/health")
         assert api_health.status_code == 200
         routes = set(client.app.openapi()["paths"])
         assert {
             "/api/v1/ingest",
-            "/api/v1/ingest/{job_id}",
+            "/api/v1/jobs/{job_id}",
             "/api/v1/query",
             "/api/v1/documents",
             "/api/v1/documents/{document_id}",
             "/api/v1/documents/{document_id}/reprocess",
             "/api/v1/feedback",
             "/api/v1/improve",
+            "/api/v1/rebuild",
             "/api/v1/health",
         } <= routes
         deletion = client.delete(f"/api/v1/documents/{result['document_id']}")

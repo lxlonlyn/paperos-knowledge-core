@@ -17,7 +17,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from paperos_core.adapters.mineru.providers import DEFAULT_MINERU_CLOUD_ENDPOINT
-from paperos_core.config import load_settings
+from paperos_core.config import load_settings, resolve_local_model_path
 
 
 async def diagnose() -> dict[str, object]:
@@ -50,7 +50,7 @@ async def diagnose() -> dict[str, object]:
         ("reranker", settings.local_inference.reranker.model_path),
         ("query_expansion", settings.local_inference.query_expansion.model_path),
     ):
-        path = configured if configured.is_absolute() else settings.data_dir / configured
+        path = resolve_local_model_path(settings, configured)
         models[name] = {"exists": path.is_file(), "path": str(path.resolve(strict=False))}
     checks["models"] = models
 
@@ -81,20 +81,28 @@ async def diagnose() -> dict[str, object]:
         "vector": settings.cognee.vector_database.exists(),
         "graph": settings.cognee.graph_database.exists(),
     }
-    with socket.socket() as probe:
-        probe.settimeout(0.5)
-        occupied = probe.connect_ex(
-            (settings.local_inference.host, settings.local_inference.port)
-        ) == 0
     checks["ports"] = {
-        "api": {"host": settings.api.host, "port": settings.api.port},
+        "api": {
+            "host": settings.api.host,
+            "port": settings.api.port,
+            "occupied": _port_occupied(settings.api.host, settings.api.port),
+        },
         "local_inference": {
             "host": settings.local_inference.host,
             "port": settings.local_inference.port,
-            "occupied": occupied,
+            "occupied": _port_occupied(
+                settings.local_inference.host, settings.local_inference.port
+            ),
         },
     }
     return checks
+
+
+def _port_occupied(host: str, port: int) -> bool:
+    probe_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    with socket.socket() as probe:
+        probe.settimeout(0.5)
+        return probe.connect_ex((probe_host, port)) == 0
 
 
 def main() -> None:

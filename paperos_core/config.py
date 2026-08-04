@@ -162,6 +162,13 @@ def _resolve_path(value: str | Path, *, base_dir: Path) -> Path:
     return expanded.resolve(strict=False)
 
 
+def resolve_local_model_path(settings: RuntimeSettings, configured: Path) -> Path:
+    """Resolve a user-owned model path relative to the single TOML file."""
+
+    base_dir = settings.config_path.parent if settings.config_path else Path.cwd()
+    return _resolve_path(configured, base_dir=base_dir)
+
+
 def load_settings(
     path: Path | None = None,
     *,
@@ -230,15 +237,43 @@ def load_settings(
         raise ConfigurationError(
             f"Invalid PaperOS configuration: {exc}", affected=config_path
         ) from exc
+    config_root = config_path.parent
+    local = settings.local_inference
+    local = local.model_copy(
+        update={
+            "embedding": local.embedding.model_copy(
+                update={
+                    "model_path": _resolve_path(
+                        local.embedding.model_path, base_dir=config_root
+                    )
+                }
+            ),
+            "reranker": local.reranker.model_copy(
+                update={
+                    "model_path": _resolve_path(
+                        local.reranker.model_path, base_dir=config_root
+                    )
+                }
+            ),
+            "query_expansion": local.query_expansion.model_copy(
+                update={
+                    "model_path": _resolve_path(
+                        local.query_expansion.model_path, base_dir=config_root
+                    )
+                }
+            ),
+        }
+    )
     cognee = settings.cognee.model_copy(
         update={
             "deepseek": settings.deepseek,
-            "local_inference": settings.local_inference,
+            "local_inference": local,
         }
     )
     return settings.model_copy(
         update={
             "cognee": cognee,
+            "local_inference": local,
             "config_path": config_path if config_path.exists() else None,
         }
     )

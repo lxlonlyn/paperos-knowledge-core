@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+
 from paperos_core.api.app import create_app
 from paperos_core.application import create_application
 from paperos_core.config import load_settings
@@ -106,6 +107,7 @@ async def _run_live_gate5(
     logs: Path,
 ) -> list[QueryResponse]:
     application = _application(run_root)
+    await application.start()
     try:
         reuse_ingestion = os.getenv("PAPEROS_GATE5_REUSE_INGESTION") == "true"
         if reuse_ingestion:

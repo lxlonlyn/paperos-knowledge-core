@@ -84,8 +84,9 @@ Application.start
 
 Application.aclose
   1. stop the Worker
-  2. stop local inference
-  3. close inference, DeepSeek, and MinerU clients
+  2. dispose Cognee relational, graph, vector, and cache engines
+  3. stop local inference
+  4. close inference, DeepSeek, and MinerU clients
 ```
 
 Health checks are read-only. They never start or restart resources. A local model
@@ -108,7 +109,8 @@ rebuild, reprocess, and improve jobs. It never holds the Application.
 `config/paperos.toml` is the only structured configuration. It owns data,
 MinerU, DeepSeek, local inference, Cognee, ingestion, retrieval, and API
 settings. `MINERU_API_KEY` and `DEEPSEEK_API_KEY` are environment-only
-secrets.
+secrets. Relative GGUF paths are resolved from the TOML directory rather than
+the mutable runtime data directory.
 
 Only `configure_cognee(CogneeSettings)` translates PaperOS settings into the
 environment variables required by Cognee. Cognee does not read a separate

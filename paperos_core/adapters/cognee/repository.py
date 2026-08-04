@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import importlib
 import json
 import os
@@ -37,6 +38,20 @@ GRAPH_SEED_VECTOR_COLLECTIONS = (
     "ConceptRelationDataPoint_description",
     "TripletDataPoint_text",
 )
+
+
+def _close_subprocess_queues(session: Any) -> None:
+    """Release queue transports after Cognee has joined its DB worker."""
+
+    for name in ("_req_q", "_resp_q"):
+        queue = getattr(session, name, None)
+        if queue is None:
+            continue
+        try:
+            queue.close()
+            queue.join_thread()
+        except (OSError, ValueError):
+            pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +94,60 @@ class CogneeRepository:
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
         self.manifest_root = paths.cognee / "manifests"
-        self.manifest_root.mkdir(parents=True, exist_ok=True)
+
+    async def aclose(self) -> None:
+        """Close Cognee's process-local database engines without deleting data."""
+
+        from cognee.infrastructure.databases.cache.get_cache_engine import (
+            close_cache_engine,
+        )
+        from cognee.infrastructure.databases.graph.get_graph_engine import (
+            _create_graph_engine,
+            get_graph_engine,
+        )
+        from cognee.infrastructure.databases.relational.create_relational_engine import (
+            create_relational_engine,
+        )
+        from cognee.infrastructure.databases.relational.get_relational_engine import (
+            get_relational_engine,
+        )
+        from cognee.infrastructure.databases.vector.create_vector_engine import (
+            _create_vector_engine,
+        )
+        from cognee.infrastructure.databases.vector.get_vector_engine import (
+            get_vector_engine_async,
+        )
+
+        if create_relational_engine.cache_info().currsize:
+            relational = get_relational_engine()
+            await relational.engine.dispose(close=True)
+            create_relational_engine.cache_clear()
+        await close_cache_engine()
+        subprocess_sessions: list[Any] = []
+        if _create_graph_engine.cache_info().currsize:
+            graph = await get_graph_engine()
+            graph_adapter = graph._engine()
+            session = getattr(graph_adapter, "_session", None)
+            if session is not None:
+                subprocess_sessions.append(session)
+            await graph_adapter.close()
+            del graph_adapter, graph
+        if _create_vector_engine.cache_info().currsize:
+            vector = await get_vector_engine_async()
+            vector_adapter = vector._engine()
+            session = getattr(vector_adapter, "_session", None)
+            if session is not None:
+                subprocess_sessions.append(session)
+            await vector_adapter.close()
+            del vector_adapter, vector
+        _create_graph_engine.cache_clear()
+        _create_vector_engine.cache_clear()
+        await _create_graph_engine.cache_await_closed()
+        await _create_vector_engine.cache_await_closed()
+        for session in subprocess_sessions:
+            _close_subprocess_queues(session)
+        subprocess_sessions.clear()
+        gc.collect()
 
     async def _create_pipeline_context(
         self,

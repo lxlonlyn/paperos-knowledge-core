@@ -11,7 +11,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from paperos_core.config import load_settings
+from paperos_core.config import load_settings, resolve_local_model_path
 from paperos_core.paths import build_data_paths
 from paperos_core.storage import StorageInitializer
 
@@ -42,7 +42,7 @@ def main() -> None:
         ("reranker_model", settings.local_inference.reranker),
         ("query_expansion_model", settings.local_inference.query_expansion),
     ):
-        path = _data_path(paths.root, model.model_path)
+        path = resolve_local_model_path(settings, model.model_path)
         item: dict[str, object] = {"name": name, "ok": path.is_file(), "path": str(path)}
         if path.is_file() and model.sha256:
             actual = _sha256(path)
@@ -68,14 +68,6 @@ def main() -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     if not payload["ok"]:
         raise SystemExit(1)
-
-
-def _data_path(data_root: Path, configured: Path) -> Path:
-    return (
-        configured.expanduser()
-        if configured.is_absolute()
-        else data_root / configured
-    ).resolve(strict=False)
 
 
 def _sha256(path: Path) -> str:

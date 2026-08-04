@@ -11,4 +11,4 @@
 - Startup readiness is verified internally through `GET /health` before the
   PaperOS API begins accepting requests.
 - A bound port is an actionable startup error; PaperOS never attaches to or
-  terminates a gateway it did not start.
+  terminates a local inference process it did not start.

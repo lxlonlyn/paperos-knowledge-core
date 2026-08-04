@@ -23,17 +23,17 @@ request_timeout_seconds = 120
 startup_timeout_seconds = 180
 
 [local_inference.embedding]
-model_path = "models/embedding/embeddinggemma-300M-Q8_0.gguf"
+model_path = "../data/models/embedding/embeddinggemma-300M-Q8_0.gguf"
 model = "default"
 dimensions = 768
 max_tokens = 2048
 
 [local_inference.reranker]
-model_path = "models/reranker/qwen3-reranker-0.6b-q8_0.gguf"
+model_path = "../data/models/reranker/qwen3-reranker-0.6b-q8_0.gguf"
 candidate_limit = 40
 
 [local_inference.query_expansion]
-model_path = "models/query-expansion/qmd-query-expansion-1.7B-q4_k_m.gguf"
+model_path = "../data/models/query-expansion/qmd-query-expansion-1.7B-q4_k_m.gguf"
 max_output_tokens = 512
 
 [cognee]

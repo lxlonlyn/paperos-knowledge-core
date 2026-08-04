@@ -37,8 +37,9 @@ python server.py
 ```
 
 MinerU and DeepSeek must already be reachable. Users manually place all three
-GGUF files under the configured data directory. PaperOS never installs
-dependencies or downloads models at runtime.
+GGUF files at the configured paths; relative model paths are resolved from
+`config/paperos.toml`, independently of the runtime data directory. PaperOS
+never installs dependencies or downloads models at runtime.
 
 `config/paperos.toml` is the only structured configuration source. The two API
 keys are environment-only secrets. PaperOS does not load `.env` as a Cognee
