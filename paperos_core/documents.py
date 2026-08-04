@@ -63,15 +63,6 @@ class DocumentService:
         self.rebuilder = rebuilder
         self.indexes = indexes
         self.cognee = cognee
-        with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS document_tombstones (
-                    document_id TEXT PRIMARY KEY,
-                    deleted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.paths.registry_db, timeout=30)

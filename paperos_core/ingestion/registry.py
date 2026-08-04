@@ -33,63 +33,12 @@ class SourceRegistry:
 
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
-        self.paths.initialize()
-        self._initialize_schema()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.paths.registry_db, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
-
-    def _initialize_schema(self) -> None:
-        try:
-            with self._connect() as connection:
-                connection.executescript(
-                    """
-                    CREATE TABLE IF NOT EXISTS source_files (
-                        id TEXT PRIMARY KEY,
-                        sha256 TEXT NOT NULL UNIQUE,
-                        original_filename TEXT NOT NULL,
-                        stored_filename TEXT NOT NULL,
-                        media_type TEXT NOT NULL,
-                        size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
-                        storage_path TEXT NOT NULL UNIQUE,
-                        created_at TEXT NOT NULL,
-                        schema_version TEXT NOT NULL,
-                        id_version TEXT NOT NULL,
-                        source_url TEXT,
-                        user_metadata TEXT,
-                        dataset_id TEXT
-                    );
-                    CREATE TABLE IF NOT EXISTS ingestion_jobs (
-                        id TEXT PRIMARY KEY,
-                        source_file_id TEXT NOT NULL,
-                        dataset_id TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        current_operation TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        attempt_count INTEGER NOT NULL DEFAULT 0,
-                        error_code TEXT,
-                        error_message TEXT,
-                        completed_at TEXT,
-                        requested_options TEXT,
-                        schema_version TEXT NOT NULL,
-                        id_version TEXT NOT NULL,
-                        FOREIGN KEY (source_file_id) REFERENCES source_files(id)
-                    );
-                    CREATE INDEX IF NOT EXISTS ingestion_jobs_source_idx
-                        ON ingestion_jobs(source_file_id);
-                    CREATE INDEX IF NOT EXISTS ingestion_jobs_status_idx
-                        ON ingestion_jobs(status);
-                    """
-                )
-        except sqlite3.Error as exc:
-            raise SourceRegistryError(
-                f"Unable to initialize source registry: {exc}",
-                affected=self.paths.registry_db,
-            ) from exc
 
     @staticmethod
     def _json_dump(value: dict[str, Any] | None) -> str | None:

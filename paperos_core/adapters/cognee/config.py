@@ -1,94 +1,57 @@
-"""Single Cognee/DeepSeek configuration boundary backed by the project `.env`."""
+"""Narrow translation from PaperOS settings to Cognee's process environment."""
 
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, SecretStr
-
-from paperos_core.errors import CogneeConfigurationError
-from paperos_core.paths import DataPaths
+from paperos_core.config import CogneeSettings
 
 
-class CogneeRuntimeConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+def configure_cognee(settings: CogneeSettings) -> None:
+    """Apply all and only the Cognee environment translation in one place."""
 
-    llm_provider: str
-    llm_model: str
-    llm_endpoint: str
-    llm_api_key: SecretStr
-    embedding_provider: str
-    embedding_model: str
-    embedding_endpoint: str
-    embedding_dimensions: int
-    db_provider: str
-    vector_db_provider: str
-    graph_database_provider: str
-    env_path: Path
-
-
-def _read_env(path: Path) -> dict[str, str]:
-    if not path.is_file():
-        raise CogneeConfigurationError("Cognee .env file does not exist.", affected=path)
-    values: dict[str, str] = {}
-    try:
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            values[key.strip()] = value.strip().strip("\"'")
-    except OSError as exc:
-        raise CogneeConfigurationError(f"Unable to read Cognee .env: {exc}", affected=path) from exc
-    return values
-
-
-def configure_cognee_environment(paths: DataPaths, *, env_path: Path) -> CogneeRuntimeConfig:
-    values = _read_env(env_path)
-    required = (
-        "DB_PROVIDER",
-        "VECTOR_DB_PROVIDER",
-        "GRAPH_DATABASE_PROVIDER",
-        "LLM_PROVIDER",
-        "LLM_MODEL",
-        "LLM_ENDPOINT",
-        "LLM_API_KEY",
-        "EMBEDDING_PROVIDER",
-        "EMBEDDING_MODEL",
-        "EMBEDDING_ENDPOINT",
-        "EMBEDDING_DIMENSIONS",
-    )
-    missing = [key for key in required if not (os.getenv(key) or values.get(key))]
-    if missing:
-        raise CogneeConfigurationError(
-            "Cognee configuration is missing required values: " + ", ".join(missing),
-            affected=env_path,
-        )
-    for key, value in values.items():
-        if not os.getenv(key):
-            os.environ[key] = value
-    _apply_runtime_overrides(paths)
-    paths.cognee.mkdir(parents=True, exist_ok=True)
-    return CogneeRuntimeConfig(
-        llm_provider=os.environ["LLM_PROVIDER"],
-        llm_model=os.environ["LLM_MODEL"],
-        llm_endpoint=os.environ["LLM_ENDPOINT"].rstrip("/"),
-        llm_api_key=SecretStr(os.environ["LLM_API_KEY"]),
-        embedding_provider=os.environ["EMBEDDING_PROVIDER"],
-        embedding_model=os.environ["EMBEDDING_MODEL"],
-        embedding_endpoint=os.environ["EMBEDDING_ENDPOINT"].rstrip("/"),
-        embedding_dimensions=int(os.environ["EMBEDDING_DIMENSIONS"]),
-        db_provider=os.environ["DB_PROVIDER"],
-        vector_db_provider=os.environ["VECTOR_DB_PROVIDER"],
-        graph_database_provider=os.environ["GRAPH_DATABASE_PROVIDER"],
-        env_path=env_path,
+    cognee_root = settings.system_database.parent.parent
+    local = settings.local_inference
+    deepseek = settings.deepseek
+    os.environ.update(
+        {
+            "SYSTEM_ROOT_DIRECTORY": str(settings.system_database.parent),
+            "DATA_ROOT_DIRECTORY": str(cognee_root / "data"),
+            "CACHE_ROOT_DIRECTORY": str(cognee_root / "cache"),
+            "COGNEE_LOGS_DIR": str(cognee_root / "logs"),
+            "DB_PROVIDER": settings.db_provider,
+            "DB_PATH": str(settings.system_database),
+            "DB_NAME": "cognee_db",
+            "VECTOR_DB_PROVIDER": settings.vector_provider,
+            "VECTOR_DB_URL": str(settings.vector_database),
+            "GRAPH_DATABASE_PROVIDER": settings.graph_provider,
+            "GRAPH_DATASET_DATABASE_HANDLER": settings.graph_provider,
+            "GRAPH_FILE_PATH": str(settings.graph_database),
+            "LLM_PROVIDER": "custom",
+            "LLM_MODEL": deepseek.model,
+            "LLM_ENDPOINT": deepseek.endpoint.rstrip("/"),
+            "LLM_API_KEY": deepseek.api_key_value() or "",
+            "EMBEDDING_PROVIDER": "openai_compatible",
+            "EMBEDDING_MODEL": local.embedding.model,
+            "EMBEDDING_ENDPOINT": (
+                f"http://{local.host}:{local.port}/v1"
+            ),
+            "EMBEDDING_API_KEY": "paperos-internal",
+            "EMBEDDING_DIMENSIONS": str(local.embedding.dimensions),
+            "EMBEDDING_MAX_COMPLETION_TOKENS": str(local.embedding.max_tokens),
+            "EMBEDDING_BATCH_SIZE": "5",
+            "ENABLE_BACKEND_ACCESS_CONTROL": "false",
+            "REQUIRE_AUTHENTICATION": "false",
+            "TELEMETRY_DISABLED": "true",
+            "NO_PROXY": _no_proxy(os.getenv("NO_PROXY", "")),
+            "no_proxy": _no_proxy(os.getenv("no_proxy", "")),
+        }
     )
 
 
-def reassert_cognee_runtime(paths: DataPaths) -> None:
-    """Undo Cognee's import-time `.env` override and clear cached configurations."""
-    _apply_runtime_overrides(paths)
+def reset_cognee_configuration_caches() -> None:
+    """Make Cognee observe the values installed by ``configure_cognee``."""
+
     from cognee.base_config import get_base_config  # type: ignore[import-untyped]
     from cognee.infrastructure.databases.graph.config import (  # type: ignore[import-untyped]
         get_graph_config,
@@ -108,23 +71,6 @@ def reassert_cognee_runtime(paths: DataPaths) -> None:
     get_relational_config.cache_clear()
     get_vectordb_config.cache_clear()
     get_embedding_config.cache_clear()
-
-
-def _apply_runtime_overrides(paths: DataPaths) -> None:
-    os.environ.update(
-        {
-            "SYSTEM_ROOT_DIRECTORY": str(paths.cognee / "system"),
-            "DATA_ROOT_DIRECTORY": str(paths.cognee / "data"),
-            "CACHE_ROOT_DIRECTORY": str(paths.cognee / "cache"),
-            "COGNEE_LOGS_DIR": str(paths.logs / "cognee"),
-            "VECTOR_DB_URL": str(paths.cognee / "vector"),
-            "ENABLE_BACKEND_ACCESS_CONTROL": "false",
-            "REQUIRE_AUTHENTICATION": "false",
-            "TELEMETRY_DISABLED": "true",
-            "NO_PROXY": _no_proxy(os.getenv("NO_PROXY", "")),
-            "no_proxy": _no_proxy(os.getenv("no_proxy", "")),
-        }
-    )
 
 
 def _no_proxy(existing: str) -> str:

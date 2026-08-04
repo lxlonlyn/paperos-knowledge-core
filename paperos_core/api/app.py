@@ -1,21 +1,22 @@
-"""Complete FastAPI application backed by shared application services."""
+"""FastAPI construction, lifespan, errors, and router registration."""
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Annotated
 
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from paperos_core.api.documents import router as documents_router
+from paperos_core.api.feedback import router as feedback_router
+from paperos_core.api.health import router as health_router
+from paperos_core.api.ingestion import router as ingestion_router
+from paperos_core.api.jobs import router as jobs_router
+from paperos_core.api.query import router as query_router
 from paperos_core.application import Application, create_application
 from paperos_core.config import RuntimeSettings
 from paperos_core.errors import PaperOSError
-from paperos_core.feedback.models import FeedbackRequest
-from paperos_core.retrieval.candidates import QueryRequest, QueryResponse
 
 
 def create_app(settings: RuntimeSettings) -> FastAPI:
@@ -28,34 +29,7 @@ def create_app(settings: RuntimeSettings) -> FastAPI:
             raise RuntimeError("PaperOS Application was already constructed for this server.")
         application = create_application(settings)
         app.state.paperos = application
-        if not getattr(app.state, "cognee_routes_attached", False):
-            from cognee.api.v1.datasets.routers import (  # type: ignore[import-untyped]
-                get_datasets_router,
-            )
-            from cognee.api.v1.users.routers import (  # type: ignore[import-untyped]
-                get_visualize_router,
-            )
-            from cognee.modules.users.methods import (  # type: ignore[import-untyped]
-                get_authenticated_user,
-                get_default_user,
-            )
-
-            # PaperOS is intentionally single-user. Cognee computes its auth
-            # dependency at module import time, so explicitly bind official
-            # routers to the same default principal used by the write path.
-            app.dependency_overrides[get_authenticated_user] = get_default_user
-
-            app.include_router(
-                get_datasets_router(),
-                prefix="/api/v1/datasets",
-                tags=["cognee-datasets"],
-            )
-            app.include_router(
-                get_visualize_router(),
-                prefix="/api/v1/visualize",
-                tags=["cognee-visualize"],
-            )
-            app.state.cognee_routes_attached = True
+        _include_cognee_routers(app)
         try:
             await application.start()
             yield
@@ -65,95 +39,43 @@ def create_app(settings: RuntimeSettings) -> FastAPI:
     api = FastAPI(title="PaperOS Knowledge Core", lifespan=lifespan)
 
     @api.exception_handler(PaperOSError)
-    async def paperos_error(
-        _request: Request, error: PaperOSError
-    ) -> JSONResponse:
+    async def paperos_error(_request: Request, error: PaperOSError) -> JSONResponse:
         return JSONResponse(
             status_code=503 if error.retryable else 400,
             content=error.as_dict(),
         )
 
-    @api.post("/api/v1/query", response_model=QueryResponse)
-    async def query(request: Request, body: QueryRequest) -> QueryResponse:
-        application: Application = request.app.state.paperos
-        return await application.services.retrieval.query(body)
-
-    @api.post("/api/v1/ingest")
-    async def ingest(
-        request: Request,
-        file: Annotated[UploadFile, File()],
-        dataset: str | None = None,
-    ) -> dict[str, object]:
-        application: Application = request.app.state.paperos
-        filename = Path(file.filename or "upload.pdf").name
-        temporary_root = application.paths.tmp / f"api-{uuid.uuid4().hex}"
-        temporary_root.mkdir(parents=True)
-        temporary = temporary_root / filename
-        try:
-            with temporary.open("wb") as stream:
-                while chunk := await file.read(1024 * 1024):
-                    stream.write(chunk)
-            result = await application.services.ingestion.ingest_pdf_to_knowledge(
-                temporary, dataset=dataset
-            )
-            return result.public_dict()
-        finally:
-            temporary.unlink(missing_ok=True)
-            if temporary_root.exists():
-                temporary_root.rmdir()
-
-    @api.get("/api/v1/ingest/{job_id}")
-    async def ingestion_status(request: Request, job_id: str) -> dict[str, object]:
-        application: Application = request.app.state.paperos
-        return application.services.ingestion.get_job(job_id).model_dump(mode="json")
-
-    @api.get("/api/v1/documents")
-    async def list_documents(request: Request) -> list[dict[str, object]]:
-        application: Application = request.app.state.paperos
-        return [
-            item.model_dump(mode="json")
-            for item in application.services.documents.list_documents()
-        ]
-
-    @api.get("/api/v1/documents/{document_id}")
-    async def inspect_document(
-        request: Request, document_id: str
-    ) -> dict[str, object]:
-        application: Application = request.app.state.paperos
-        return application.services.documents.inspect(document_id).model_dump(mode="json")
-
-    @api.delete("/api/v1/documents/{document_id}")
-    async def delete_document(
-        request: Request, document_id: str
-    ) -> dict[str, object]:
-        application: Application = request.app.state.paperos
-        return (
-            await application.services.documents.delete(document_id)
-        ).model_dump(mode="json")
-
-    @api.post("/api/v1/documents/{document_id}/reprocess")
-    async def reprocess_document(
-        request: Request, document_id: str
-    ) -> dict[str, object]:
-        application: Application = request.app.state.paperos
-        return await application.services.documents.reprocess(document_id)
-
-    @api.post("/api/v1/feedback")
-    async def feedback(
-        request: Request, body: FeedbackRequest
-    ) -> dict[str, object]:
-        application: Application = request.app.state.paperos
-        return application.services.feedback.record(body).model_dump(mode="json")
-
-    @api.post("/api/v1/improve")
-    async def improve(request: Request) -> dict[str, object]:
-        application: Application = request.app.state.paperos
-        return application.services.feedback.improve().model_dump(mode="json")
-
-    @api.get("/api/v1/health")
-    @api.get("/health", include_in_schema=False)
-    async def health(request: Request) -> dict[str, object]:
-        application: Application = request.app.state.paperos
-        return await application.services.health.report()
-
+    for router in (
+        ingestion_router,
+        query_router,
+        documents_router,
+        jobs_router,
+        feedback_router,
+        health_router,
+    ):
+        api.include_router(router)
     return api
+
+
+def _include_cognee_routers(app: FastAPI) -> None:
+    if getattr(app.state, "cognee_routes_attached", False):
+        return
+    from cognee.api.v1.datasets.routers import (  # type: ignore[import-untyped]
+        get_datasets_router,
+    )
+    from cognee.api.v1.users.routers import (  # type: ignore[import-untyped]
+        get_visualize_router,
+    )
+    from cognee.modules.users.methods import (  # type: ignore[import-untyped]
+        get_authenticated_user,
+        get_default_user,
+    )
+
+    app.dependency_overrides[get_authenticated_user] = get_default_user
+    app.include_router(
+        get_datasets_router(), prefix="/api/v1/datasets", tags=["cognee-datasets"]
+    )
+    app.include_router(
+        get_visualize_router(), prefix="/api/v1/visualize", tags=["cognee-visualize"]
+    )
+    app.state.cognee_routes_attached = True

@@ -30,64 +30,11 @@ class LexicalStore:
         self.path = path
 
     def _connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
         return connection
 
-    def initialize(self) -> None:
-        try:
-            with self._connect() as connection:
-                connection.executescript(
-                    """
-                    CREATE TABLE IF NOT EXISTS lexical_records (
-                        object_id TEXT PRIMARY KEY,
-                        object_type TEXT NOT NULL,
-                        document_id TEXT NOT NULL,
-                        canonical_snapshot_id TEXT NOT NULL,
-                        schema_version TEXT NOT NULL,
-                        index_version TEXT NOT NULL,
-                        field_name TEXT NOT NULL,
-                        section_id TEXT,
-                        section_path TEXT,
-                        text TEXT NOT NULL
-                    );
-                    CREATE VIRTUAL TABLE IF NOT EXISTS lexical_fts USING fts5(
-                        object_id UNINDEXED,
-                        text,
-                        content='lexical_records',
-                        content_rowid='rowid',
-                        tokenize='unicode61'
-                    );
-                    CREATE TRIGGER IF NOT EXISTS lexical_records_ai AFTER INSERT ON lexical_records
-                    BEGIN
-                        INSERT INTO lexical_fts(rowid, object_id, text)
-                        VALUES (new.rowid, new.object_id, new.text);
-                    END;
-                    CREATE TRIGGER IF NOT EXISTS lexical_records_ad AFTER DELETE ON lexical_records
-                    BEGIN
-                        INSERT INTO lexical_fts(lexical_fts, rowid, object_id, text)
-                        VALUES ('delete', old.rowid, old.object_id, old.text);
-                    END;
-                    CREATE TRIGGER IF NOT EXISTS lexical_records_au AFTER UPDATE ON lexical_records
-                    BEGIN
-                        INSERT INTO lexical_fts(lexical_fts, rowid, object_id, text)
-                        VALUES ('delete', old.rowid, old.object_id, old.text);
-                        INSERT INTO lexical_fts(rowid, object_id, text)
-                        VALUES (new.rowid, new.object_id, new.text);
-                    END;
-                    CREATE INDEX IF NOT EXISTS lexical_document_idx
-                        ON lexical_records(document_id);
-                    """
-                )
-        except sqlite3.Error as exc:
-            raise IndexStorageError(
-                f"Unable to initialize SQLite FTS5 index: {exc}",
-                affected=self.path,
-            ) from exc
-
     def upsert_bundle(self, bundle: CanonicalBundle) -> list[str]:
-        self.initialize()
         records = _records_for_bundle(bundle)
         try:
             with self._connect() as connection:
@@ -127,7 +74,6 @@ class LexicalStore:
         return [item.object_id for item in records]
 
     def object_ids(self, document_id: str) -> list[str]:
-        self.initialize()
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT object_id FROM lexical_records WHERE document_id = ? ORDER BY object_id",
@@ -138,7 +84,6 @@ class LexicalStore:
     def search(
         self, query: str, *, limit: int = 20, document_id: str | None = None
     ) -> list[dict[str, object]]:
-        self.initialize()
         if not query.strip():
             return []
         where_document = "AND r.document_id = ?" if document_id else ""
@@ -165,12 +110,10 @@ class LexicalStore:
         return [dict(row) for row in rows]
 
     def delete_document(self, document_id: str) -> None:
-        self.initialize()
         with self._connect() as connection:
             connection.execute("DELETE FROM lexical_records WHERE document_id = ?", (document_id,))
 
     def status(self) -> dict[str, object]:
-        self.initialize()
         with self._connect() as connection:
             count = connection.execute("SELECT COUNT(*) FROM lexical_records").fetchone()[0]
             fts5 = bool(

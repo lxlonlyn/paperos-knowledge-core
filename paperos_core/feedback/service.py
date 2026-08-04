@@ -29,43 +29,11 @@ class FeedbackService:
     ) -> None:
         self.paths = paths
         self.canonical_repository = canonical_repository
-        self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.paths.registry_db, timeout=30)
         connection.row_factory = sqlite3.Row
         return connection
-
-    def _initialize(self) -> None:
-        with self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS feedback (
-                    id TEXT PRIMARY KEY, feedback_type TEXT NOT NULL,
-                    target_id TEXT NOT NULL, query_id TEXT, answer_id TEXT,
-                    evidence_ids TEXT NOT NULL, comment TEXT, replacement_text TEXT,
-                    created_by TEXT, created_at TEXT NOT NULL,
-                    schema_version TEXT NOT NULL, id_version TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS corrections (
-                    id TEXT PRIMARY KEY, target_id TEXT NOT NULL,
-                    replacement_or_correction TEXT NOT NULL, status TEXT NOT NULL,
-                    created_at TEXT NOT NULL, schema_version TEXT NOT NULL,
-                    id_version TEXT NOT NULL, derived_from_feedback_id TEXT NOT NULL UNIQUE,
-                    source_chunk_ids TEXT NOT NULL, supersedes_object_id TEXT,
-                    version INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS improvements (
-                    id TEXT PRIMARY KEY, feedback_id TEXT NOT NULL UNIQUE,
-                    target_id TEXT NOT NULL, improvement_type TEXT NOT NULL,
-                    text TEXT, status TEXT NOT NULL, evidence_ids TEXT NOT NULL,
-                    source_chunk_ids TEXT NOT NULL, derived_from_ids TEXT NOT NULL,
-                    correction_id TEXT, version INTEGER NOT NULL,
-                    created_at TEXT NOT NULL, schema_version TEXT NOT NULL,
-                    id_version TEXT NOT NULL
-                );
-                """
-            )
 
     def record(self, request: FeedbackRequest) -> FeedbackRecord:
         validate_feedback(request, self.canonical_repository)

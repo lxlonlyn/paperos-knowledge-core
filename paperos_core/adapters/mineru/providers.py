@@ -11,7 +11,7 @@ from typing import Any, Protocol
 import httpx
 
 from paperos_core.adapters.mineru.schemas import MinerUParseResult, MinerUTask
-from paperos_core.config import MinerUConfig
+from paperos_core.config import MinerUSettings
 from paperos_core.domain.documents import SourceFile
 from paperos_core.errors import (
     MinerUAuthenticationError,
@@ -49,7 +49,7 @@ class MinerUCloudProvider:
 
     name = "mineru_cloud"
 
-    def __init__(self, config: MinerUConfig, *, max_retries: int = 3) -> None:
+    def __init__(self, config: MinerUSettings, *, max_retries: int = 3) -> None:
         self.config = config
         self.endpoint = (config.endpoint or DEFAULT_MINERU_CLOUD_ENDPOINT).rstrip("/")
         self.api_key = config.api_key_value()
@@ -70,9 +70,8 @@ class MinerUCloudProvider:
     def _require_key(self) -> str:
         if not self.api_key:
             raise MinerUConfigurationError(
-                "MinerU Cloud requires a non-empty mineru_ocr.api_key or its "
-                f"{self.config.api_key_env} environment override.",
-                affected="config/paperos.toml",
+                "MinerU Cloud requires the MINERU_API_KEY environment variable.",
+                affected="MINERU_API_KEY",
             )
         return self.api_key
 

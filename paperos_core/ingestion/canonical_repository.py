@@ -33,47 +33,12 @@ _Model = TypeVar("_Model", bound=BaseModel)
 class CanonicalRepository:
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
-        self.paths.initialize()
-        self._initialize_schema()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.paths.registry_db, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
-
-    def _initialize_schema(self) -> None:
-        try:
-            with self._connect() as connection:
-                connection.executescript(
-                    """
-                    CREATE TABLE IF NOT EXISTS canonical_snapshots (
-                        id TEXT PRIMARY KEY,
-                        source_file_id TEXT NOT NULL,
-                        parse_run_id TEXT NOT NULL,
-                        document_id TEXT NOT NULL,
-                        manifest_path TEXT NOT NULL UNIQUE,
-                        created_at TEXT NOT NULL,
-                        schema_version TEXT NOT NULL,
-                        id_version TEXT NOT NULL,
-                        pipeline_version TEXT NOT NULL,
-                        cleaning_version TEXT NOT NULL,
-                        classification_version TEXT NOT NULL,
-                        chunking_version TEXT NOT NULL,
-                        reference_processing_version TEXT NOT NULL,
-                        UNIQUE(parse_run_id, schema_version, pipeline_version),
-                        FOREIGN KEY (source_file_id) REFERENCES source_files(id),
-                        FOREIGN KEY (parse_run_id) REFERENCES parse_runs(id)
-                    );
-                    CREATE INDEX IF NOT EXISTS canonical_snapshot_source_idx
-                        ON canonical_snapshots(source_file_id);
-                    """
-                )
-        except sqlite3.Error as exc:
-            raise CanonicalStorageError(
-                f"Unable to initialize canonical repository: {exc}",
-                affected=self.paths.registry_db,
-            ) from exc
 
     def snapshot_manifest_path(self, source_file_id: str, parse_run_id: str) -> Path:
         snapshot_id = canonical_snapshot_id(parse_run_id)

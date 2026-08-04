@@ -199,7 +199,10 @@ def test_gate5_live_corpus_query_http(
         "comprehensive",
     }
 
-    with TestClient(create_app(load_settings(data_dir=run_root))) as client:
+    settings = load_settings(
+        environ={**os.environ, "PAPEROS_DATA_DIR": str(run_root)}
+    )
+    with TestClient(create_app(settings)) as client:
         comprehensive_response = client.post(
             "/api/v1/query",
             json={

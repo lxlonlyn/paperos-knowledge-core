@@ -11,12 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from paperos_core.config import load_config
+from paperos_core.config import load_settings
 
 
 @pytest.fixture(scope="session")
 def configured_data_dir() -> Path:
-    return load_config().data_dir
+    return load_settings().data_dir
 
 
 @pytest.fixture(scope="session")

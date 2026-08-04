@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -26,7 +27,10 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
     pdf_path, case = real_pdf_case
     run_root = gate1_run_dir / "gate4-live"
 
-    with TestClient(create_app(load_settings(data_dir=run_root))) as client, pdf_path.open("rb") as stream:
+    settings = load_settings(
+        environ={**os.environ, "PAPEROS_DATA_DIR": str(run_root)}
+    )
+    with TestClient(create_app(settings)) as client, pdf_path.open("rb") as stream:
         response = client.post(
             "/api/v1/ingest",
             params={"dataset": "papers"},
@@ -278,7 +282,9 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
         Path(rebuild["reports"][0]["cognee_manifest_path"]).read_text()
     )
 
-    api = create_app(load_settings(data_dir=run_root))
+    api = create_app(
+        load_settings(environ={**os.environ, "PAPEROS_DATA_DIR": str(run_root)})
+    )
     with TestClient(api) as client:
         datasets_response = client.get("/api/v1/datasets")
         assert datasets_response.status_code == 200
@@ -313,7 +319,10 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
 def test_gate1_api_reports_invalid_pdf(gate1_run_dir: Path, configured_data_dir: Path) -> None:
     non_pdf = configured_data_dir / "test-corpus" / "manifest.json"
     run_root = gate1_run_dir / "invalid-input"
-    with TestClient(create_app(load_settings(data_dir=run_root))) as client, non_pdf.open("rb") as stream:
+    settings = load_settings(
+        environ={**os.environ, "PAPEROS_DATA_DIR": str(run_root)}
+    )
+    with TestClient(create_app(settings)) as client, non_pdf.open("rb") as stream:
         response = client.post(
             "/api/v1/ingest",
             files={"file": (non_pdf.name, stream, "application/json")},

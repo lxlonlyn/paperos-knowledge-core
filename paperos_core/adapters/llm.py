@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from paperos_core.adapters.cognee.config import CogneeRuntimeConfig
+from paperos_core.config import DeepSeekSettings
 from paperos_core.domain.canonical import CanonicalBundle
 from paperos_core.domain.ids import semantic_object_id
 from paperos_core.domain.knowledge import (
@@ -78,24 +78,27 @@ class DeepSeekClient:
 
     def __init__(
         self,
-        config: CogneeRuntimeConfig,
-        *,
-        timeout_seconds: int = 180,
-        max_attempts: int = 3,
+        config: DeepSeekSettings,
     ) -> None:
         self.config = config
-        self.max_attempts = max_attempts
+        self.max_attempts = config.max_attempts
+        headers = {"Content-Type": "application/json"}
+        if config.api_key_value():
+            headers["Authorization"] = f"Bearer {config.api_key_value()}"
         self.client = httpx.AsyncClient(
-            base_url=config.llm_endpoint,
-            headers={
-                "Authorization": f"Bearer {config.llm_api_key.get_secret_value()}",
-                "Content-Type": "application/json",
-            },
-            timeout=timeout_seconds,
+            base_url=config.endpoint,
+            headers=headers,
+            timeout=config.timeout_seconds,
             trust_env=False,
         )
 
     async def health_check(self) -> dict[str, Any]:
+        if not self.config.endpoint or not self.config.model or not self.config.api_key_value():
+            raise SemanticEnrichmentError(
+                "DeepSeek requires endpoint/model configuration and DEEPSEEK_API_KEY.",
+                affected="DEEPSEEK_API_KEY",
+                retryable=False,
+            )
         try:
             response = await self.client.get("/models")
             response.raise_for_status()
@@ -103,12 +106,12 @@ class DeepSeekClient:
         except (httpx.HTTPError, ValueError) as exc:
             raise SemanticEnrichmentError(
                 f"DeepSeek health check failed: {exc}",
-                affected=f"{self.config.llm_endpoint}/models",
+                affected=f"{self.config.endpoint}/models",
             ) from exc
         if not isinstance(payload, dict):
             raise SemanticEnrichmentError(
                 "DeepSeek health response is not a JSON object.",
-                affected=f"{self.config.llm_endpoint}/models",
+                affected=f"{self.config.endpoint}/models",
             )
         return payload
 
@@ -177,11 +180,11 @@ class DeepSeekClient:
                 ensure_ascii=False,
             ),
         )
-        return _to_domain(bundle, extraction, self.config.llm_model)
+        return _to_domain(bundle, extraction, self.config.model)
 
     async def _generate_structured(self, *, system: str, user: str) -> _EnrichmentExtraction:
         request = {
-            "model": _deepseek_request_model(self.config.llm_model),
+            "model": _deepseek_request_model(self.config.model),
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -220,7 +223,7 @@ class DeepSeekClient:
                     await asyncio.sleep(min(2 ** (attempt - 1), 4))
         raise SemanticEnrichmentError(
             "DeepSeek structured semantic enrichment failed after finite retries.",
-            affected=f"{self.config.llm_endpoint}/chat/completions",
+            affected=f"{self.config.endpoint}/chat/completions",
             details={"attempts": failures},
         )
 
@@ -240,7 +243,7 @@ class DeepSeekClient:
                 compact["text"] = text[:3_000]
             compact_evidence.append(compact)
         request = {
-            "model": _deepseek_request_model(self.config.llm_model),
+            "model": _deepseek_request_model(self.config.model),
             "messages": [
                 {
                     "role": "system",
@@ -298,7 +301,7 @@ class DeepSeekClient:
                     await asyncio.sleep(min(2 ** (attempt - 1), 4))
         raise SemanticEnrichmentError(
             "DeepSeek answer synthesis failed after finite retries.",
-            affected=f"{self.config.llm_endpoint}/chat/completions",
+            affected=f"{self.config.endpoint}/chat/completions",
             details={"attempts": failures},
         )
 
@@ -307,7 +310,7 @@ class DeepSeekClient:
     ) -> tuple[_QueryPlanExtraction, str]:
         """Generate retrieval-only bilingual expansions with a validated schema."""
         request = {
-            "model": _deepseek_request_model(self.config.llm_model),
+            "model": _deepseek_request_model(self.config.model),
             "messages": [
                 {
                     "role": "system",
@@ -379,7 +382,7 @@ class DeepSeekClient:
                     await asyncio.sleep(min(2 ** (attempt - 1), 4))
         raise SemanticEnrichmentError(
             "DeepSeek query planning failed after finite retries.",
-            affected=f"{self.config.llm_endpoint}/chat/completions",
+            affected=f"{self.config.endpoint}/chat/completions",
             details={"attempts": failures},
         )
 

@@ -279,7 +279,10 @@ def test_gate6_live_feedback_improve_rebuild_and_operations(
         _run_gate6(run_root, configured_data_dir, corpus_manifest, logs)
     )
 
-    with TestClient(create_app(load_settings(data_dir=run_root))) as client:
+    settings = load_settings(
+        environ={**os.environ, "PAPEROS_DATA_DIR": str(run_root)}
+    )
+    with TestClient(create_app(settings)) as client:
         documents = client.get("/api/v1/documents")
         assert documents.status_code == 200
         inspected = client.get(

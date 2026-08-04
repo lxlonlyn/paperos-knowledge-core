@@ -1,5 +1,13 @@
-"""Health API service export."""
+"""Dependency-aware health HTTP routes."""
 
-from paperos_core.health import HealthService
+from fastapi import APIRouter
 
-__all__ = ["HealthService"]
+from paperos_core.api.dependencies import ApplicationDep
+
+router = APIRouter(tags=["health"])
+
+
+@router.get("/api/v1/health")
+@router.get("/health", include_in_schema=False)
+async def health(application: ApplicationDep) -> dict[str, object]:
+    return await application.services.health.report()

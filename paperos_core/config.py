@@ -1,4 +1,4 @@
-"""Validated, centralized PaperOS TOML configuration loading."""
+"""The single structured PaperOS configuration and environment secret boundary."""
 
 from __future__ import annotations
 
@@ -16,12 +16,12 @@ DEFAULT_DATA_DIR = Path("~/paperos-knowledge-core/data")
 DEFAULT_CONFIG_PATH = Path("config/paperos.toml")
 
 
-class StrictConfigModel(BaseModel):
+class StrictSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class ProjectConfig(StrictConfigModel):
-    data_dir: Path = DEFAULT_DATA_DIR
+class DataSettings(StrictSettings):
+    directory: Path = DEFAULT_DATA_DIR
     dataset: str = "papers"
 
     @field_validator("dataset")
@@ -29,90 +29,86 @@ class ProjectConfig(StrictConfigModel):
     def dataset_must_not_be_blank(cls, value: str) -> str:
         selected = value.strip()
         if not selected:
-            raise ValueError("project.dataset must not be blank")
+            raise ValueError("data.dataset must not be blank")
         return selected
 
 
-class APIConfig(StrictConfigModel):
+class APISettings(StrictSettings):
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
 
 
-class WorkerConfig(StrictConfigModel):
-    concurrency: int = Field(default=1, ge=1)
-    poll_interval_seconds: float = Field(default=1.0, gt=0)
-
-
-class MinerUConfig(StrictConfigModel):
-    provider: str = "mineru_cloud"
+class MinerUSettings(StrictSettings):
+    provider: str = "cloud"
     endpoint: str = ""
-    api_key_env: str = "MINERU_API_KEY"
-    api_key: SecretStr | None = Field(default=None, repr=False)
+    api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
     use_async_tasks: bool = True
     poll_interval_seconds: float = Field(default=2.0, gt=0)
     timeout_seconds: int = Field(default=1800, gt=0)
     preferred_backend: str = "auto"
 
-    @field_validator("api_key", mode="before")
-    @classmethod
-    def empty_api_key_is_unset(cls, value: object) -> object:
-        if isinstance(value, str) and not value.strip():
-            return None
-        return value
+    def api_key_value(self) -> str | None:
+        return self.api_key.get_secret_value() if self.api_key is not None else None
+
+
+class DeepSeekSettings(StrictSettings):
+    endpoint: str = ""
+    model: str = ""
+    api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
+    timeout_seconds: int = Field(default=180, gt=0)
+    max_attempts: int = Field(default=3, ge=1, le=10)
 
     def api_key_value(self) -> str | None:
         return self.api_key.get_secret_value() if self.api_key is not None else None
 
 
-class IngestionConfig(StrictConfigModel):
+class IngestionSettings(StrictSettings):
     max_file_mb: int = Field(default=200, gt=0)
-    retain_parser_debug_files: bool = True
     chunk_target_tokens: int = Field(default=900, gt=0)
     chunk_overlap_tokens: int = Field(default=135, ge=0)
-    chunk_boundary_window_tokens: int = Field(default=200, ge=0)
-    resolve_references: bool = True
-    semantic_enrichment: bool = True
 
 
-class EmbeddingModelConfig(StrictConfigModel):
-    enabled: bool = True
+class EmbeddingSettings(StrictSettings):
     model_path: Path = Path("models/embedding/embeddinggemma-300M-Q8_0.gguf")
+    model: str = "default"
     dimensions: int = Field(default=768, gt=0)
     max_tokens: int = Field(default=2048, gt=0)
 
 
-class RerankerModelConfig(StrictConfigModel):
-    enabled: bool = True
+class RerankerSettings(StrictSettings):
     model_path: Path = Path("models/reranker/qwen3-reranker-0.6b-q8_0.gguf")
     candidate_limit: int = Field(default=40, gt=0)
 
 
-class QueryExpansionModelConfig(StrictConfigModel):
-    enabled: bool = True
+class QueryExpansionSettings(StrictSettings):
     model_path: Path = Path("models/query-expansion/qmd-query-expansion-1.7B-q4_k_m.gguf")
     max_output_tokens: int = Field(default=512, gt=0)
 
 
-class LocalInferenceConfig(StrictConfigModel):
+class LocalInferenceSettings(StrictSettings):
     host: Literal["127.0.0.1", "localhost"] = "127.0.0.1"
     port: int = Field(default=8081, ge=1, le=65535)
     request_timeout_seconds: int = Field(default=120, gt=0)
     startup_timeout_seconds: int = Field(default=180, gt=0)
-    embedding: EmbeddingModelConfig = Field(default_factory=EmbeddingModelConfig)
-    reranker: RerankerModelConfig = Field(default_factory=RerankerModelConfig)
-    query_expansion: QueryExpansionModelConfig = Field(default_factory=QueryExpansionModelConfig)
+    embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
+    reranker: RerankerSettings = Field(default_factory=RerankerSettings)
+    query_expansion: QueryExpansionSettings = Field(default_factory=QueryExpansionSettings)
 
 
-class LexicalIndexConfig(StrictConfigModel):
-    path: Path = Path("indexes/lexical.sqlite")
-    fts_table: str = "chunk_fts"
+class CogneeSettings(StrictSettings):
+    system_database: Path = Path("cognee/system/databases")
+    vector_database: Path = Path("cognee/vector")
+    graph_database: Path = Path("cognee/graph")
+    db_provider: str = "sqlite"
+    vector_provider: str = "lancedb"
+    graph_provider: str = "kuzu"
+    deepseek: DeepSeekSettings = Field(default_factory=DeepSeekSettings, exclude=True)
+    local_inference: LocalInferenceSettings = Field(
+        default_factory=LocalInferenceSettings, exclude=True
+    )
 
 
-class IndexesConfig(StrictConfigModel):
-    lexical: LexicalIndexConfig = Field(default_factory=LexicalIndexConfig)
-
-
-class RetrievalProfileConfig(StrictConfigModel):
+class RetrievalProfileSettings(StrictSettings):
     lexical_weight: float = Field(default=1.0, ge=0)
     semantic_weight: float = Field(default=1.0, ge=0)
     graph_weight: float = Field(default=1.0, ge=0)
@@ -120,59 +116,40 @@ class RetrievalProfileConfig(StrictConfigModel):
     confirmed_knowledge_weight: float = Field(default=1.2, ge=0)
 
 
-class RetrievalProfilesConfig(StrictConfigModel):
-    comprehensive: RetrievalProfileConfig = Field(default_factory=RetrievalProfileConfig)
-    truth: RetrievalProfileConfig = Field(default_factory=RetrievalProfileConfig)
-    associative: RetrievalProfileConfig = Field(default_factory=RetrievalProfileConfig)
+class RetrievalProfilesSettings(StrictSettings):
+    comprehensive: RetrievalProfileSettings = Field(default_factory=RetrievalProfileSettings)
+    truth: RetrievalProfileSettings = Field(default_factory=RetrievalProfileSettings)
+    associative: RetrievalProfileSettings = Field(default_factory=RetrievalProfileSettings)
 
 
-class RetrievalConfig(StrictConfigModel):
+class RetrievalSettings(StrictSettings):
     default_profile: Literal["comprehensive", "truth", "associative"] = "comprehensive"
     top_k: int = Field(default=12, gt=0)
     candidate_pool_size: int = Field(default=40, gt=0)
     graph_depth: int = Field(default=2, ge=0)
     max_chunks_per_document: int = Field(default=3, gt=0)
     max_chunks_per_section: int = Field(default=2, gt=0)
-    profiles: RetrievalProfilesConfig = Field(default_factory=RetrievalProfilesConfig)
+    profiles: RetrievalProfilesSettings = Field(default_factory=RetrievalProfilesSettings)
 
 
-class TestingConfig(StrictConfigModel):
-    corpus_dir: Path = Path("test-corpus/pdfs")
-    expected_dir: Path = Path("test-corpus/expected")
-    queries_dir: Path = Path("test-corpus/queries")
-    run_dir: Path = Path("test-runs")
-    require_real_pdf: bool = True
-    require_live_mineru: bool = True
-    require_live_cognee: bool = True
-    require_live_local_models: bool = True
-    require_live_deepseek: bool = True
-    fail_on_missing_dependency: bool = True
-    minimum_pdf_count: int = Field(default=1, ge=1)
-
-
-class PaperOSConfig(StrictConfigModel):
-    project: ProjectConfig = Field(default_factory=ProjectConfig)
-    api: APIConfig = Field(default_factory=APIConfig)
-    worker: WorkerConfig = Field(default_factory=WorkerConfig)
-    mineru_ocr: MinerUConfig = Field(default_factory=MinerUConfig)
-    ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
-    local_inference: LocalInferenceConfig = Field(default_factory=LocalInferenceConfig)
-    indexes: IndexesConfig = Field(default_factory=IndexesConfig)
-    retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
-    testing: TestingConfig = Field(default_factory=TestingConfig)
+class RuntimeSettings(StrictSettings):
+    data: DataSettings = Field(default_factory=DataSettings)
+    mineru: MinerUSettings = Field(default_factory=MinerUSettings)
+    deepseek: DeepSeekSettings = Field(default_factory=DeepSeekSettings)
+    local_inference: LocalInferenceSettings = Field(default_factory=LocalInferenceSettings)
+    cognee: CogneeSettings = Field(default_factory=CogneeSettings)
+    ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
+    retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
+    api: APISettings = Field(default_factory=APISettings)
     config_path: Path | None = Field(default=None, exclude=True)
-    configured_data_dir: Path | None = Field(default=None, exclude=True)
 
     @property
     def data_dir(self) -> Path:
-        return self.project.data_dir
+        return self.data.directory
 
     @property
     def dataset(self) -> str:
-        return self.project.dataset
-
-
-RuntimeSettings = PaperOSConfig
+        return self.data.dataset
 
 
 def _resolve_path(value: str | Path, *, base_dir: Path) -> Path:
@@ -182,18 +159,16 @@ def _resolve_path(value: str | Path, *, base_dir: Path) -> Path:
     return expanded.resolve(strict=False)
 
 
-def load_config(
+def load_settings(
     path: Path | None = None,
     *,
-    data_dir: Path | None = None,
     environ: Mapping[str, str] | None = None,
-) -> PaperOSConfig:
-    """Load TOML with environment overrides for paths and configured secrets."""
+) -> RuntimeSettings:
+    """Load TOML, then apply the documented environment-only overrides."""
 
     env = os.environ if environ is None else environ
     explicit_config = path is not None
     config_path = (path or DEFAULT_CONFIG_PATH).expanduser().resolve(strict=False)
-
     raw: dict[str, object] = {}
     if config_path.exists():
         if not config_path.is_file():
@@ -213,55 +188,54 @@ def load_config(
             "The requested PaperOS config file does not exist.", affected=config_path
         )
 
-    project_raw = raw.setdefault("project", {})
-    if not isinstance(project_raw, dict):
-        raise ConfigurationError(
-            "The [project] configuration section must be a TOML table.",
-            affected=config_path,
-        )
+    data_raw = raw.setdefault("data", {})
+    if not isinstance(data_raw, dict):
+        raise ConfigurationError("The [data] section must be a TOML table.")
+    selected_data = env.get("PAPEROS_DATA_DIR", data_raw.get("directory", DEFAULT_DATA_DIR))
+    data_root = _resolve_path(selected_data, base_dir=Path.cwd())
+    data_raw["directory"] = data_root
 
-    toml_data_dir = project_raw.get("data_dir", DEFAULT_DATA_DIR)
-    configured_data_dir = _resolve_path(toml_data_dir, base_dir=Path.cwd())
-    env_data_dir = env.get("PAPEROS_DATA_DIR")
-    selected_data_dir = data_dir or (Path(env_data_dir) if env_data_dir else toml_data_dir)
-    project_raw["data_dir"] = _resolve_path(selected_data_dir, base_dir=Path.cwd())
+    mineru_raw = raw.setdefault("mineru", {})
+    deepseek_raw = raw.setdefault("deepseek", {})
+    if not isinstance(mineru_raw, dict) or not isinstance(deepseek_raw, dict):
+        raise ConfigurationError("The [mineru] and [deepseek] sections must be TOML tables.")
+    if "api_key" in mineru_raw or "api_key" in deepseek_raw:
+        raise ConfigurationError(
+            "API keys are forbidden in paperos.toml; use MINERU_API_KEY and "
+            "DEEPSEEK_API_KEY environment variables."
+        )
+    mineru_key = env.get("MINERU_API_KEY", "").strip()
+    deepseek_key = env.get("DEEPSEEK_API_KEY", "").strip()
+    if mineru_key:
+        mineru_raw["api_key"] = mineru_key
+    if deepseek_key:
+        deepseek_raw["api_key"] = deepseek_key
 
-    mineru_raw = raw.setdefault("mineru_ocr", {})
-    if not isinstance(mineru_raw, dict):
-        raise ConfigurationError(
-            "The [mineru_ocr] configuration section must be a TOML table.",
-            affected=config_path,
-        )
-    api_key_env = mineru_raw.get("api_key_env", "MINERU_API_KEY")
-    if not isinstance(api_key_env, str) or not api_key_env.strip():
-        raise ConfigurationError(
-            "mineru_ocr.api_key_env must name a non-empty environment variable.",
-            affected=config_path,
-        )
-    environment_api_key = env.get(api_key_env)
-    if environment_api_key:
-        mineru_raw["api_key"] = environment_api_key
+    cognee_raw = raw.setdefault("cognee", {})
+    if not isinstance(cognee_raw, dict):
+        raise ConfigurationError("The [cognee] section must be a TOML table.")
+    for key, default in (
+        ("system_database", "cognee/system/databases"),
+        ("vector_database", "cognee/vector"),
+        ("graph_database", "cognee/graph"),
+    ):
+        cognee_raw[key] = _resolve_path(cognee_raw.get(key, default), base_dir=data_root)
 
     try:
-        config = PaperOSConfig.model_validate(raw)
+        settings = RuntimeSettings.model_validate(raw)
     except ValidationError as exc:
         raise ConfigurationError(
             f"Invalid PaperOS configuration: {exc}", affected=config_path
         ) from exc
-    return config.model_copy(
+    cognee = settings.cognee.model_copy(
         update={
-            "config_path": config_path if config_path.exists() else None,
-            "configured_data_dir": configured_data_dir,
+            "deepseek": settings.deepseek,
+            "local_inference": settings.local_inference,
         }
     )
-
-
-def load_settings(
-    path: Path | None = None,
-    *,
-    data_dir: Path | None = None,
-    environ: Mapping[str, str] | None = None,
-) -> RuntimeSettings:
-    """Load the settings used by the source-deployed server application."""
-
-    return load_config(path, data_dir=data_dir, environ=environ)
+    return settings.model_copy(
+        update={
+            "cognee": cognee,
+            "config_path": config_path if config_path.exists() else None,
+        }
+    )

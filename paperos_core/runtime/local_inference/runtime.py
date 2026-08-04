@@ -50,8 +50,7 @@ class LocalInferenceRuntime:
         if configured.is_absolute():
             result = configured
         else:
-            base = self.settings.configured_data_dir or self.paths.root
-            result = base / configured
+            result = self.paths.root / configured
         result = result.resolve(strict=False)
         if not result.is_file():
             raise LocalInferenceConfigurationError(

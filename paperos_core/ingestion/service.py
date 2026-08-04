@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from paperos_core.adapters.mineru.client import MinerUClient
 from paperos_core.adapters.mineru.mapper import MinerUCanonicalMapper
-from paperos_core.config import PaperOSConfig
+from paperos_core.config import RuntimeSettings
 from paperos_core.domain.canonical import CanonicalIngestionResult
 from paperos_core.domain.documents import IngestionJob, IngestionResult, SourceFile
 from paperos_core.domain.enums import IngestionJobStatus, ParseRunStatus
@@ -30,7 +30,7 @@ class IngestionService:
 
     def __init__(
         self,
-        config: PaperOSConfig,
+        config: RuntimeSettings,
         registry: SourceRegistry,
         parser_artifacts: ParserArtifactRepository,
         mineru: MinerUClient,
@@ -94,12 +94,12 @@ class IngestionService:
         )
         source = intake.source_file
         options = requested_options or {}
-        backend = str(options.get("model_version") or self.config.mineru_ocr.preferred_backend)
+        backend = str(options.get("model_version") or self.config.mineru.preferred_backend)
         if backend == "auto":
             backend = "vlm"
         parse_run = self.parser_artifacts.create_parse_run(
             source,
-            provider=self.config.mineru_ocr.provider,
+            provider=self.config.mineru.provider,
             backend=backend,
             request_options=options,
         )

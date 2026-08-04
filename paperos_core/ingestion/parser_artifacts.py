@@ -30,64 +30,12 @@ _MAX_UNCOMPRESSED_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
 class ParserArtifactRepository:
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
-        self.paths.initialize()
-        self._initialize_schema()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.paths.registry_db, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
-
-    def _initialize_schema(self) -> None:
-        try:
-            with self._connect() as connection:
-                connection.executescript(
-                    """
-                    CREATE TABLE IF NOT EXISTS parse_runs (
-                        id TEXT PRIMARY KEY,
-                        source_file_id TEXT NOT NULL,
-                        provider TEXT NOT NULL,
-                        backend TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        request_options TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        completed_at TEXT,
-                        artifact_manifest_path TEXT NOT NULL UNIQUE,
-                        schema_version TEXT NOT NULL,
-                        pipeline_version TEXT NOT NULL,
-                        provider_task_id TEXT,
-                        provider_version TEXT,
-                        provider_model TEXT,
-                        error_code TEXT,
-                        error_message TEXT,
-                        raw_metadata TEXT,
-                        FOREIGN KEY (source_file_id) REFERENCES source_files(id)
-                    );
-                    CREATE TABLE IF NOT EXISTS parser_artifacts (
-                        id TEXT PRIMARY KEY,
-                        parse_run_id TEXT NOT NULL,
-                        artifact_type TEXT NOT NULL,
-                        storage_path TEXT NOT NULL UNIQUE,
-                        sha256 TEXT NOT NULL,
-                        size_bytes INTEGER NOT NULL,
-                        created_at TEXT NOT NULL,
-                        media_type TEXT,
-                        page INTEGER,
-                        provider_name TEXT,
-                        provider_metadata TEXT,
-                        id_version TEXT NOT NULL,
-                        FOREIGN KEY (parse_run_id) REFERENCES parse_runs(id)
-                    );
-                    CREATE INDEX IF NOT EXISTS parser_artifacts_run_idx
-                        ON parser_artifacts(parse_run_id);
-                    """
-                )
-        except sqlite3.Error as exc:
-            raise SourceRegistryError(
-                f"Unable to initialize parser-artifact repository: {exc}",
-                affected=self.paths.registry_db,
-            ) from exc
 
     @staticmethod
     def _json(value: Any) -> str | None:

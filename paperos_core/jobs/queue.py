@@ -31,16 +31,6 @@ class OperationalJob(BaseModel):
 class JobQueue:
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
-        with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS operational_jobs (
-                    id TEXT PRIMARY KEY, job_type TEXT NOT NULL, payload TEXT NOT NULL,
-                    status TEXT NOT NULL, created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL, error TEXT, result TEXT
-                )
-                """
-            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.paths.registry_db, timeout=30)

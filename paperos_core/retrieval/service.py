@@ -5,7 +5,7 @@ from __future__ import annotations
 from paperos_core.adapters.cognee.repository import CogneeRepository
 from paperos_core.adapters.llm import DeepSeekClient
 from paperos_core.runtime.local_inference.client import LocalInferenceClient
-from paperos_core.config import PaperOSConfig
+from paperos_core.config import RuntimeSettings
 from paperos_core.feedback.service import FeedbackService
 from paperos_core.indexes.manager import IndexManager
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
@@ -41,7 +41,7 @@ class RetrievalService:
 
     def __init__(
         self,
-        config: PaperOSConfig,
+        config: RuntimeSettings,
         paths: DataPaths,
         canonical_repository: CanonicalRepository,
         registry: SourceRegistry,
@@ -119,7 +119,7 @@ class RetrievalService:
             ),
             hyde_text=llm_plan.hyde_text or expansion_result.hyde_text,
             raw_output=expansion_result.raw_output,
-            planner_model=self.deepseek.config.llm_model,
+            planner_model=self.deepseek.config.model,
             planner_raw_output=planner_raw,
         )
         pool = plan.candidate_pool_size
@@ -242,7 +242,7 @@ class RetrievalService:
             profile=request.profile,
             dataset=dataset_name,
             answer=answer,
-            answer_model=self.deepseek.config.llm_model,
+            answer_model=self.deepseek.config.model,
             stages=stages,
             channels_used=list(channels),
             expansion=expansion,

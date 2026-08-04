@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from paperos_core.jobs.queue import JobQueue
     from paperos_core.jobs.worker import BackgroundWorker
     from paperos_core.retrieval.service import RetrievalService
+    from paperos_core.storage.initializer import StorageInitializer
 
 
 @dataclass(slots=True)
@@ -62,6 +64,7 @@ class Application:
     deepseek: DeepSeekClient
     knowledge_pipeline: CogneePipeline
     queue: JobQueue
+    storage: StorageInitializer
     _started: bool = field(default=False, init=False)
     _closed: bool = field(default=False, init=False)
 
@@ -72,7 +75,13 @@ class Application:
             raise RuntimeError("A closed PaperOS Application cannot be restarted.")
         if self._started:
             return
-        self.paths.initialize()
+        self.storage.initialize()
+        status = self.storage.validate()
+        if not status.valid:
+            raise RuntimeError(
+                "PaperOS local schema validation failed: "
+                + ", ".join(status.missing_tables)
+            )
         try:
             await self.runtime.local_inference.start()
             await self.runtime.worker.start()
@@ -99,6 +108,9 @@ def create_application(settings: RuntimeSettings) -> Application:
     """Assemble the object graph without starting a process or background task."""
 
     paths = build_data_paths(settings.data_dir)
+    from paperos_core.storage.initializer import StorageInitializer
+
+    storage = StorageInitializer(paths)
     registry = SourceRegistry(paths)
     parser_artifacts = ParserArtifactRepository(paths)
     canonical_repository = CanonicalRepository(paths)
@@ -110,13 +122,11 @@ def create_application(settings: RuntimeSettings) -> Application:
             "Project configuration is required to configure Cognee."
         )
     from paperos_core.adapters.cognee.config import (
-        configure_cognee_environment,
-        reassert_cognee_runtime,
+        configure_cognee,
+        reset_cognee_configuration_caches,
     )
 
-    cognee_config = configure_cognee_environment(
-        paths, env_path=settings.config_path.parent.parent / ".env"
-    )
+    configure_cognee(settings.cognee)
     from paperos_core.adapters.cognee.pipeline import CogneePipeline
     from paperos_core.adapters.cognee.repository import CogneeRepository
     from paperos_core.adapters.llm import DeepSeekClient
@@ -131,7 +141,7 @@ def create_application(settings: RuntimeSettings) -> Application:
     from paperos_core.runtime.local_inference.runtime import LocalInferenceRuntime
     from paperos_core.retrieval.service import RetrievalService
 
-    reassert_cognee_runtime(paths)
+    reset_cognee_configuration_caches()
     local = settings.local_inference
     local_inference_client = LocalInferenceClient(
         f"http://{local.host}:{local.port}",
@@ -140,15 +150,12 @@ def create_application(settings: RuntimeSettings) -> Application:
     local_inference_runtime = LocalInferenceRuntime(
         settings, paths, local_inference_client
     )
-    deepseek = DeepSeekClient(
-        cognee_config,
-        timeout_seconds=local.request_timeout_seconds,
-    )
+    deepseek = DeepSeekClient(settings.deepseek)
     cognee_repository = CogneeRepository(paths)
     index_manager = IndexManager(
         paths,
-        embedding_model=cognee_config.embedding_model,
-        embedding_dimensions=cognee_config.embedding_dimensions,
+        embedding_model=local.embedding.model,
+        embedding_dimensions=local.embedding.dimensions,
     )
     knowledge_pipeline = CogneePipeline(
         paths,
@@ -158,7 +165,9 @@ def create_application(settings: RuntimeSettings) -> Application:
         index_manager,
         deepseek,
     )
-    rebuilder = DerivedDataRebuilder(paths, canonical_repository, knowledge_pipeline)
+    rebuilder = DerivedDataRebuilder(
+        paths, canonical_repository, knowledge_pipeline, storage
+    )
     feedback = FeedbackService(paths, canonical_repository)
     queue = JobQueue(paths)
     retrieval = RetrievalService(
@@ -172,15 +181,15 @@ def create_application(settings: RuntimeSettings) -> Application:
         deepseek,
         feedback,
     )
-    if settings.mineru_ocr.provider != "mineru_cloud":
+    if settings.mineru.provider not in {"cloud", "mineru_cloud"}:
         from paperos_core.errors import MinerUConfigurationError
 
         raise MinerUConfigurationError(
-            f"Unsupported configured MinerU provider: {settings.mineru_ocr.provider}",
-            affected="mineru_ocr.provider",
+            f"Unsupported configured MinerU provider: {settings.mineru.provider}",
+            affected="mineru.provider",
         )
-    provider = MinerUCloudProvider(settings.mineru_ocr)
-    mineru = MinerUClient(provider, settings.mineru_ocr)
+    provider = MinerUCloudProvider(settings.mineru)
+    mineru = MinerUClient(provider, settings.mineru)
     ingestion = IngestionService(
         settings,
         registry,
@@ -223,7 +232,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         rebuilder,
         documents,
         feedback,
-        poll_interval_seconds=settings.worker.poll_interval_seconds,
+        poll_interval_seconds=1.0,
     )
     runtime = ManagedRuntime(
         local_inference=local_inference_runtime,
@@ -243,6 +252,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         deepseek=deepseek,
         knowledge_pipeline=knowledge_pipeline,
         queue=queue,
+        storage=storage,
     )
 
 
@@ -254,6 +264,7 @@ def application_from_config(
 ) -> Application:
     """Debug/test helper that still performs assembly only."""
 
-    return create_application(
-        load_settings(config_path, data_dir=data_dir, environ=environ)
-    )
+    selected_environment = dict(os.environ if environ is None else environ)
+    if data_dir is not None:
+        selected_environment["PAPEROS_DATA_DIR"] = str(data_dir)
+    return create_application(load_settings(config_path, environ=selected_environment))

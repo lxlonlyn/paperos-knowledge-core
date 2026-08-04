@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from paperos_core.config import PaperOSConfig
+from paperos_core.config import RuntimeSettings
 from paperos_core.retrieval.candidates import QueryPlan, QueryRequest, RetrievalProfile
 
 
-def build_query_plan(request: QueryRequest, config: PaperOSConfig) -> QueryPlan:
+def build_query_plan(request: QueryRequest, config: RuntimeSettings) -> QueryPlan:
     profile_config = getattr(config.retrieval.profiles, request.profile.value)
     channels = {
         RetrievalProfile.TRUTH: ["lexical", "semantic", "confirmed_knowledge"],

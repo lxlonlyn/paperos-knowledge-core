@@ -95,6 +95,14 @@ class BackgroundWorker:
             failed = self.queue.fail(job.id, f"{type(exc).__name__}: {exc}")
             self._record("failed", job_id=job.id)
             return failed
+        finally:
+            if job.job_type == "ingest" and "path" in job.payload:
+                staged = Path(str(job.payload["path"]))
+                staged.unlink(missing_ok=True)
+                try:
+                    staged.parent.rmdir()
+                except OSError:
+                    pass
 
     def _record(self, status: str, *, job_id: str | None = None) -> None:
         payload = {

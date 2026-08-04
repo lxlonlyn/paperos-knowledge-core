@@ -8,13 +8,13 @@ from typing import Any
 
 from paperos_core.adapters.mineru.providers import MinerUProvider
 from paperos_core.adapters.mineru.schemas import MinerUParseResult
-from paperos_core.config import MinerUConfig
+from paperos_core.config import MinerUSettings
 from paperos_core.domain.documents import SourceFile
 from paperos_core.errors import MinerUParseError, MinerUTimeoutError
 
 
 class MinerUClient:
-    def __init__(self, provider: MinerUProvider, config: MinerUConfig) -> None:
+    def __init__(self, provider: MinerUProvider, config: MinerUSettings) -> None:
         self.provider = provider
         self.config = config
 

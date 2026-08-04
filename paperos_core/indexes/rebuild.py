@@ -11,6 +11,7 @@ from paperos_core.adapters.cognee.pipeline import CogneePipeline
 from paperos_core.indexes.manifest import IndexingReport
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.paths import DataPaths
+from paperos_core.storage.initializer import StorageInitializer
 
 
 class RebuildReport(BaseModel):
@@ -27,10 +28,12 @@ class DerivedDataRebuilder:
         paths: DataPaths,
         canonical_repository: CanonicalRepository,
         pipeline: CogneePipeline,
+        storage: StorageInitializer,
     ) -> None:
         self.paths = paths
         self.canonical_repository = canonical_repository
         self.pipeline = pipeline
+        self.storage = storage
 
     async def rebuild(self, snapshot_id: str | None = None) -> RebuildReport:
         selected = (
@@ -62,6 +65,7 @@ class DerivedDataRebuilder:
         for selected_id in selected:
             self.canonical_repository.verify_snapshot(selected_id)
         deleted = await self._delete_derived_data()
+        self.storage.initialize_lexical()
         reports: list[IndexingReport] = []
         for selected_id in selected:
             bundle = self.canonical_repository.get_bundle(selected_id)
