@@ -161,7 +161,9 @@ def status(
             ]
             payload["indexes"] = {
                 "lexical": application.retrieval.index_manager.lexical.status(),
-                "vector": application.retrieval.index_manager.vector.status(),
+                "vector": asyncio.run(
+                    application.knowledge_pipeline.cognee_repository.vector_status()
+                ),
             }
             _emit(payload)
     except PaperOSError as exc:

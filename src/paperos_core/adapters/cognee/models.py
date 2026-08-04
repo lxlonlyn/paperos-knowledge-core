@@ -16,8 +16,10 @@ from paperos_core.domain.datapoints import (
     ReferenceDataPoint,
     SectionDataPoint,
     SummaryDataPoint,
+    TripletDataPoint,
     cognee_uuid,
 )
+from paperos_core.domain.ids import knowledge_triplet_id
 from paperos_core.domain.knowledge import SemanticEnrichment
 from paperos_core.domain.provenance import RelationRecord, RelationType
 
@@ -175,7 +177,108 @@ def canonical_to_datapoints(
         for summary in enrichment.summaries
     )
     relations = _canonical_relations(bundle) + _semantic_relations(bundle, enrichment)
+    triplet_nodes, triplet_links = _triplet_datapoints(
+        bundle,
+        nodes,
+        relations,
+        common,
+    )
+    nodes.extend(triplet_nodes)
+    relations.extend(triplet_links)
     return DataPointGraph(nodes=nodes, relations=relations)
+
+
+def _triplet_datapoints(
+    bundle: CanonicalBundle,
+    nodes: list[PaperOSDataPoint],
+    relations: list[RelationRecord],
+    common: dict[str, str],
+) -> tuple[list[TripletDataPoint], list[RelationRecord]]:
+    """Represent every typed edge as a vector-searchable graph node."""
+    nodes_by_id = {node.canonical_id: node for node in nodes}
+    triplets: list[TripletDataPoint] = []
+    links: list[RelationRecord] = []
+    searchable_relations = {
+        RelationType.MENTIONS,
+        RelationType.SUPPORTS,
+        RelationType.CONTRADICTS,
+        RelationType.USES,
+        RelationType.EXTENDS,
+        RelationType.COMPARES_WITH,
+        RelationType.EVALUATES_ON,
+        RelationType.PROPOSES,
+        RelationType.RELATED_TO,
+    }
+    for relation in relations:
+        if relation.relation_type not in searchable_relations:
+            continue
+        source = nodes_by_id.get(relation.source_id)
+        target = nodes_by_id.get(relation.target_id)
+        if source is None or target is None:
+            continue
+        source_chunks = list(
+            dict.fromkeys(
+                [
+                    *relation.source_chunk_ids,
+                    *source.source_chunk_ids,
+                    *target.source_chunk_ids,
+                ]
+            )
+        )
+        triplet_id = knowledge_triplet_id(
+            bundle.snapshot.id,
+            relation.source_id,
+            relation.relation_type.value,
+            relation.target_id,
+            source_chunks,
+        )
+        triplets.append(
+            TripletDataPoint(
+                id=cognee_uuid(triplet_id),
+                canonical_id=triplet_id,
+                relation_type=relation.relation_type.value,
+                source_object_id=relation.source_id,
+                target_object_id=relation.target_id,
+                text=(
+                    f"{_datapoint_label(source)} "
+                    f"{relation.relation_type.value.replace('_', ' ').casefold()} "
+                    f"{_datapoint_label(target)}"
+                ),
+                source_chunk_ids=source_chunks,
+                derived_from_ids=list(
+                    dict.fromkeys(
+                        [
+                            relation.source_id,
+                            relation.target_id,
+                            *relation.derived_from_ids,
+                        ]
+                    )
+                ),
+                **common,
+            )
+        )
+        for target_id, link_type in (
+            (relation.source_id, RelationType.TRIPLET_SOURCE),
+            (relation.target_id, RelationType.TRIPLET_TARGET),
+        ):
+            links.append(
+                RelationRecord(
+                    source_id=triplet_id,
+                    target_id=target_id,
+                    relation_type=link_type,
+                    source_chunk_ids=source_chunks,
+                    derived_from_ids=relation.derived_from_ids,
+                )
+            )
+    return triplets, links
+
+
+def _datapoint_label(node: PaperOSDataPoint) -> str:
+    for field in ("name", "title", "text", "raw_text", "description"):
+        value = getattr(node, field, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return node.canonical_id
 
 
 def _canonical_relations(bundle: CanonicalBundle) -> list[RelationRecord]:

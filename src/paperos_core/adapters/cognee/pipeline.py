@@ -83,10 +83,12 @@ class CogneePipeline:
             document_id=bundle.document.id,
         )
         await self.cognee_repository.verify_graph(graph)
+        cognee_vector_ids = await self.cognee_repository.verify_vector_indexes(graph)
         index_manifest, index_manifest_path = await self.index_manager.index_bundle(
             bundle,
             cognee_manifest=cognee_manifest,
             cognee_object_ids=sorted(graph.id_mapping),
+            cognee_vector_object_ids=cognee_vector_ids,
             relation_count=len(graph.relations),
         )
         report = IndexingReport(

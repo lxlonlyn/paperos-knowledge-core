@@ -259,6 +259,13 @@ The default local Cognee deployment uses:
 
 All three stores reside under `DATA_DIR/cognee/`.
 
+Cognee/LanceDB is the sole semantic vector layer. Chunk text is embedded once
+through `ChunkDataPoint.metadata.index_fields`; PaperOS does not create an
+additional `indexes/vectors.sqlite3`. Semantic, Entity/Claim, Summary, and
+Triplet lookup uses Cognee vectors, and graph retrieval performs typed multi-hop
+traversal in Cognee before backtracking to canonical chunks. SQLite FTS5 remains
+the exact lexical supplement.
+
 No separate database server is required for the default configuration.
 
 ## Runtime environment

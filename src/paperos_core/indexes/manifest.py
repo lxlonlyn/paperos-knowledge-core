@@ -11,8 +11,8 @@ from paperos_core.domain.documents import utc_now
 
 INDEX_SCHEMA_VERSION = "1.0"
 LEXICAL_INDEX_VERSION = "1"
-VECTOR_INDEX_VERSION = "1"
-COGNEE_MAPPING_VERSION = "1"
+VECTOR_INDEX_VERSION = "2"
+COGNEE_MAPPING_VERSION = "2"
 
 
 class IndexManifest(BaseModel):
@@ -26,6 +26,7 @@ class IndexManifest(BaseModel):
     cognee_mapping_version: str = COGNEE_MAPPING_VERSION
     embedding_model: str
     embedding_dimensions: int = Field(gt=0)
+    vector_backend: str = "cognee"
     lexical_database: Path
     vector_database: Path
     cognee_manifest: Path
@@ -45,6 +46,7 @@ class IndexingReport(BaseModel):
     cognee_manifest_path: Path
     lexical_database: Path
     vector_database: Path
+    vector_backend: str = "cognee"
     cognee_object_count: int = Field(ge=0)
     relation_count: int = Field(ge=0)
     lexical_object_count: int = Field(ge=0)

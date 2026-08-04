@@ -7,6 +7,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from paperos_core.adapters.cognee.repository import CogneeRepository
 from paperos_core.errors import DocumentNotFoundError
 from paperos_core.indexes.manager import IndexManager
 from paperos_core.indexes.rebuild import DerivedDataRebuilder
@@ -54,12 +55,14 @@ class DocumentService:
         ingestion: IngestionService,
         rebuilder: DerivedDataRebuilder,
         indexes: IndexManager,
+        cognee: CogneeRepository,
     ) -> None:
         self.paths = paths
         self.canonical_repository = canonical_repository
         self.ingestion = ingestion
         self.rebuilder = rebuilder
         self.indexes = indexes
+        self.cognee = cognee
         with self._connect() as connection:
             connection.execute(
                 """
@@ -147,14 +150,18 @@ class DocumentService:
     async def delete(self, document_id: str) -> DocumentDeletionReport:
         self.inspect(document_id)
         lexical_count = len(self.indexes.lexical.object_ids(document_id))
-        vector_count = len(self.indexes.vector.object_ids(document_id))
+        bundle = next(
+            bundle
+            for bundle in reversed(self.canonical_repository.list_bundles())
+            if bundle.document.id == document_id
+        )
+        vector_count = await self.cognee.delete_document_vectors(bundle.snapshot.id)
         with self._connect() as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO document_tombstones(document_id) VALUES (?)",
                 (document_id,),
             )
         self.indexes.lexical.delete_document(document_id)
-        self.indexes.vector.delete_document(document_id)
         return DocumentDeletionReport(
             document_id=document_id,
             removed_lexical_objects=lexical_count,

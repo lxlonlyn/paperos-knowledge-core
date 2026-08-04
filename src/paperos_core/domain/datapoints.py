@@ -103,3 +103,13 @@ class SummaryDataPoint(PaperOSDataPoint):
     text: str
     status: str
     metadata: dict[str, Any] = {"index_fields": ["text"]}  # noqa: RUF012
+
+
+class TripletDataPoint(PaperOSDataPoint):
+    """Searchable typed-edge node with canonical provenance."""
+
+    relation_type: str
+    source_object_id: str
+    target_object_id: str
+    text: str
+    metadata: dict[str, Any] = {"index_fields": ["text"]}  # noqa: RUF012

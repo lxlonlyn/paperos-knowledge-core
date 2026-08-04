@@ -304,3 +304,69 @@
   and edge-label fallback warnings. Actual PaperOS embeddings use the configured
   local 768-dimensional GGUF, and canonical relation/provenance checks pass.
 - Next entry: none; Gate 6 is the final gate.
+
+## 2026-08-04T02:40:00Z — Cognee unified query-backbone correction
+
+- Passed gates: cumulative Gate 1–6 remain passed after the retrieval/index
+  correction.
+- Review outcome: both reported issues were confirmed. Runtime graph retrieval
+  scanned PaperOS relation manifests, Entity/Claim retrieval scanned enrichment
+  JSON, and Chunk text was embedded both by Cognee and by PaperOS
+  `indexes/vectors.sqlite3`.
+- Implementation:
+  - Cognee/LanceDB is now the only semantic vector layer for Chunk, Entity,
+    Claim, Summary, ConceptRelation, and searchable typed Triplet DataPoints;
+  - graph retrieval vector-seeds Cognee nodes, executes Cognee graph-engine
+    multi-hop neighborhood traversal, filters typed edges, and backtracks edge
+    and node provenance to canonical chunks;
+  - global-context Summary retrieval also uses Cognee vectors; runtime retrieval
+    no longer reads enrichment JSON or relation manifests;
+  - PaperOS retains SQLite FTS5 only. The historical SQLite embedding store is
+    removed and is deleted as a pre-v2 derived-data migration during rebuild;
+  - Cognee/index manifests use mapping/vector version 2 and query caches use
+    version 3.
+- Commands:
+  - `PAPEROS_TEST_RUN_ID=cognee-unified-20260804c LOG_LEVEL=WARNING conda run -n paperos pytest -q tests/integration/test_ingestion_pipeline.py -s`;
+  - `LOG_LEVEL=WARNING conda run -n paperos paperos rebuild --data-dir data/test-runs/gate5-live2-20260728/gate5-live`;
+  - `LOG_LEVEL=WARNING conda run -n paperos paperos query 'How do the active papers represent and evolve geometry?' --profile associative --data-dir data/test-runs/gate5-live2-20260728/gate5-live`;
+  - `conda run -n paperos ruff check src tests`;
+  - `conda run -n paperos mypy src`;
+  - `conda run -n paperos pytest -q tests/unit tests/contract`.
+- Genuine PDF:
+  `3d_gaussian_splatting_for_real_time_radiance_field_rendering.pdf`
+  (`f4c0c9f27e2d02b0265017f66049d471eb66cb50203bc918f51ba07d20cbbe11`).
+  The retained source PDF has the identical checksum.
+- Fresh cumulative run:
+  `data/test-runs/cognee-unified-20260804c/gate4-live/`. The final rebuilt
+  projection contains 400 Cognee nodes, 340 typed relations, 81 uniquely
+  vector-indexed canonical objects, 92 FTS objects, 30 Chunk vectors, 6 Claim
+  vectors, 7 Entity name vectors, 7 Entity description vectors, 1 Summary
+  vector, 6 ConceptRelation vectors, and 6 Triplet vectors. All vector
+  dimensions are 768. No `indexes/vectors.sqlite3` exists.
+- Query acceptance: the uncached associative CLI query executed all 12 stages;
+  semantic, Entity/Claim, graph, global-context, and confirmed-knowledge
+  channels were present; 9 evidence records were returned and
+  `provenance_complete=true`. Graph probing returned 94 actual traversed edges,
+  all 94 with canonical chunk provenance.
+- External services:
+  live MinerU completed submission/poll/download; DeepSeek enrichment,
+  planning, and synthesis completed; the prepared local EmbeddingGemma, Qwen3
+  reranker, and QMD models were used. One intermediate retry run received three
+  DeepSeek HTTP 503 responses and failed at the documented finite retry limit;
+  the final cumulative run then passed without lowering assertions.
+- Tests: final live integration 2 passed, 0 failed, 0 skipped in 258.22 seconds;
+  unit/contract 11 passed, 0 failed, 0 skipped. Ruff and strict mypy passed.
+- Logs:
+  - `data/test-runs/gate5-live2-20260728/gate5-live/logs/cognee-unified-live-integration-final.log`;
+  - `data/test-runs/gate5-live2-20260728/gate5-live/logs/cognee-unified-query-final.json`;
+  - `data/test-runs/gate5-live2-20260728/gate5-live/logs/cognee-unified-fresh-query-probe.json`;
+  - final Ruff, mypy, and unit/contract logs in the same directory.
+- Protected evidence: integration hash checks confirmed that raw PDF, MinerU
+  artifacts, and canonical files were unchanged across the derived rebuild.
+- Process lifecycle: every local-model gateway PID exited with code 0; no model
+  gateway, pytest, worker, or query process remains.
+- Known limitation: Cognee 1.4's Kuzu/Ladybug provider asserts when binding edge
+  types inside a variable-length neighborhood query. PaperOS therefore executes
+  the real neighborhood traversal in Cognee and applies the same strict typed
+  edge whitelist to the returned graph edges. No manifest fallback is used.
+- Next entry: none.

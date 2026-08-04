@@ -25,6 +25,8 @@ class RelationType(StrEnum):
     PROPOSES = "PROPOSES"
     RELATED_TO = "RELATED_TO"
     SUMMARIZES = "SUMMARIZES"
+    TRIPLET_SOURCE = "TRIPLET_SOURCE"
+    TRIPLET_TARGET = "TRIPLET_TARGET"
 
 
 class RelationRecord(BaseModel):

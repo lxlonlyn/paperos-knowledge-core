@@ -73,10 +73,16 @@ class HealthService:
             "status": "healthy",
             **self.indexes.lexical.status(),
         }
-        components["vector"] = {
-            "status": "healthy",
-            **self.indexes.vector.status(),
-        }
+        try:
+            components["vector"] = {
+                "status": "healthy",
+                **await self.cognee.vector_status(),
+            }
+        except Exception as exc:  # noqa: BLE001 - health reports component failures.
+            components["vector"] = {
+                "status": "degraded",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
         bundles = self.canonical_repository.list_bundles()
         try:
             if bundles:

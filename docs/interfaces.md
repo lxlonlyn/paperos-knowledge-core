@@ -286,6 +286,21 @@ All writes must use centralized DataPoint declarations.
 
 The Cognee repository must not accept raw MinerU payloads.
 
+Runtime retrieval uses the repository rather than its persisted manifests:
+
+```
+search_vectors(...)
+traverse(..., depth, edge_types)
+verify_vector_indexes(...)
+vector_status(...)
+```
+
+`search_vectors` queries Cognee's configured vector engine and resolves every
+hit through the Cognee graph node carrying the same deterministic ID.
+`traverse` delegates typed multi-hop expansion to the configured Cognee graph
+engine and returns canonical chunk provenance stored on graph nodes and edges.
+Manifest and enrichment JSON files are not retrieval indexes.
+
 ## Cognee pipeline interface
 
 The PaperOS Cognee pipeline receives one verified CanonicalSnapshot.
@@ -344,7 +359,9 @@ Search output contains lexical candidates using the common candidate contract.
 
 ## Embedding interface
 
-Cognee and PaperOS access embeddings through an OpenAI-compatible endpoint.
+Cognee exclusively owns DataPoint and query embeddings and accesses them through
+an OpenAI-compatible endpoint. PaperOS does not persist embedding BLOBs or build
+a parallel vector database.
 
 Endpoint:
 

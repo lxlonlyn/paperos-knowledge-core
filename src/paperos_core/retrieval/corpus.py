@@ -1,4 +1,4 @@
-"""Read-only corpus view over retained canonical and semantic artifacts."""
+"""Read-only corpus view over retained canonical source artifacts."""
 
 from __future__ import annotations
 
@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 from paperos_core.domain.canonical import CanonicalBundle, Chunk
-from paperos_core.domain.knowledge import SemanticEnrichment
-from paperos_core.errors import IndexStorageError
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.registry import SourceRegistry
 from paperos_core.paths import DataPaths
@@ -22,7 +20,6 @@ class CorpusView:
     chunks: dict[str, Chunk]
     chunk_bundles: dict[str, CanonicalBundle]
     source_filenames: dict[str, str]
-    enrichments: dict[str, SemanticEnrichment]
 
     @classmethod
     def load(
@@ -74,24 +71,12 @@ class CorpusView:
             ).original_filename
             for bundle in bundles.values()
         }
-        enrichments: dict[str, SemanticEnrichment] = {}
-        for bundle in bundles.values():
-            path = paths.cognee / "enrichment" / f"{bundle.snapshot.id}.json"
-            try:
-                enrichments[bundle.document.id] = SemanticEnrichment.model_validate_json(
-                    path.read_text(encoding="utf-8")
-                )
-            except (OSError, ValueError) as exc:
-                raise IndexStorageError(
-                    f"Unable to load semantic enrichment: {exc}", affected=path
-                ) from exc
         return cls(
             paths=paths,
             bundles=bundles,
             chunks=chunks,
             chunk_bundles=chunk_bundles,
             source_filenames=source_filenames,
-            enrichments=enrichments,
         )
 
     def candidate_for_chunk(

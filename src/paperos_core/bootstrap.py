@@ -121,7 +121,6 @@ def build_application(
     cognee_repository = CogneeRepository(paths)
     index_manager = IndexManager(
         paths,
-        model_client,
         embedding_model=cognee_config.embedding_model,
         embedding_dimensions=cognee_config.embedding_dimensions,
     )
@@ -167,7 +166,12 @@ def build_application(
         knowledge_pipeline,
     )
     documents = DocumentService(
-        paths, canonical_repository, ingestion, rebuilder, index_manager
+        paths,
+        canonical_repository,
+        ingestion,
+        rebuilder,
+        index_manager,
+        cognee_repository,
     )
     health = HealthService(
         paths,

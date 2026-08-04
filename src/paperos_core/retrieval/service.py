@@ -148,7 +148,7 @@ class RetrievalService:
             stages.append("lexical_retrieval")
         if "semantic" in plan.channels:
             channels["semantic"] = await semantic_retrieve(
-                self.index_manager.vector,
+                self.cognee_repository,
                 corpus,
                 queries,
                 limit=pool,
@@ -156,7 +156,8 @@ class RetrievalService:
             )
             stages.append("semantic_retrieval")
         if "entity_claim" in plan.channels:
-            channels["entity_claim"] = entity_claim_retrieve(
+            channels["entity_claim"] = await entity_claim_retrieve(
+                self.cognee_repository,
                 corpus,
                 [
                     request.query,
@@ -177,12 +178,17 @@ class RetrievalService:
                     *expansion.relation_queries,
                 ],
                 limit=pool,
+                depth=plan.graph_depth,
                 document_ids=document_ids,
             )
             stages.append("graph_traversal")
         if "global_context" in plan.channels:
-            channels["global_context"] = global_context_retrieve(
-                corpus, limit=pool, document_ids=document_ids
+            channels["global_context"] = await global_context_retrieve(
+                self.cognee_repository,
+                corpus,
+                queries,
+                limit=pool,
+                document_ids=document_ids,
             )
             stages.append("global_context")
         if "confirmed_knowledge" in plan.channels:

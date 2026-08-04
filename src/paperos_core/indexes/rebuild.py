@@ -83,6 +83,7 @@ class DerivedDataRebuilder:
         await prune_system(graph=True, vector=True, metadata=True, cache=True)
         targets = [
             self.paths.indexes / "lexical.sqlite3",
+            # Remove pre-v2 duplicate vector projections during destructive rebuild.
             self.paths.indexes / "vectors.sqlite3",
         ]
         targets.extend((self.paths.indexes / "manifests").glob("*.json"))

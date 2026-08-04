@@ -8,8 +8,13 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from paperos_core.adapters.cognee.repository import (
+    GRAPH_SEED_VECTOR_COLLECTIONS,
+    SEMANTIC_VECTOR_COLLECTIONS,
+)
 from paperos_core.bootstrap import build_application
 from paperos_core.cli import app
+from paperos_core.domain.provenance import RelationType
 from paperos_core.ingestion.expected_validation import (
     expected_path_for_source,
     validate_expected_case,
@@ -46,8 +51,9 @@ def test_gate4_real_pdf_through_live_cumulative_cli_and_rebuild(
     assert result["counts"]["references"] >= 25
     knowledge = result["knowledge"]
     assert knowledge["consistency_valid"] is True
+    assert knowledge["vector_backend"] == "cognee"
     assert knowledge["cognee_object_count"] > result["counts"]["chunks"]
-    assert knowledge["vector_object_count"] == result["counts"]["chunks"]
+    assert knowledge["vector_object_count"] > result["counts"]["chunks"]
     assert knowledge["lexical_object_count"] >= result["counts"]["chunks"]
     assert knowledge["embedding_dimensions"] == 768
     assert knowledge["semantic_entity_count"] > 0
@@ -122,7 +128,8 @@ def test_gate4_real_pdf_through_live_cumulative_cli_and_rebuild(
     cognee_manifest = json.loads(cognee_manifest_path.read_text())
     enrichment = json.loads(enrichment_path.read_text())
     canonical_chunk_ids = {chunk.id for chunk in canonical.chunks}
-    assert set(index_manifest["vector_object_ids"]) == canonical_chunk_ids
+    assert index_manifest["vector_backend"] == "cognee"
+    assert canonical_chunk_ids <= set(index_manifest["vector_object_ids"])
     assert canonical_chunk_ids <= set(index_manifest["lexical_object_ids"])
     assert canonical_chunk_ids <= set(index_manifest["cognee_object_ids"])
     assert set(cognee_manifest["canonical_to_cognee_id"]) == set(
@@ -140,6 +147,24 @@ def test_gate4_real_pdf_through_live_cumulative_cli_and_rebuild(
         for item in semantic_objects
     )
     semantic_ids = {item["id"] for item in semantic_objects}
+    vector_semantic_ids = {
+        item["id"]
+        for group in (
+            enrichment["entities"],
+            enrichment["claims"],
+            enrichment["summaries"],
+        )
+        for item in group
+    }
+    assert vector_semantic_ids <= set(index_manifest["vector_object_ids"])
+    triplet_ids = {
+        canonical_id
+        for canonical_id in cognee_manifest["canonical_to_cognee_id"]
+        if canonical_id.startswith("triplet_")
+    }
+    assert triplet_ids
+    assert triplet_ids <= set(index_manifest["vector_object_ids"])
+    assert "TripletDataPoint_text" in cognee_manifest["vector_collections"]
     assert all(
         relation["source_chunk_ids"]
         for relation in cognee_manifest["relations"]
@@ -158,13 +183,47 @@ def test_gate4_real_pdf_through_live_cumulative_cli_and_rebuild(
             ).fetchone()[0]
             == knowledge["lexical_object_count"]
         )
-    with sqlite3.connect(knowledge["vector_database"]) as connection:
-        vector_rows = connection.execute(
-            "SELECT object_id, dimensions FROM vector_records WHERE document_id = ?",
-            (canonical.document.id,),
-        ).fetchall()
-    assert {row[0] for row in vector_rows} == canonical_chunk_ids
-    assert {row[1] for row in vector_rows} == {768}
+    vector_status = asyncio.run(
+        application.knowledge_pipeline.cognee_repository.vector_status()
+    )
+    assert vector_status["backend"] == "cognee"
+    assert vector_status["dimensions"] == 768
+    assert vector_status["collections"]["ChunkDataPoint_text"] == len(
+        canonical.chunks
+    )
+    assert vector_status["collections"]["TripletDataPoint_text"] == len(triplet_ids)
+    assert Path(knowledge["vector_database"]) == application.paths.cognee / "vector"
+    assert not (application.paths.indexes / "vectors.sqlite3").exists()
+
+    async def verify_cognee_query_backbone() -> None:
+        await application.model_process.start()
+        try:
+            repository = application.knowledge_pipeline.cognee_repository
+            semantic_hits = await repository.search_vectors(
+                [canonical.chunks[0].text[:200]],
+                collections=SEMANTIC_VECTOR_COLLECTIONS,
+                limit=10,
+            )
+            assert semantic_hits
+            assert any(hit.object_type == "ChunkDataPoint" for hit in semantic_hits)
+            entity_id = enrichment["entities"][0]["id"]
+            entity_hits = await repository.search_vectors(
+                [enrichment["entities"][0]["name"]],
+                collections=GRAPH_SEED_VECTOR_COLLECTIONS,
+                limit=10,
+            )
+            assert entity_id in {hit.canonical_id for hit in entity_hits}
+            traversed = await repository.traverse(
+                entity_hits,
+                depth=2,
+                edge_types={relation.value for relation in RelationType},
+            )
+            assert traversed
+            assert all(item.source_chunk_ids for item in traversed)
+        finally:
+            await application.aclose()
+
+    asyncio.run(verify_cognee_query_backbone())
     process_record = json.loads((application.paths.jobs / "model-gateway-process.json").read_text())
     assert process_record["status"] == "stopped"
     assert Path(process_record["log_path"]).is_relative_to(run_root.resolve())
@@ -180,8 +239,6 @@ def test_gate4_real_pdf_through_live_cumulative_cli_and_rebuild(
         for path in root.rglob("*")
         if path.is_file()
     }
-    asyncio.run(application.aclose())
-
     rebuild = _json_output(
         runner.invoke(
             app,
@@ -197,7 +254,7 @@ def test_gate4_real_pdf_through_live_cumulative_cli_and_rebuild(
     assert rebuild["rebuilt_snapshot_ids"] == [snapshot_id]
     assert rebuild["reports"][0]["rebuilt"] is True
     assert rebuild["reports"][0]["consistency_valid"] is True
-    assert rebuild["reports"][0]["vector_object_count"] == len(canonical.chunks)
+    assert rebuild["reports"][0]["vector_object_count"] > len(canonical.chunks)
     assert {
         str(path): hashlib.sha256(path.read_bytes()).hexdigest()
         for root in protected_roots

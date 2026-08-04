@@ -1,86 +1,98 @@
-"""Local-embedding chunk plus entity/claim retrieval."""
+"""Semantic and entity/claim retrieval through Cognee's vector indexes."""
 
 from __future__ import annotations
 
-import re
-
-from paperos_core.domain.knowledge import Claim, Entity
-from paperos_core.indexes.vector_store import VectorStore
+from paperos_core.adapters.cognee.repository import (
+    ENTITY_CLAIM_VECTOR_COLLECTIONS,
+    SEMANTIC_VECTOR_COLLECTIONS,
+    CogneeRepository,
+    CogneeVectorHit,
+)
 from paperos_core.retrieval.candidates import Candidate
 from paperos_core.retrieval.corpus import CorpusView
 
-_TOKEN = re.compile(r"[\w-]{2,}", re.UNICODE)
-
 
 async def semantic_retrieve(
-    store: VectorStore,
+    repository: CogneeRepository,
     corpus: CorpusView,
     queries: list[str],
     *,
     limit: int,
     document_ids: set[str],
 ) -> list[Candidate]:
-    results: dict[str, Candidate] = {}
-    for query in queries[:4]:
-        for row in await store.search(query, limit=limit * 2):
-            chunk_id = str(row["object_id"])
-            if corpus.chunks[chunk_id].document_id not in document_ids:
-                continue
-            raw_score = row["score"]
-            score = (
-                float(raw_score) if isinstance(raw_score, (str, int, float)) else 0.0
-            )
-            existing = results.get(chunk_id)
-            if existing is None or score > existing.channel_scores["semantic"]:
-                results[chunk_id] = corpus.candidate_for_chunk(
-                    chunk_id, channel="semantic", score=score
-                )
-    return sorted(
-        results.values(),
-        key=lambda item: (-item.channel_scores["semantic"], item.id),
-    )[:limit]
+    hits = await repository.search_vectors(
+        queries[:4],
+        collections=SEMANTIC_VECTOR_COLLECTIONS,
+        limit=limit * 2,
+    )
+    return _hits_to_candidates(
+        hits,
+        corpus,
+        channel="semantic",
+        limit=limit,
+        document_ids=document_ids,
+    )
 
 
-def entity_claim_retrieve(
+async def entity_claim_retrieve(
+    repository: CogneeRepository,
     corpus: CorpusView,
     queries: list[str],
     *,
     limit: int,
     document_ids: set[str],
 ) -> list[Candidate]:
-    query_tokens = {token.casefold() for query in queries for token in _TOKEN.findall(query)}
+    hits = await repository.search_vectors(
+        queries[:4],
+        collections=ENTITY_CLAIM_VECTOR_COLLECTIONS,
+        limit=limit * 2,
+    )
+    return _hits_to_candidates(
+        hits,
+        corpus,
+        channel="entity_claim",
+        limit=limit,
+        document_ids=document_ids,
+    )
+
+
+def _hits_to_candidates(
+    hits: list[CogneeVectorHit],
+    corpus: CorpusView,
+    *,
+    channel: str,
+    limit: int,
+    document_ids: set[str],
+) -> list[Candidate]:
     candidates: dict[str, Candidate] = {}
-    for document_id, enrichment in corpus.enrichments.items():
-        if document_id not in document_ids:
-            continue
-        semantic_items: list[Entity | Claim] = [
-            *enrichment.entities,
-            *enrichment.claims,
-        ]
-        for item in semantic_items:
-            searchable = (
-                f"{getattr(item, 'name', '')} {getattr(item, 'text', '')} "
-                f"{getattr(item, 'description', '')}"
-            ).casefold()
-            overlap = sum(token in searchable for token in query_tokens)
-            score = float(overlap) + (item.confidence or 0.5)
-            for chunk_id in item.source_chunk_ids:
-                candidate = corpus.candidate_for_chunk(
-                    chunk_id,
-                    channel="entity_claim",
-                    score=score,
-                    object_id=item.id,
-                    object_type="entity" if isinstance(item, Entity) else "claim",
-                    knowledge_kind="system_inference",
-                    derived_from_ids=[item.id, *item.derived_from_ids],
-                )
-                existing = candidates.get(chunk_id)
-                if (
-                    existing is None
-                    or score > existing.channel_scores["entity_claim"]
-                ):
-                    candidates[chunk_id] = candidate
+    for hit in hits:
+        chunk_ids = list(hit.source_chunk_ids)
+        if hit.object_type == "ChunkDataPoint" and hit.canonical_id not in chunk_ids:
+            chunk_ids.insert(0, hit.canonical_id)
+        for chunk_id in chunk_ids:
+            chunk = corpus.chunks.get(chunk_id)
+            if chunk is None or chunk.document_id not in document_ids:
+                continue
+            object_type = hit.object_type.removesuffix("DataPoint").casefold()
+            candidate = corpus.candidate_for_chunk(
+                chunk_id,
+                channel=channel,
+                score=hit.score,
+                object_id=hit.canonical_id,
+                object_type=object_type,
+                knowledge_kind=(
+                    "source_fact"
+                    if hit.object_type == "ChunkDataPoint"
+                    else "structured_relation"
+                    if hit.object_type in {"TripletDataPoint", "ConceptRelationDataPoint"}
+                    else "system_inference"
+                ),
+                derived_from_ids=[hit.canonical_id, *hit.derived_from_ids],
+            )
+            existing = candidates.get(chunk_id)
+            if existing is None or hit.score > existing.channel_scores[channel]:
+                candidates[chunk_id] = candidate
     return sorted(
         candidates.values(),
-        key=lambda item: (-item.channel_scores["entity_claim"], item.id),
+        key=lambda item: (-item.channel_scores[channel], item.id),
     )[:limit]

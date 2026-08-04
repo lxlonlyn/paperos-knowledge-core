@@ -169,6 +169,13 @@ Responsibilities include:
 
 The Cognee adapter must not parse raw MinerU payloads.
 
+Cognee is also the runtime structural retrieval layer. Query execution uses
+Cognee/LanceDB to locate Chunk, Entity, Claim, Summary, ConceptRelation, and
+Triplet DataPoints, resolves those hits to Cognee graph nodes, performs typed
+multi-hop traversal in the configured graph engine, and backtracks graph edge
+provenance to canonical chunks. Cognee manifests and enrichment JSON files are
+rebuild/audit artifacts; retrieval must not scan them as query indexes.
+
 ## Lexical index
 
 The lexical index uses SQLite FTS5.
@@ -346,7 +353,8 @@ Contains:
 * index manifests;
 * schema and model metadata.
 
-Vector indexes managed by Cognee are also derived data.
+It does not contain a second vector database. Vector indexes managed by Cognee
+under `DATA_DIR/cognee/vector/` are the sole semantic vector projection.
 
 ## Model layer
 
@@ -396,10 +404,10 @@ question
 → query planning
 → query expansion
 → parallel retrieval
-   ├── lexical chunks
-   ├── semantic chunks
-   ├── entities and claims
-   ├── graph relations
+   ├── SQLite FTS lexical chunks
+   ├── Cognee vector Chunk/Entity/Claim/Summary/Triplet hits
+   ├── Cognee Entity and Claim hits
+   ├── Cognee typed multi-hop graph traversal
    ├── global summaries
    └── confirmed knowledge
 → candidate normalization
