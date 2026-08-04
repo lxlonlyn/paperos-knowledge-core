@@ -1,5 +1,57 @@
 # Architecture
 
+## Binding architecture decisions for 0.1.0
+
+These decisions define the product boundary. They are not compatibility goals
+and must not be bypassed by alternate commands or import facades.
+
+### A1: Product form
+
+PaperOS is a source-deployed application, not a general-purpose Python
+distribution published to PyPI. `paperos_core` remains an internal importable
+package, but wheels, editable installs, and console scripts are not product
+entry points.
+
+### A2: Single normal entry point
+
+The only supported normal startup command is:
+
+```bash
+python server.py
+```
+
+There are no `paperos serve`, `paperos model-gateway`, `paperos worker`, or
+`paperos init` commands, including deprecated or hidden aliases.
+
+### A3: External services
+
+PaperOS configures, checks, and calls MinerU, DeepSeek, and any future remote
+database or remote model provider. It never starts or manages those external
+services.
+
+### A4: Internal libraries and stores
+
+Cognee's Python library, SQLite, LanceDB, Kuzu, and FTS are initialized and
+closed as application-owned dependencies. They are not independently deployed
+PaperOS services.
+
+### A5: Private local inference runtime
+
+The repository-owned Node runtime for embedding, reranking, and query expansion
+is a private child process. The `server.py` application lifecycle starts it,
+waits for readiness, and stops it. Its loopback HTTP port is an implementation
+detail; PaperOS exposes no public gateway command or remote-provider mode.
+
+### A6: Worker ownership
+
+The Worker is one background `asyncio` task in the server process. It has one
+consumer and no independent command or deployment lifecycle.
+
+### A7: Model files
+
+Users provide the GGUF model files manually. PaperOS neither downloads models
+at runtime nor triggers model downloads while installing dependencies.
+
 ## Purpose
 
 PaperOS Knowledge Core provides one unified research-paper knowledge backend.
@@ -18,10 +70,10 @@ Development stages are defined outside this document. This document describes th
 ## System context
 
 ```
-AstrBot / CLI / HTTP client
+AstrBot / Agent / HTTP client
             |
             v
-    PaperOS API and services
+    PaperOS FastAPI application
     ├── ingestion
     ├── query
     ├── feedback
@@ -29,8 +81,8 @@ AstrBot / CLI / HTTP client
             |
   ┌─────────┼──────────┐
   v         v          v
-MinerU    Cognee     local model
-adapter   adapter      gateway
+MinerU    Cognee     private local
+adapter   adapter    inference runtime
   |         |          |
   v         v          v
 parser    graph,      embedding,
@@ -203,11 +255,12 @@ Every lexical row references the corresponding canonical object ID.
 
 The lexical index is not an authoritative knowledge store.
 
-## Local model gateway
+## Private local inference runtime
 
-The local model gateway is a repository-owned service.
-
-It exposes:
+The local inference runtime is an application-owned Node child process. It is
+started and stopped only by the FastAPI application lifecycle, listens only on
+a configured loopback address, and has no public PaperOS command. Its internal
+protocol exposes:
 
 ```
 GET  /health
@@ -225,7 +278,8 @@ Enabled models:
 * Qwen3 Reranker for query-candidate ranking;
 * QMD Query Expansion for lexical, semantic, entity, relation, and HyDE expansion.
 
-The gateway must never download models.
+The runtime must never download models. Application services receive an
+inference client; they cannot start, stop, or restart the child process.
 
 ## DeepSeek adapter
 
@@ -240,7 +294,9 @@ It is used for:
 * query planning when required;
 * grounded answer synthesis.
 
-DeepSeek configuration is owned by Cognee through `.env`.
+DeepSeek configuration is owned by PaperOS. Non-secret values come from
+`config/paperos.toml`, while `DEEPSEEK_API_KEY` is supplied through the process
+environment. A narrow adapter translates the unified settings for Cognee.
 
 No local generative LLM process is required by the default deployment.
 
@@ -259,7 +315,7 @@ It provides:
 
 Authentication and multi-user access control are outside the project scope.
 
-## Worker
+## Background Worker
 
 The Worker executes serialized long-running jobs.
 
@@ -274,7 +330,9 @@ Responsibilities include:
 * feedback improvement;
 * rebuild operations.
 
-The default concurrency is one.
+The Worker is a single background `asyncio` task owned by the application
+lifecycle. Its only consumer is started after local inference is ready and is
+stopped before the inference runtime during shutdown.
 
 ## Data layers
 
