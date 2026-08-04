@@ -1,7 +1,7 @@
 """Real local Qwen3 reranking over fused candidates."""
 
-from paperos_core.runtime.local_inference.client import LocalInferenceClient
 from paperos_core.retrieval.candidates import Candidate
+from paperos_core.runtime.local_inference.client import LocalInferenceClient
 
 
 async def rerank_candidates(

@@ -11,9 +11,15 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from paperos_core.api.app import create_app
-from paperos_core.application import application_from_config
+from paperos_core.application import create_application
 from paperos_core.config import load_settings
 from paperos_core.retrieval.candidates import QueryRequest, QueryResponse
+
+
+def _application(run_root: Path):
+    return create_application(
+        load_settings(environ={**os.environ, "PAPEROS_DATA_DIR": str(run_root)})
+    )
 
 
 def _file_hashes(roots: list[Path]) -> dict[str, str]:
@@ -99,7 +105,7 @@ async def _run_live_gate5(
     papers: list[dict],
     logs: Path,
 ) -> list[QueryResponse]:
-    application = application_from_config(data_dir=run_root)
+    application = _application(run_root)
     try:
         reuse_ingestion = os.getenv("PAPEROS_GATE5_REUSE_INGESTION") == "true"
         if reuse_ingestion:
@@ -120,7 +126,7 @@ async def _run_live_gate5(
                 ).read_bytes()
         else:
             for paper in papers:
-                result = await application.ingestion.ingest_pdf_to_knowledge(
+                result = await application.services.ingestion.ingest_pdf_to_knowledge(
                     pdf_dir / paper["pdf_file"]
                 )
                 (logs / f"ingest-{paper['case_id']}.json").write_text(
@@ -147,7 +153,7 @@ async def _run_live_gate5(
                     _assert_case(case, stored_response)
                     response = stored_response
                 except AssertionError:
-                    response = await application.retrieval.query(
+                    response = await application.services.retrieval.query(
                         QueryRequest(
                             query=case["query"],
                             profile=case["profile"],
@@ -159,7 +165,7 @@ async def _run_live_gate5(
                         encoding="utf-8",
                     )
             else:
-                response = await application.retrieval.query(
+                response = await application.services.retrieval.query(
                     QueryRequest(
                         query=case["query"],
                         profile=case["profile"],

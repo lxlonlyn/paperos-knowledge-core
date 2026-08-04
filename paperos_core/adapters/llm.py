@@ -21,6 +21,7 @@ from paperos_core.domain.knowledge import (
     Summary,
 )
 from paperos_core.errors import SemanticEnrichmentError
+from paperos_core.prompt_repository import PromptDescriptor, PromptRepository
 
 
 class _StrictModel(BaseModel):
@@ -79,8 +80,10 @@ class DeepSeekClient:
     def __init__(
         self,
         config: DeepSeekSettings,
+        prompts: PromptRepository,
     ) -> None:
         self.config = config
+        self.prompts = prompts
         self.max_attempts = config.max_attempts
         headers = {"Content-Type": "application/json"}
         if config.api_key_value():
@@ -117,25 +120,11 @@ class DeepSeekClient:
 
     async def enrich(self, bundle: CanonicalBundle) -> SemanticEnrichment:
         chunks = _select_evidence(bundle)
+        prompt = self.prompts.describe("semantic_enrichment")
         extraction = await self._generate_structured(
-            system=(
-                "You extract research knowledge only from supplied evidence. "
-                "Return one JSON object matching the requested schema. Never invent "
-                "chunk IDs. Every entity, claim, relation, and summary must cite one "
-                "or more supplied chunk IDs that directly support it. Relation "
-                "source_key and target_key must reference entity keys from your own "
-                "entities list. Use concise relation types such as USES, PROPOSES, "
-                "EXTENDS, COMPARES_WITH, EVALUATES_ON, SUPPORTS, or RELATED_TO."
-            ),
+            system=prompt.text,
             user=json.dumps(
                 {
-                    "task": (
-                        "Extract the important entities, evidence-backed claims, "
-                        "entity-to-entity concept relations, and a document summary. "
-                        "Return at most 8 entities, 6 claims, and 6 relations. "
-                        "Descriptions and claims must each be at most two sentences; "
-                        "the summary must be at most four sentences."
-                    ),
                     "schema": {
                         "entities": [
                             {
@@ -180,7 +169,7 @@ class DeepSeekClient:
                 ensure_ascii=False,
             ),
         )
-        return _to_domain(bundle, extraction, self.config.model)
+        return _to_domain(bundle, extraction, self.config.model, prompt)
 
     async def _generate_structured(self, *, system: str, user: str) -> _EnrichmentExtraction:
         request = {
@@ -247,15 +236,7 @@ class DeepSeekClient:
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "Answer only from the supplied evidence and use the language "
-                        "of the question. Cite supporting evidence inline with the "
-                        "exact evidence ID in square brackets. Explicitly distinguish "
-                        "source facts, structured relations, system inferences, and "
-                        "user-confirmed knowledge. Cross-paper synthesis must be "
-                        "identified as synthesis, not presented as a single-paper "
-                        "claim. State clearly when the evidence is insufficient."
-                    ),
+                    "content": self.prompts.load("answer_synthesis"),
                 },
                 {
                     "role": "user",
@@ -314,16 +295,7 @@ class DeepSeekClient:
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "Plan hybrid academic retrieval without answering the "
-                        "question. Return JSON only. Produce precise English search "
-                        "queries even when the input is not English. Preserve paper "
-                        "titles, acronyms, equations, and technical terms. Cover each "
-                        "comparison dimension independently with common synonyms and "
-                        "measurable proxies; representation size should include terms "
-                        "such as parameter count, degrees of freedom, storage "
-                        "footprint, and memory consumption. Do not invent findings."
-                    ),
+                    "content": self.prompts.load("query_planning"),
                 },
                 {
                     "role": "user",
@@ -436,6 +408,7 @@ def _to_domain(
     bundle: CanonicalBundle,
     extracted: _EnrichmentExtraction,
     model: str,
+    prompt: PromptDescriptor,
 ) -> SemanticEnrichment:
     valid_chunks = {chunk.id for chunk in bundle.chunks}
 
@@ -571,4 +544,8 @@ def _to_domain(
         relations=relations,
         summaries=[summary],
         model=model,
+        model_version=model,
+        prompt_name=prompt.name,
+        prompt_version=prompt.version,
+        prompt_sha256=prompt.sha256,
     )

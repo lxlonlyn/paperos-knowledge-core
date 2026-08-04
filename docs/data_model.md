@@ -15,7 +15,7 @@ The same model definitions are used by:
 * comprehensive query;
 * feedback and knowledge improvement.
 
-Development and acceptance order is defined in `IMPLEMENTATION_ORDER.md`. It is not part of the data model.
+The data model is independent of deployment and test history.
 
 ## Model layers
 

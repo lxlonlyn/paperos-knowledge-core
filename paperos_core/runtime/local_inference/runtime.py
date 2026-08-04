@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from datetime import UTC, datetime
@@ -15,6 +16,7 @@ from paperos_core.errors import (
     LocalInferenceUnavailableError,
 )
 from paperos_core.paths import DataPaths
+from paperos_core.prompt_repository import PromptRepository
 from paperos_core.runtime.local_inference.client import LocalInferenceClient
 
 
@@ -45,7 +47,9 @@ class LocalInferenceRuntime:
     def running(self) -> bool:
         return self.process is not None and self.process.returncode is None
 
-    def _model_path(self, configured: Path, *, label: str) -> Path:
+    def _model_path(
+        self, configured: Path, *, label: str, expected_sha256: str | None
+    ) -> Path:
         configured = configured.expanduser()
         if configured.is_absolute():
             result = configured
@@ -57,6 +61,14 @@ class LocalInferenceRuntime:
                 f"Configured local {label} model file does not exist.",
                 affected=result,
             )
+        if expected_sha256 is not None:
+            digest = _sha256(result)
+            if digest != expected_sha256.casefold():
+                raise LocalInferenceConfigurationError(
+                    f"Configured local {label} model checksum does not match.",
+                    affected=result,
+                    details={"expected_sha256": expected_sha256, "actual_sha256": digest},
+                )
         return result
 
     def _service_root(self) -> Path:
@@ -80,11 +92,24 @@ class LocalInferenceRuntime:
         local = self.settings.local_inference
         await self._assert_port_available(local.host, local.port)
         service_root = self._service_root()
-        model_path = self._model_path(local.embedding.model_path, label="embedding")
-        reranker_path = self._model_path(local.reranker.model_path, label="reranker")
-        query_expansion_path = self._model_path(
-            local.query_expansion.model_path, label="query expansion"
+        model_path = self._model_path(
+            local.embedding.model_path,
+            label="embedding",
+            expected_sha256=local.embedding.sha256,
         )
+        reranker_path = self._model_path(
+            local.reranker.model_path,
+            label="reranker",
+            expected_sha256=local.reranker.sha256,
+        )
+        query_expansion_path = self._model_path(
+            local.query_expansion.model_path,
+            label="query expansion",
+            expected_sha256=local.query_expansion.sha256,
+        )
+        prompt_repository = PromptRepository()
+        prompt_repository.describe("query_expansion")
+        query_expansion_prompt = prompt_repository.root / "query_expansion.md"
         log_path = self.paths.logs / "local-inference.log"
         process_path = self.paths.jobs / "local-inference-process.json"
         self._log_stream = log_path.open("ab", buffering=0)
@@ -103,6 +128,7 @@ class LocalInferenceRuntime:
                 "PAPEROS_QUERY_EXPANSION_MAX_TOKENS": str(
                     local.query_expansion.max_output_tokens
                 ),
+                "PAPEROS_QUERY_EXPANSION_PROMPT_PATH": str(query_expansion_prompt),
             }
         )
         try:
@@ -208,3 +234,11 @@ class LocalInferenceRuntime:
             json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2),
             encoding="utf-8",
         )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()

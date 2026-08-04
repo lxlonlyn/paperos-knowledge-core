@@ -1,33 +1,28 @@
 # Architecture
 
-## Binding architecture decisions for 0.1.0
-
-These decisions define the product boundary. They are not compatibility goals
-and must not be bypassed by alternate commands or import facades.
+## Binding decisions for 0.1.0
 
 ### A1: Product form
 
-PaperOS is a source-deployed application, not a general-purpose Python
-distribution published to PyPI. `paperos_core` remains an internal importable
-package, but wheels, editable installs, and console scripts are not product
-entry points.
+PaperOS is a source-deployed application, not a PyPI distribution.
+`paperos_core` is an internal importable package. Wheels, editable installs,
+console scripts, and compatibility import facades are not product interfaces.
 
 ### A2: Single normal entry point
 
-The only supported normal startup command is:
+The only normal startup command is:
 
 ```bash
 python server.py
 ```
 
 There are no `paperos serve`, `paperos model-gateway`, `paperos worker`, or
-`paperos init` commands, including deprecated or hidden aliases.
+`paperos init` commands, including hidden or deprecated aliases.
 
 ### A3: External services
 
-PaperOS configures, checks, and calls MinerU, DeepSeek, and any future remote
-database or remote model provider. It never starts or manages those external
-services.
+PaperOS configures, checks, and calls MinerU, DeepSeek, and future remote
+providers. It never starts or manages them.
 
 ### A4: Internal libraries and stores
 
@@ -37,590 +32,142 @@ PaperOS services.
 
 ### A5: Private local inference runtime
 
-The repository-owned Node runtime for embedding, reranking, and query expansion
-is a private child process. The `server.py` application lifecycle starts it,
-waits for readiness, and stops it. Its loopback HTTP port is an implementation
-detail; PaperOS exposes no public gateway command or remote-provider mode.
+The Node embedding, reranking, and query-expansion runtime is a private child
+process. The Application lifecycle starts it, waits for readiness, and stops it.
+Its loopback HTTP port is an implementation detail.
 
 ### A6: Worker ownership
 
-The Worker is one background `asyncio` task in the server process. It has one
-consumer and no independent command or deployment lifecycle.
+One background `asyncio` Worker task runs inside the server process. It has one
+consumer and no independent command.
 
 ### A7: Model files
 
-Users provide the GGUF model files manually. PaperOS neither downloads models
-at runtime nor triggers model downloads while installing dependencies.
+Users provide GGUF files manually. PaperOS never downloads models at runtime or
+as an installation side effect.
 
-## Purpose
+## Product boundary
 
-PaperOS Knowledge Core provides one unified research-paper knowledge backend.
-
-The architecture separates:
-
-* immutable source artifacts;
-* parser artifacts;
-* canonical document data;
-* writable semantic knowledge;
-* rebuildable indexes;
-* query-time processing.
-
-Development stages are defined outside this document. This document describes the final system and its runtime boundaries.
-
-## System context
-
-```
-AstrBot / Agent / HTTP client
-            |
-            v
-    PaperOS FastAPI application
-    ├── ingestion
-    ├── query
-    ├── feedback
-    └── document management
-            |
-  ┌─────────┼──────────┐
-  v         v          v
-MinerU    Cognee     private local
-adapter   adapter    inference runtime
-  |         |          |
-  v         v          v
-parser    graph,      embedding,
-output    vector,     reranking,
-          metadata    expansion
-            |
-            v
-        DeepSeek
+```text
+Agent / AstrBot / HTTP client
+             |
+             v
+       FastAPI routers
+             |
+             v
+     ApplicationServices
+  ingestion | retrieval | documents | feedback | health
+             |
+        canonical IDs
+             |
+   +---------+----------+
+   |                    |
+Cognee graph/vector   SQLite FTS
+   |
+canonical provenance
 ```
 
-## Architectural principles
+MinerU and DeepSeek remain outside the process boundary. The private Node child
+process and Worker are owned by `Application`.
 
-### Unified knowledge representation
+## Application lifecycle
 
-Cognee DataPoints and their provenance form the unified writable knowledge layer.
+`create_application(settings)` performs object assembly only. FastAPI lifespan
+constructs it once and invokes:
 
-There must not be separate writable knowledge systems for MinerU, Markdown Wiki pages, lexical search, and Cognee.
+```text
+Application.start
+  1. initialize and validate local schema
+  2. start private local inference
+  3. wait for model readiness
+  4. start the background Worker
 
-### Shared canonical objects
-
-All components use centrally defined models for:
-
-* SourceFile;
-* ParseRun;
-* Document;
-* Paper;
-* Section;
-* Chunk;
-* Element;
-* ReferenceEntry;
-* Entity;
-* Claim;
-* ConceptRelation;
-* Summary;
-* ResearchInsight;
-* Feedback and Correction.
-
-Ingestion and query modules must not define independent versions of these objects.
-
-### Stable identity
-
-Canonical objects use stable IDs within a declared schema and ID-generation version.
-
-Graph nodes, vectors, lexical rows, provenance links, and API responses refer to these IDs.
-
-### Provenance-first design
-
-Every derived object or relation must identify its source.
-
-Possible provenance targets include:
-
-* source PDF;
-* parse run;
-* page;
-* section;
-* chunk;
-* element;
-* reference entry;
-* previous derived knowledge.
-
-### Rebuildable derived data
-
-Indexes and semantic derivatives may be removed and rebuilt.
-
-Original PDFs and raw parser responses remain preserved.
-
-## Runtime components
-
-## Application layer
-
-The application layer provides use-case orchestration.
-
-Main services:
-
-* ingestion service;
-* research-query service;
-* feedback service;
-* document service;
-* rebuild service;
-* health and status service.
-
-The application layer coordinates adapters but does not directly implement provider-specific APIs.
-
-## MinerU adapter
-
-The MinerU adapter is responsible for:
-
-* submitting PDF files;
-* polling asynchronous tasks;
-* handling synchronous parsing when supported;
-* downloading results;
-* validating returned artifacts;
-* exposing a provider-neutral parse result;
-* preserving provider metadata.
-
-MinerU-specific response fields must not leak into downstream modules.
-
-Only the MinerU adapter and canonical mapper may interpret provider-specific structures.
-
-## Canonical document processor
-
-The canonical processor transforms raw parser artifacts into versioned PaperOS objects.
-
-Responsibilities include:
-
-* Unicode and whitespace normalization;
-* repeated header and footer cleanup;
-* section hierarchy construction;
-* paragraph and list handling;
-* formula preservation;
-* figure, table, caption, and footnote handling;
-* reference-entry extraction;
-* structure-aware chunking;
-* page and source-span mapping;
-* canonical snapshot persistence.
-
-The canonical processor must remain independent of Cognee storage details.
-
-## Cognee adapter
-
-The Cognee adapter maps canonical and derived objects into Cognee DataPoints.
-
-Responsibilities include:
-
-* DataPoint declarations;
-* registration of the Cognee default User, Dataset, Data item, and PipelineRun;
-* `PipelineContext` propagation for every DataPoint and custom edge write;
-* identity and embeddable fields;
-* deterministic writes;
-* typed graph relations;
-* provenance relations;
-* vector indexing;
-* semantic enrichment;
-* summaries;
-* entity, relation, and claim extraction;
-* read and traversal operations;
-* destructive rebuild of derived stores.
-
-The Cognee adapter must not parse raw MinerU payloads.
-
-Cognee is also the runtime structural retrieval layer. Query execution uses
-Cognee/LanceDB to locate Chunk, Entity, Claim, Summary, ConceptRelation, and
-Triplet DataPoints, resolves those hits to Cognee graph nodes, performs typed
-multi-hop traversal in the configured graph engine, and backtracks graph edge
-provenance to canonical chunks. Cognee manifests and enrichment JSON files are
-rebuild/audit artifacts; retrieval must not scan them as query indexes.
-
-The canonical snapshot stores the selected PaperOS dataset name. The adapter
-creates or resolves that name through Cognee's authorized Dataset API, binds
-one Cognee Data item to each immutable source PDF, and passes the resulting
-context to `add_data_points`. Dataset/Data and pipeline-run rows are verified
-after the graph write. PaperOS remains a single-user deployment and uses
-Cognee's default user; this does not introduce a PaperOS authentication layer.
-
-## Lexical index
-
-The lexical index uses SQLite FTS5.
-
-It stores searchable views of:
-
-* chunk text;
-* document title;
-* section path;
-* formulas represented as text;
-* captions;
-* reference text;
-* selected metadata.
-
-Every lexical row references the corresponding canonical object ID.
-
-The lexical index is not an authoritative knowledge store.
-
-## Private local inference runtime
-
-The local inference runtime is an application-owned Node child process. It is
-started and stopped only by the FastAPI application lifecycle, listens only on
-a configured loopback address, and has no public PaperOS command. Its internal
-protocol exposes:
-
-```
-GET  /health
-GET  /v1/models
-POST /v1/embeddings
-POST /v1/rerank
-POST /v1/query-expansion
+Application.aclose
+  1. stop the Worker
+  2. stop local inference
+  3. close inference, DeepSeek, and MinerU clients
 ```
 
-It loads only manually provided local model files.
+Health checks are read-only. They never start or restart resources. A local model
+file, Node entry, occupied implementation port, early child exit, or readiness
+timeout fails startup with an actionable error. External MinerU or DeepSeek
+failure is reported as degraded health and is never treated as authority to
+launch those providers.
 
-Enabled models:
+## Dependency assembly
 
-* EmbeddingGemma for embeddings;
-* Qwen3 Reranker for query-candidate ranking;
-* QMD Query Expansion for lexical, semantic, entity, relation, and HyDE expansion.
+`ApplicationServices` contains the business services. `ManagedRuntime`
+contains `LocalInferenceRuntime` and `BackgroundWorker`. Services receive
+`LocalInferenceClient`, not the runtime.
 
-The runtime must never download models. Application services receive an
-inference client; they cannot start, stop, or restart the child process.
+The Worker receives only its queue and the services required to execute ingest,
+rebuild, reprocess, and improve jobs. It never holds the Application.
 
-## DeepSeek adapter
+## Configuration ownership
 
-DeepSeek is the external generative LLM provider.
+`config/paperos.toml` is the only structured configuration. It owns data,
+MinerU, DeepSeek, local inference, Cognee, ingestion, retrieval, and API
+settings. `MINERU_API_KEY` and `DEEPSEEK_API_KEY` are environment-only
+secrets.
 
-It is used for:
+Only `configure_cognee(CogneeSettings)` translates PaperOS settings into the
+environment variables required by Cognee. Cognee does not read a separate
+project configuration source. `DeepSeekClient` receives
+`DeepSeekSettings` directly.
 
-* Cognee semantic extraction;
-* entity and relation extraction;
-* claim extraction;
-* summaries;
-* query planning when required;
-* grounded answer synthesis.
+## Storage and schema
 
-DeepSeek configuration is owned by PaperOS. Non-secret values come from
-`config/paperos.toml`, while `DEEPSEEK_API_KEY` is supplied through the process
-environment. A narrow adapter translates the unified settings for Cognee.
+`StorageInitializer` is the sole owner of PaperOS SQLite and FTS schema
+creation. Application startup and `scripts/setup_runtime.py` use the same
+initializer. Repository constructors only retain paths or connections.
 
-No local generative LLM process is required by the default deployment.
+All runtime data stays under `data.directory`:
 
-## API layer
+- `raw/`: immutable source PDFs and SourceFile identity;
+- `parsed/`: immutable ParseRun artifacts;
+- `canonical/`: versioned canonical snapshots;
+- `cognee/`: graph, vector, metadata, enrichment, and manifests;
+- `indexes/`: SQLite FTS and index manifests;
+- `jobs/`: registries, queue, and managed-process records;
+- `cache/`, `logs/`, and `tmp/`: rebuildable or managed runtime data.
 
-The API layer exposes single-user HTTP endpoints.
+Derived stores can be destructively rebuilt from retained real artifacts.
+Original PDFs, raw MinerU results, and source chunks are never overwritten by
+feedback or rebuild.
 
-It provides:
+## Knowledge model and retrieval
 
-* ingestion submission and status;
-* comprehensive query;
-* document listing and inspection;
-* document deletion and reprocessing;
-* feedback;
-* health and dependency status.
+MinerU-specific fields exist only in the MinerU adapter and canonical mapper.
+Downstream code consumes versioned canonical models. Stable IDs include an
+explicit ID version and are shared by Cognee, graph edges, vectors, FTS rows,
+evidence, and API responses.
 
-Authentication and multi-user access control are outside the project scope.
+Cognee is the structural and semantic retrieval layer:
 
-## Background Worker
-
-The Worker executes serialized long-running jobs.
-
-Responsibilities include:
-
-* MinerU task polling;
-* artifact persistence;
-* canonical processing;
-* Cognee writes;
-* index updates;
-* semantic enrichment;
-* feedback improvement;
-* rebuild operations.
-
-The Worker is a single background `asyncio` task owned by the application
-lifecycle. Its only consumer is started after local inference is ready and is
-stopped before the inference runtime during shutdown.
-
-## Data layers
-
-## Source layer
-
-Stored under:
-
-```
-DATA_DIR/raw/
+```text
+Cognee vectors -> Chunk / Entity / Claim / Summary / Triplet lookup
+Cognee graph   -> typed traversal -> edge provenance -> source chunks
+SQLite FTS     -> exact lexical supplement
 ```
 
-Contains immutable original PDF files.
-
-Primary object:
-
-* SourceFile.
-
-## Parser-artifact layer
-
-Stored under:
-
-```
-DATA_DIR/parsed/
-```
-
-Contains immutable MinerU outputs and parse manifests.
-
-Primary objects:
-
-* ParseRun;
-* ParserArtifact.
-
-## Canonical layer
-
-Stored under:
-
-```
-DATA_DIR/canonical/
-```
-
-Contains versioned normalized document snapshots.
-
-Primary objects:
-
-* Document;
-* Paper;
-* Section;
-* Chunk;
-* Element;
-* ReferenceEntry;
-* CanonicalSnapshot.
-
-## Semantic knowledge layer
-
-Stored through Cognee under:
-
-```
-DATA_DIR/cognee/
-```
-
-Contains:
-
-* canonical DataPoints;
-* semantic entities;
-* claims;
-* concept relations;
-* summaries;
-* research insights;
-* feedback-derived knowledge;
-* graph and provenance relations.
-
-This is the unified writable knowledge layer.
-
-## Derived-index layer
-
-Stored under:
-
-```
-DATA_DIR/indexes/
-```
-
-Contains:
-
-* SQLite FTS index;
-* index manifests;
-* schema and model metadata.
-
-It does not contain a second vector database. Vector indexes managed by Cognee
-under `DATA_DIR/cognee/vector/` are the sole semantic vector projection.
-
-## Model layer
-
-Stored under:
-
-```
-DATA_DIR/models/
-```
-
-Contains manually provided model files.
-
-## Test layer
-
-Stored under:
-
-```
-DATA_DIR/test-corpus/
-DATA_DIR/test-runs/
-```
-
-Contains user-supplied academic PDFs, manually verified expectations, query requirements, and isolated test execution artifacts.
-
-## Ingestion data flow
-
-```
-PDF
-→ file validation
-→ SHA-256 and stable source registration
-→ immutable source storage
-→ MinerU parsing
-→ immutable parser-artifact storage
-→ canonical mapping
-→ cleaning and classification
-→ sections, elements, chunks, and references
-→ canonical snapshot
-→ Cognee DataPoints
-→ graph and vector writes
-→ lexical indexing
-→ semantic enrichment
-→ consistency validation
-```
-
-## Query data flow
-
-```
-question
-→ query planning
-→ query expansion
-→ parallel retrieval
-   ├── SQLite FTS lexical chunks
-   ├── Cognee vector Chunk/Entity/Claim/Summary/Triplet hits
-   ├── Cognee Entity and Claim hits
-   ├── Cognee typed multi-hop graph traversal
-   ├── global summaries
-   └── confirmed knowledge
-→ candidate normalization
-→ stable-ID deduplication
-→ weighted rank fusion
-→ evidence backtracking
-→ local reranking
-→ source diversification
-→ DeepSeek synthesis
-→ answer and provenance
-```
-
-## Candidate contract
-
-All retrieval channels return a common candidate shape containing:
-
-* object ID;
-* object type;
-* source document ID;
-* source section ID when applicable;
-* source chunk IDs;
-* candidate text;
-* channel name;
-* channel score;
-* provenance;
-* inferred or confirmed status.
-
-Graph and summary candidates must resolve to source evidence before final synthesis.
-
-## Query profiles
-
-### Comprehensive
-
-Uses every available retrieval channel.
-
-### Truth
-
-Places additional weight on:
-
-* original text;
-* lexical matches;
-* direct provenance;
-* user-confirmed knowledge.
-
-### Associative
-
-Places additional weight on:
-
-* graph traversal;
-* entities;
-* cross-document relations;
-* summaries;
-* multi-hop context.
-
-Profiles alter query-time weighting and budgets only. They do not use different stores.
-
-## Storage ownership
-
-* Source registration owns `raw/`.
-* MinerU parsing owns `parsed/`.
-* Canonical processing owns `canonical/`.
-* Cognee adapter owns semantic knowledge writes.
-* Lexical-index manager owns SQLite FTS.
-* Model gateway owns only model process state.
-* Feedback service owns confirmations, corrections, and rejection records.
-* Exporters own read-only exported views.
-
-## Schema evolution
-
-The system is in pre-stable development.
-
-The following may change destructively:
-
-* canonical schema;
-* chunking rules;
-* DataPoint definitions;
-* graph relation types;
-* embedding dimensions;
-* index schemas;
-* ID-generation versions.
-
-Schema changes must update explicit version fields.
-
-When necessary, the system may rebuild canonical snapshots, Cognee stores, lexical indexes, and vector indexes.
-
-The following remain immutable:
-
-* original PDFs;
-* source checksums;
-* raw MinerU responses;
-* parse manifests.
-
-## Failure boundaries
-
-Missing dependencies must cause explicit errors.
-
-Examples include:
-
-* missing PDF;
-* invalid PDF header;
-* missing MinerU API key;
-* unavailable MinerU endpoint;
-* failed MinerU task;
-* missing GGUF file;
-* unavailable local model gateway;
-* invalid Cognee configuration;
-* unavailable DeepSeek endpoint;
-* schema-version mismatch;
-* failed provenance validation.
-
-The system must not silently switch providers or download missing resources.
-
-## Process topology
-
-Default processes:
-
-```
-Process 1: local model gateway
-Process 2: PaperOS Worker
-Process 3: PaperOS API
-```
-
-External dependencies:
-
-```
-MinerU Cloud or configured MinerU HTTP service
-DeepSeek API
-```
-
-Local persistence:
-
-```
-SQLite
-LanceDB
-Kuzu
-filesystem artifacts
-```
-
-## Architectural constraints
-
-* One logical knowledge system.
-* One canonical object model.
-* One set of stable IDs per schema version.
-* One writable semantic knowledge layer.
-* No independent query-side document schema.
-* No direct raw MinerU dependency outside the adapter and mapper.
-* No automatic model or dataset downloads.
-* No authentication or multi-user infrastructure.
-* No requirement to preserve pre-stable derived databases across schema changes.
+PaperOS does not retain a duplicate embedding BLOB store. Every inferred object
+and relation carries source chunk IDs. Dataset, Data item, User, and PipelineRun
+context is propagated through Cognee writes.
+
+## Prompt ownership
+
+Markdown files under `prompts/` are the only complete prompt source.
+`PromptRepository` validates prompt names and records version and SHA-256.
+Semantic enrichment manifests contain prompt name, prompt version, prompt
+SHA-256, model, and model version.
+
+## API organization
+
+Each business module owns a real `APIRouter`. `api/app.py` only creates
+FastAPI, owns lifespan and exception handling, and includes routers. Business
+operations are HTTP-only. Long-running ingest, reprocess, rebuild, and improve
+operations enter the internal queue and expose status through
+`GET /api/v1/jobs/{job_id}`.
+
+PaperOS is intentionally single-user. Authentication, multi-user authorization,
+and a second authoritative knowledge store are outside scope.

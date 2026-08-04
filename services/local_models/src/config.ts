@@ -1,7 +1,7 @@
-import {accessSync, constants, statSync} from "node:fs";
+import {accessSync, constants, readFileSync, statSync} from "node:fs";
 import {resolve} from "node:path";
 
-export interface GatewayConfig {
+export interface LocalInferenceConfig {
   host: string;
   port: number;
   embeddingModelPath: string;
@@ -14,6 +14,7 @@ export interface GatewayConfig {
   queryExpansionModelPath: string;
   queryExpansionModelName: string;
   queryExpansionMaxTokens: number;
+  queryExpansionPrompt: string;
 }
 
 function positiveInteger(name: string, fallback: number): number {
@@ -25,7 +26,7 @@ function positiveInteger(name: string, fallback: number): number {
   return value;
 }
 
-export function loadConfig(): GatewayConfig {
+export function loadConfig(): LocalInferenceConfig {
   const modelValue = process.env.PAPEROS_EMBEDDING_MODEL_PATH;
   if (!modelValue) {
     throw new Error("PAPEROS_EMBEDDING_MODEL_PATH is required");
@@ -57,7 +58,20 @@ export function loadConfig(): GatewayConfig {
       "PAPEROS_QUERY_EXPANSION_MAX_TOKENS",
       512,
     ),
+    queryExpansionPrompt: requiredPrompt("PAPEROS_QUERY_EXPANSION_PROMPT_PATH"),
   };
+}
+
+function requiredPrompt(variable: string): string {
+  const value = process.env[variable];
+  if (!value) throw new Error(`${variable} is required`);
+  const path = resolve(value);
+  accessSync(path, constants.R_OK);
+  const content = readFileSync(path, "utf8")
+    .replace(/<!--\s*prompt-version:\s*[^\s]+\s*-->/u, "")
+    .trim();
+  if (!content) throw new Error(`Prompt file is empty: ${path}`);
+  return content;
 }
 
 function requiredModelPath(variable: string, label: string): string {

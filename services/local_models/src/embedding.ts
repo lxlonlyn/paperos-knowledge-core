@@ -1,13 +1,13 @@
 import {getLlama, type Llama, type LlamaEmbeddingContext, type LlamaModel} from "node-llama-cpp";
 
-import type {GatewayConfig} from "./config.js";
+import type {LocalInferenceConfig} from "./config.js";
 
 export class EmbeddingService {
   private llama: Llama | undefined;
   private model: LlamaModel | undefined;
   private context: LlamaEmbeddingContext | undefined;
 
-  public constructor(private readonly config: GatewayConfig) {}
+  public constructor(private readonly config: LocalInferenceConfig) {}
 
   public async initialize(): Promise<void> {
     process.env.NODE_LLAMA_CPP_SKIP_DOWNLOAD = "true";

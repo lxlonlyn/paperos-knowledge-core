@@ -13,13 +13,19 @@ from paperos_core.adapters.cognee.repository import (
     SEMANTIC_VECTOR_COLLECTIONS,
 )
 from paperos_core.api.app import create_app
-from paperos_core.application import application_from_config
+from paperos_core.application import create_application
 from paperos_core.config import load_settings
 from paperos_core.domain.provenance import RelationType
 from paperos_core.ingestion.expected_validation import (
     expected_path_for_source,
     validate_expected_case,
 )
+
+
+def _application(run_root: Path):
+    return create_application(
+        load_settings(environ={**os.environ, "PAPEROS_DATA_DIR": str(run_root)})
+    )
 
 def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
     real_pdf_case, gate1_run_dir: Path, configured_data_dir: Path
@@ -78,13 +84,13 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
         "asset",
     } <= artifact_types
 
-    application = application_from_config(data_dir=run_root)
-    source = application.ingestion.get_source(result["source_file_id"])
+    application = _application(run_root)
+    source = application.services.ingestion.get_source(result["source_file_id"])
     stored = source.storage_path
     assert stored.is_relative_to(run_root.resolve())
     assert stored.read_bytes() == pdf_path.read_bytes()
     assert hashlib.sha256(stored.read_bytes()).hexdigest() == case["sha256"]
-    job = application.ingestion.get_job(result["job_id"])
+    job = application.services.ingestion.get_job(result["job_id"])
     assert job.source_file_id == source.id
     assert job.status.value == "completed"
     assert job.current_operation == "completed"
@@ -260,10 +266,10 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
         for path in root.rglob("*")
         if path.is_file()
     }
-    rebuild_application = application_from_config(data_dir=run_root)
+    rebuild_application = _application(run_root)
     try:
         rebuild = asyncio.run(
-            rebuild_application.rebuilder.rebuild(snapshot_id=snapshot_id)
+            rebuild_application.services.rebuilder.rebuild(snapshot_id=snapshot_id)
         ).model_dump(mode="json")
     finally:
         asyncio.run(rebuild_application.aclose())
@@ -308,12 +314,15 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
         assert visualize_response.status_code == 200
         assert "html" in visualize_response.headers["content-type"]
 
-    status = application.ingestion.status()
+    status = application.services.ingestion.status()
     assert status["source_file_count"] == 1
     assert status["ingestion_job_count"] == 1
     assert status["jobs_by_status"] == {"completed": 1}
 
-    assert application.ingestion.get_job(result["job_id"]).source_file_id == source.id
+    assert (
+        application.services.ingestion.get_job(result["job_id"]).source_file_id
+        == source.id
+    )
 
 
 def test_gate1_api_reports_invalid_pdf(gate1_run_dir: Path, configured_data_dir: Path) -> None:

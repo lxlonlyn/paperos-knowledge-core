@@ -10,10 +10,16 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from paperos_core.api.app import create_app
-from paperos_core.application import application_from_config
+from paperos_core.application import create_application
 from paperos_core.config import load_settings
 from paperos_core.feedback.models import FeedbackRequest, FeedbackType
 from paperos_core.retrieval.candidates import QueryRequest, RetrievalProfile
+
+
+def _application(run_root: Path):
+    return create_application(
+        load_settings(environ={**os.environ, "PAPEROS_DATA_DIR": str(run_root)})
+    )
 
 def _hash_files(roots: list[Path]) -> dict[str, str]:
     return {
@@ -38,7 +44,7 @@ async def _run_gate6(
     corpus_manifest: dict,
     logs: Path,
 ) -> dict[str, object]:
-    application = application_from_config(data_dir=run_root)
+    application = _application(run_root)
     protected_roots = [
         application.paths.raw,
         application.paths.parsed,
@@ -46,11 +52,11 @@ async def _run_gate6(
     ]
     protected_before = _hash_files(protected_roots)
     try:
-        documents = application.documents.list_documents()
+        documents = application.services.documents.list_documents()
         assert len(documents) == len(corpus_manifest["papers"]) == 4
         by_filename = {item.source_filename: item for item in documents}
         for paper in corpus_manifest["papers"]:
-            source = application.ingestion.get_source(
+            source = application.services.ingestion.get_source(
                 by_filename[paper["pdf_file"]].source_file_id
             )
             original = configured_data_dir / "test-corpus" / "pdfs" / paper["pdf_file"]
@@ -60,7 +66,7 @@ async def _run_gate6(
         gaussian = by_filename[
             "3d_gaussian_splatting_for_real_time_radiance_field_rendering.pdf"
         ]
-        initial = await application.retrieval.query(
+        initial = await application.services.retrieval.query(
             QueryRequest(
                 query=(
                     "What are the storage and memory limitations of 3D Gaussian "
@@ -87,7 +93,7 @@ async def _run_gate6(
             "primitives are retained."
         )
         records = [
-            application.feedback.record(
+            application.services.feedback.record(
                 FeedbackRequest(
                     target_id=target.chunk_id,
                     feedback_type=FeedbackType.CONFIRM,
@@ -98,7 +104,7 @@ async def _run_gate6(
                     created_by="gate6-live-test",
                 )
             ),
-            application.feedback.record(
+            application.services.feedback.record(
                 FeedbackRequest(
                     target_id=target.chunk_id,
                     feedback_type=FeedbackType.CORRECT,
@@ -109,7 +115,7 @@ async def _run_gate6(
                     created_by="gate6-live-test",
                 )
             ),
-            application.feedback.record(
+            application.services.feedback.record(
                 FeedbackRequest(
                     target_id=initial.id,
                     feedback_type=FeedbackType.REJECT,
@@ -122,12 +128,11 @@ async def _run_gate6(
             ),
         ]
         queued = application.queue.enqueue("improve")
-        assert application.worker is not None
-        completed = await application.worker.run_once()
+        completed = await application.runtime.worker.run_once()
         assert completed is not None
         assert completed.id == queued.id and completed.status == "completed"
         assert completed.result is not None
-        improvements = application.feedback.confirmed_improvements()
+        improvements = application.services.feedback.confirmed_improvements()
         correction = next(
             item
             for item in improvements
@@ -144,13 +149,13 @@ async def _run_gate6(
         ]
         snapshots_before = set(application.canonical_repository.list_snapshot_ids())
         if os.environ.get("PAPEROS_GATE6_REUSE_REPROCESS") == "true":
-            assert len(application.documents.inspect(iga.document_id).snapshot_ids) >= 2
+            assert len(application.services.documents.inspect(iga.document_id).snapshot_ids) >= 2
             snapshots_after = snapshots_before
-            new_snapshot_id = application.documents.inspect(
+            new_snapshot_id = application.services.documents.inspect(
                 iga.document_id
             ).snapshot_ids[-1]
         else:
-            reprocessed = await application.documents.reprocess(iga.document_id)
+            reprocessed = await application.services.documents.reprocess(iga.document_id)
             snapshots_after = set(application.canonical_repository.list_snapshot_ids())
             assert len(snapshots_after - snapshots_before) == 1
             assert reprocessed["duplicate"] is True
@@ -171,7 +176,7 @@ async def _run_gate6(
                 "rebuilt_snapshot_ids": sorted(snapshots_after),
             }
         else:
-            rebuild = await application.rebuilder.rebuild()
+            rebuild = await application.services.rebuilder.rebuild()
             assert set(rebuild.rebuilt_snapshot_ids) == snapshots_after
             assert all(report.consistency_valid for report in rebuild.reports)
             rebuild_payload = rebuild.model_dump(mode="json")
@@ -187,8 +192,8 @@ async def _run_gate6(
             document_ids=[gaussian.document_id],
             top_k=8,
         )
-        first = await application.retrieval.query(repeated_request)
-        second = await application.retrieval.query(repeated_request)
+        first = await application.services.retrieval.query(repeated_request)
+        second = await application.services.retrieval.query(repeated_request)
         for response in (first, second):
             assert response.provenance_complete
             assert "confirmed_knowledge" in response.channels_used
@@ -218,9 +223,9 @@ async def _run_gate6(
         assert {"source_fact", "user_confirmed"} <= observed_kinds
         assert observed_kinds & {"structured_relation", "system_inference"}
 
-        detail = application.documents.inspect(iga.document_id)
+        detail = application.services.documents.inspect(iga.document_id)
         assert len(detail.snapshot_ids) >= 2
-        health = await application.health.report()
+        health = await application.services.health.report()
         assert health["status"] == "healthy"
         worker_record = json.loads(
             (application.paths.jobs / "worker-process.json").read_text(encoding="utf-8")
@@ -333,13 +338,14 @@ def test_gate6_live_feedback_improve_rebuild_and_operations(
         json.dumps(deletion_payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    deleted_application = application_from_config(data_dir=run_root)
+    deleted_application = _application(run_root)
     try:
         active_ids = {
-            item.document_id for item in deleted_application.documents.list_documents()
+            item.document_id
+            for item in deleted_application.services.documents.list_documents()
         }
         assert result["document_id"] not in active_ids
-        detail = deleted_application.documents.inspect(str(result["document_id"]))
+        detail = deleted_application.services.documents.inspect(str(result["document_id"]))
         assert detail.deleted is True
         assert detail.raw_pdf_path.is_file()
         assert result["target_id"] in {

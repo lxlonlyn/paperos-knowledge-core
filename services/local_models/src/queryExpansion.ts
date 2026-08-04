@@ -5,7 +5,7 @@ import {
   type LlamaModel,
 } from "node-llama-cpp";
 
-import type {GatewayConfig} from "./config.js";
+import type {LocalInferenceConfig} from "./config.js";
 
 export interface QueryExpansionResult {
   lexicalQueries: string[];
@@ -20,7 +20,7 @@ export class QueryExpansionService {
   private llama: Llama | undefined;
   private model: LlamaModel | undefined;
 
-  public constructor(private readonly config: GatewayConfig) {}
+  public constructor(private readonly config: LocalInferenceConfig) {}
 
   public async initialize(): Promise<void> {
     process.env.NODE_LLAMA_CPP_SKIP_DOWNLOAD = "true";
@@ -44,21 +44,12 @@ export class QueryExpansionService {
       });
       const session = new LlamaChatSession({
         contextSequence: context.getSequence(),
-        systemPrompt:
-          "Expand research queries for hybrid retrieval. Return concise JSON with " +
-          "lexical_queries, semantic_queries, entity_queries, relation_queries, " +
-          "and hyde_text. Preserve technical terms and do not answer from memory.",
+        systemPrompt: this.config.queryExpansionPrompt,
       });
       try {
-        const prompts = [
-          `Profile: ${profile}\nOriginal query: ${query}`,
-          "Task: produce multilingual hybrid-retrieval expansions as JSON.\n" +
-            `Profile: ${profile}\nResearch question: ${JSON.stringify(query)}\n` +
-            "Output one JSON object now:",
-          "Rewrite this multilingual research question into several precise English " +
-            "search queries, entities, and relations. Return the requested JSON only.\n" +
-            `Question: ${query}\nJSON:`,
-        ];
+        const prompts = [1, 2, 3].map(() =>
+          JSON.stringify({profile, query}),
+        );
         const rawOutput = await session.prompt(
           prompts[attempt - 1]!,
           {

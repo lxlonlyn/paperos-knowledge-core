@@ -5,7 +5,7 @@ import {
   type LlamaRankingContext,
 } from "node-llama-cpp";
 
-import type {GatewayConfig} from "./config.js";
+import type {LocalInferenceConfig} from "./config.js";
 
 export interface RankedDocument {
   candidateId: string;
@@ -19,7 +19,7 @@ export class RerankerService {
   private model: LlamaModel | undefined;
   private context: LlamaRankingContext | undefined;
 
-  public constructor(private readonly config: GatewayConfig) {}
+  public constructor(private readonly config: LocalInferenceConfig) {}
 
   public async initialize(): Promise<void> {
     process.env.NODE_LLAMA_CPP_SKIP_DOWNLOAD = "true";

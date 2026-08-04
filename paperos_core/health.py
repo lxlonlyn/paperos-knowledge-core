@@ -7,12 +7,12 @@ from typing import Any
 from paperos_core.adapters.cognee.repository import CogneeRepository
 from paperos_core.adapters.llm import DeepSeekClient
 from paperos_core.adapters.mineru.client import MinerUClient
-from paperos_core.runtime.local_inference.client import LocalInferenceClient
 from paperos_core.indexes.manager import IndexManager
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.registry import SourceRegistry
 from paperos_core.jobs.queue import JobQueue
 from paperos_core.paths import DataPaths
+from paperos_core.runtime.local_inference.client import LocalInferenceClient
 
 
 class HealthService:

@@ -87,3 +87,7 @@ class SemanticEnrichment(DomainModel):
     relations: list[ConceptRelation]
     summaries: list[Summary]
     model: str
+    model_version: str
+    prompt_name: str
+    prompt_version: str
+    prompt_sha256: str

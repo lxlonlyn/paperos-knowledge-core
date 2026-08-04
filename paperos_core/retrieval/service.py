@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from paperos_core.adapters.cognee.repository import CogneeRepository
 from paperos_core.adapters.llm import DeepSeekClient
-from paperos_core.runtime.local_inference.client import LocalInferenceClient
 from paperos_core.config import RuntimeSettings
 from paperos_core.feedback.service import FeedbackService
 from paperos_core.indexes.manager import IndexManager
@@ -34,6 +33,7 @@ from paperos_core.retrieval.semantic import (
     semantic_retrieve,
 )
 from paperos_core.retrieval.synthesis import synthesize_answer
+from paperos_core.runtime.local_inference.client import LocalInferenceClient
 
 
 class RetrievalService:

@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
-import os
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from paperos_core.adapters.mineru.client import MinerUClient
 from paperos_core.adapters.mineru.mapper import MinerUCanonicalMapper
 from paperos_core.adapters.mineru.providers import MinerUCloudProvider
-from paperos_core.config import RuntimeSettings, load_settings
+from paperos_core.config import RuntimeSettings
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.parser_artifacts import ParserArtifactRepository
 from paperos_core.ingestion.registry import SourceRegistry
@@ -21,8 +18,6 @@ from paperos_core.paths import DataPaths, build_data_paths
 if TYPE_CHECKING:
     from paperos_core.adapters.cognee.pipeline import CogneePipeline
     from paperos_core.adapters.llm import DeepSeekClient
-    from paperos_core.runtime.local_inference.client import LocalInferenceClient
-    from paperos_core.runtime.local_inference.runtime import LocalInferenceRuntime
     from paperos_core.documents import DocumentService
     from paperos_core.feedback.service import FeedbackService
     from paperos_core.health import HealthService
@@ -30,6 +25,8 @@ if TYPE_CHECKING:
     from paperos_core.jobs.queue import JobQueue
     from paperos_core.jobs.worker import BackgroundWorker
     from paperos_core.retrieval.service import RetrievalService
+    from paperos_core.runtime.local_inference.client import LocalInferenceClient
+    from paperos_core.runtime.local_inference.runtime import LocalInferenceRuntime
     from paperos_core.storage.initializer import StorageInitializer
 
 
@@ -137,9 +134,10 @@ def create_application(settings: RuntimeSettings) -> Application:
     from paperos_core.indexes.rebuild import DerivedDataRebuilder
     from paperos_core.jobs.queue import JobQueue
     from paperos_core.jobs.worker import BackgroundWorker
+    from paperos_core.prompt_repository import PromptRepository
+    from paperos_core.retrieval.service import RetrievalService
     from paperos_core.runtime.local_inference.client import LocalInferenceClient
     from paperos_core.runtime.local_inference.runtime import LocalInferenceRuntime
-    from paperos_core.retrieval.service import RetrievalService
 
     reset_cognee_configuration_caches()
     local = settings.local_inference
@@ -150,7 +148,7 @@ def create_application(settings: RuntimeSettings) -> Application:
     local_inference_runtime = LocalInferenceRuntime(
         settings, paths, local_inference_client
     )
-    deepseek = DeepSeekClient(settings.deepseek)
+    deepseek = DeepSeekClient(settings.deepseek, PromptRepository())
     cognee_repository = CogneeRepository(paths)
     index_manager = IndexManager(
         paths,
@@ -254,17 +252,3 @@ def create_application(settings: RuntimeSettings) -> Application:
         queue=queue,
         storage=storage,
     )
-
-
-def application_from_config(
-    *,
-    config_path: Path | None = None,
-    data_dir: Path | None = None,
-    environ: Mapping[str, str] | None = None,
-) -> Application:
-    """Debug/test helper that still performs assembly only."""
-
-    selected_environment = dict(os.environ if environ is None else environ)
-    if data_dir is not None:
-        selected_environment["PAPEROS_DATA_DIR"] = str(data_dir)
-    return create_application(load_settings(config_path, environ=selected_environment))

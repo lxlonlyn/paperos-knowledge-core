@@ -70,10 +70,33 @@ class CogneePipeline:
     ) -> tuple[IndexingReport, Path]:
         """Index one repository-loaded canonical bundle without reconstructing intake."""
         self.canonical_repository.verify_snapshot(bundle.snapshot.id)
+        enrichment, enrichment_path = await self.enrich_bundle(bundle)
+        report = await self.index_enrichment(bundle, enrichment, rebuilt=rebuilt)
+        return report, enrichment_path
+
+    async def enrich_bundle(
+        self, bundle: CanonicalBundle
+    ) -> tuple[SemanticEnrichment, Path]:
+        """Generate and persist provenance-bound semantic enrichment."""
+
+        self.canonical_repository.verify_snapshot(bundle.snapshot.id)
         await self.deepseek.health_check()
         enrichment = await self.deepseek.enrich(bundle)
         _validate_semantic_provenance(bundle, enrichment)
         enrichment_path = self._persist_enrichment(bundle, enrichment)
+        return enrichment, enrichment_path
+
+    async def index_enrichment(
+        self,
+        bundle: CanonicalBundle,
+        enrichment: SemanticEnrichment,
+        *,
+        rebuilt: bool = False,
+    ) -> IndexingReport:
+        """Write an existing canonical/enrichment pair to Cognee and indexes."""
+
+        self.canonical_repository.verify_snapshot(bundle.snapshot.id)
+        _validate_semantic_provenance(bundle, enrichment)
         graph = canonical_to_datapoints(bundle, enrichment)
         graph.relations.extend(resolve_citations(bundle, self.canonical_repository.list_bundles()))
         source = self.source_registry.get_source(bundle.snapshot.source_file_id)
@@ -122,7 +145,7 @@ class CogneePipeline:
             consistency_valid=True,
             rebuilt=rebuilt,
         )
-        return report, enrichment_path
+        return report
 
     def _persist_enrichment(self, bundle: CanonicalBundle, enrichment: SemanticEnrichment) -> Path:
         path = self.paths.cognee / "enrichment" / f"{bundle.snapshot.id}.json"

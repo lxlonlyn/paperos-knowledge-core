@@ -73,16 +73,19 @@ class EmbeddingSettings(StrictSettings):
     model: str = "default"
     dimensions: int = Field(default=768, gt=0)
     max_tokens: int = Field(default=2048, gt=0)
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
 
 
 class RerankerSettings(StrictSettings):
     model_path: Path = Path("models/reranker/qwen3-reranker-0.6b-q8_0.gguf")
     candidate_limit: int = Field(default=40, gt=0)
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
 
 
 class QueryExpansionSettings(StrictSettings):
     model_path: Path = Path("models/query-expansion/qmd-query-expansion-1.7B-q4_k_m.gguf")
     max_output_tokens: int = Field(default=512, gt=0)
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
 
 
 class LocalInferenceSettings(StrictSettings):
