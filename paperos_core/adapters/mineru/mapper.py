@@ -9,7 +9,6 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-from paperos_core.config import IngestionSettings
 from paperos_core.domain.canonical import (
     CanonicalBundle,
     CanonicalSnapshot,
@@ -53,9 +52,6 @@ _HEADING_NUMBER = re.compile(r"^\s*(\d+(?:\.\d+)*)\.?\s+")
 
 class MinerUCanonicalMapper:
     """Interpret persisted MinerU structures exactly once."""
-
-    def __init__(self, config: IngestionSettings) -> None:
-        self.config = config
 
     def build_canonical_snapshot(
         self,

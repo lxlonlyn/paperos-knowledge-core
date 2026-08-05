@@ -124,7 +124,7 @@ def create_application(settings: RuntimeSettings) -> Application:
     registry = SourceRegistry(paths)
     parser_artifacts = ParserArtifactRepository(paths)
     canonical_repository = CanonicalRepository(paths)
-    canonical_mapper = MinerUCanonicalMapper(settings.ingestion)
+    canonical_mapper = MinerUCanonicalMapper()
     if settings.config_path is None:
         from paperos_core.errors import CogneeConfigurationError
 
