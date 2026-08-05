@@ -284,7 +284,7 @@ def test_real_pdf_cumulative_pipeline_uses_only_http(
                 evidence["source_filename"] for evidence in query["evidence"]
             }
             assert {"lexical", "semantic"} <= set(query["channels_used"])
-            assert {"query_expansion", "fusion", "rerank", "synthesis"} <= set(
+            assert {"lexical", "semantic", "fusion", "synthesis"} <= set(
                 query["stages"]
             )
 

@@ -13,6 +13,11 @@ def configure_cognee(settings: CogneeSettings) -> None:
     cognee_root = settings.system_database.parent.parent
     local = settings.local_inference
     llm = settings.llm
+    embedding = settings.embedding
+    if embedding.local_runtime:
+        embedding_endpoint = f"http://{local.host}:{local.port}/v1"
+    else:
+        embedding_endpoint = embedding.endpoint.rstrip("/")
     os.environ.update(
         {
             "SYSTEM_ROOT_DIRECTORY": str(settings.system_database.parent),
@@ -31,15 +36,13 @@ def configure_cognee(settings: CogneeSettings) -> None:
             "LLM_MODEL": llm.model,
             "LLM_ENDPOINT": llm.endpoint.rstrip("/"),
             "LLM_API_KEY": llm.api_key_value() or "",
-            "EMBEDDING_PROVIDER": "openai_compatible",
-            "EMBEDDING_MODEL": local.embedding.model,
-            "EMBEDDING_ENDPOINT": (
-                f"http://{local.host}:{local.port}/v1"
-            ),
-            "EMBEDDING_API_KEY": "paperos-internal",
-            "EMBEDDING_DIMENSIONS": str(local.embedding.dimensions),
-            "EMBEDDING_MAX_COMPLETION_TOKENS": str(local.embedding.max_tokens),
-            "EMBEDDING_BATCH_SIZE": "5",
+            "EMBEDDING_PROVIDER": embedding.provider,
+            "EMBEDDING_MODEL": embedding.model,
+            "EMBEDDING_ENDPOINT": embedding_endpoint,
+            "EMBEDDING_API_KEY": embedding.api_key_value() or "",
+            "EMBEDDING_DIMENSIONS": str(embedding.dimensions),
+            "EMBEDDING_MAX_COMPLETION_TOKENS": str(embedding.max_tokens),
+            "EMBEDDING_BATCH_SIZE": str(embedding.batch_size),
             "ENABLE_BACKEND_ACCESS_CONTROL": "false",
             "REQUIRE_AUTHENTICATION": "false",
             "TELEMETRY_DISABLED": "true",

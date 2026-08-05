@@ -16,7 +16,6 @@ from paperos_core.errors import (
     LocalInferenceUnavailableError,
 )
 from paperos_core.paths import DataPaths
-from paperos_core.prompt_repository import PromptRepository
 from paperos_core.runtime.local_inference.client import LocalInferenceClient
 
 
@@ -46,6 +45,11 @@ class LocalInferenceRuntime:
     @property
     def running(self) -> bool:
         return self.process is not None and self.process.returncode is None
+
+    @property
+    def required(self) -> bool:
+        """Whether the configured Cognee embedding selects the local runtime."""
+        return self.settings.cognee.embedding.local_runtime
 
     def _model_path(
         self, configured: Path, *, label: str, expected_sha256: str | None
@@ -92,19 +96,16 @@ class LocalInferenceRuntime:
             label="embedding",
             expected_sha256=local.embedding.sha256,
         )
-        reranker_path = self._model_path(
-            local.reranker.model_path,
-            label="reranker",
-            expected_sha256=local.reranker.sha256,
+        reranker_enabled = self.settings.retrieval.rerank_enabled
+        reranker_path = (
+            self._model_path(
+                local.reranker.model_path,
+                label="reranker",
+                expected_sha256=local.reranker.sha256,
+            )
+            if reranker_enabled
+            else None
         )
-        query_expansion_path = self._model_path(
-            local.query_expansion.model_path,
-            label="query expansion",
-            expected_sha256=local.query_expansion.sha256,
-        )
-        prompt_repository = PromptRepository()
-        prompt_repository.describe("query_expansion")
-        query_expansion_prompt = prompt_repository.root / "query_expansion.md"
         log_path = self.paths.logs / "local-inference.log"
         process_path = self.paths.jobs / "local-inference-process.json"
         self._log_stream = log_path.open("ab", buffering=0)
@@ -117,13 +118,13 @@ class LocalInferenceRuntime:
                 "PAPEROS_EMBEDDING_MODEL_PATH": str(model_path),
                 "PAPEROS_EMBEDDING_DIMENSIONS": str(local.embedding.dimensions),
                 "PAPEROS_EMBEDDING_MAX_TOKENS": str(local.embedding.max_tokens),
-                "PAPEROS_RERANKER_MODEL_PATH": str(reranker_path),
-                "PAPEROS_RERANKER_MAX_TOKENS": "4096",
-                "PAPEROS_QUERY_EXPANSION_MODEL_PATH": str(query_expansion_path),
-                "PAPEROS_QUERY_EXPANSION_MAX_TOKENS": str(
-                    local.query_expansion.max_output_tokens
+                "PAPEROS_RERANKER_ENABLED": "true" if reranker_enabled else "false",
+                **(
+                    {"PAPEROS_RERANKER_MODEL_PATH": str(reranker_path)}
+                    if reranker_path is not None
+                    else {}
                 ),
-                "PAPEROS_QUERY_EXPANSION_PROMPT_PATH": str(query_expansion_prompt),
+                "PAPEROS_RERANKER_MAX_TOKENS": "4096",
             }
         )
         try:

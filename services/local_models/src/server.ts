@@ -3,7 +3,6 @@ import {createServer, type IncomingMessage, type ServerResponse} from "node:http
 import {loadConfig} from "./config.js";
 import {EmbeddingService} from "./embedding.js";
 import {errorPayload, RequestError} from "./errors.js";
-import {QueryExpansionService} from "./queryExpansion.js";
 import {RerankerService} from "./reranker.js";
 
 interface EmbeddingRequest {
@@ -18,18 +17,13 @@ interface RerankRequest {
   limit?: number;
 }
 
-interface QueryExpansionRequest {
-  query?: string;
-  profile?: string;
-}
-
 const config = loadConfig();
 const embeddings = new EmbeddingService(config);
 const reranker = new RerankerService(config);
-const queryExpansion = new QueryExpansionService(config);
 await embeddings.initialize();
-await reranker.initialize();
-await queryExpansion.initialize();
+if (config.rerankerEnabled) {
+  await reranker.initialize();
+}
 
 function send(response: ServerResponse, status: number, payload: object): void {
   response.writeHead(status, {"content-type": "application/json; charset=utf-8"});
@@ -78,8 +72,10 @@ const server = createServer(async (request, response) => {
           model: config.embeddingModelName,
           dimensions: config.embeddingDimensions,
         },
-        reranker: {model: config.rerankerModelName, loaded: true},
-        query_expansion: {model: config.queryExpansionModelName, loaded: true},
+        reranker: {
+          model: config.rerankerModelName,
+          loaded: config.rerankerEnabled,
+        },
       });
       return;
     }
@@ -93,18 +89,16 @@ const server = createServer(async (request, response) => {
             owned_by: "paperos-local",
             capabilities: ["embeddings"],
           },
-          {
-            id: config.rerankerModelName,
-            object: "model",
-            owned_by: "paperos-local",
-            capabilities: ["rerank"],
-          },
-          {
-            id: config.queryExpansionModelName,
-            object: "model",
-            owned_by: "paperos-local",
-            capabilities: ["query-expansion"],
-          },
+          ...(config.rerankerEnabled
+            ? [
+                {
+                  id: config.rerankerModelName,
+                  object: "model",
+                  owned_by: "paperos-local",
+                  capabilities: ["rerank"],
+                },
+              ]
+            : []),
         ],
       });
       return;
@@ -129,6 +123,13 @@ const server = createServer(async (request, response) => {
       return;
     }
     if (request.method === "POST" && url.pathname === "/v1/rerank") {
+      if (!config.rerankerEnabled) {
+        throw new RequestError(
+          "Reranker is disabled; enable retrieval.rerank_enabled",
+          404,
+          "reranker_disabled",
+        );
+      }
       const body = (await readJson(request)) as RerankRequest;
       if (
         typeof body.query !== "string" ||
@@ -164,27 +165,6 @@ const server = createServer(async (request, response) => {
       });
       return;
     }
-    if (request.method === "POST" && url.pathname === "/v1/query-expansion") {
-      const body = (await readJson(request)) as QueryExpansionRequest;
-      if (typeof body.query !== "string" || body.query.trim().length === 0) {
-        throw new RequestError("query must be a non-empty string");
-      }
-      const profile =
-        typeof body.profile === "string" && body.profile.length > 0
-          ? body.profile
-          : "comprehensive";
-      const expanded = await queryExpansion.expand(body.query, profile);
-      send(response, 200, {
-        model: config.queryExpansionModelName,
-        lexical_queries: expanded.lexicalQueries,
-        semantic_queries: expanded.semanticQueries,
-        entity_queries: expanded.entityQueries,
-        relation_queries: expanded.relationQueries,
-        hyde_text: expanded.hydeText,
-        raw_output: expanded.rawOutput,
-      });
-      return;
-    }
     throw new RequestError("Endpoint not found", 404, "not_found");
   } catch (error) {
     const status = error instanceof RequestError ? error.statusCode : 500;
@@ -206,8 +186,9 @@ server.listen(config.port, config.host, () => {
       host: config.host,
       port: config.port,
       embedding_model: config.embeddingModelName,
-      reranker_model: config.rerankerModelName,
-      query_expansion_model: config.queryExpansionModelName,
+      reranker_model: config.rerankerEnabled
+        ? config.rerankerModelName
+        : "disabled",
     }) + "\n",
   );
 });
@@ -218,7 +199,6 @@ async function shutdown(signal: string): Promise<void> {
   closing = true;
   process.stdout.write(JSON.stringify({event: "shutdown", signal}) + "\n");
   server.close();
-  await queryExpansion.dispose();
   await reranker.dispose();
   await embeddings.dispose();
   process.exit(0);

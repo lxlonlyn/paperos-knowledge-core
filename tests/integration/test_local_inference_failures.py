@@ -59,12 +59,6 @@ def _with_real_model_paths(settings, configured_data_dir: Path):
                             / local.reranker.model_path
                         }
                     ),
-                    "query_expansion": local.query_expansion.model_copy(
-                        update={
-                            "model_path": configured_data_dir
-                            / local.query_expansion.model_path
-                        }
-                    ),
                 }
             )
         }

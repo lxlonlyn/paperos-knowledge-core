@@ -12,7 +12,7 @@ from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.registry import SourceRegistry
 from paperos_core.jobs.queue import JobQueue
 from paperos_core.paths import DataPaths
-from paperos_core.runtime.local_inference.client import LocalInferenceClient
+from paperos_core.runtime.local_inference.runtime import LocalInferenceRuntime
 
 
 class HealthService:
@@ -23,7 +23,7 @@ class HealthService:
         canonical_repository: CanonicalRepository,
         mineru: MinerUClient,
         llm: LLMClient,
-        local_inference: LocalInferenceClient,
+        local_inference: LocalInferenceRuntime,
         cognee: CogneeCompatibilityAdapter,
         indexes: IndexManager,
         queue: JobQueue,
@@ -62,13 +62,19 @@ class HealthService:
                 "status": "unavailable",
                 "error": f"{type(exc).__name__}: {exc}",
             }
-        try:
-            local = await self.local_inference.health()
-            components["local_models"] = {"status": "healthy", **local}
-        except Exception as exc:  # noqa: BLE001 - health reports component failures.
+        if self.local_inference.required:
+            try:
+                local = await self.local_inference.client.health()
+                components["local_models"] = {"status": "healthy", **local}
+            except Exception as exc:  # noqa: BLE001 - health reports component failures.
+                components["local_models"] = {
+                    "status": "unavailable",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+        else:
             components["local_models"] = {
-                "status": "unavailable",
-                "error": f"{type(exc).__name__}: {exc}",
+                "status": "disabled",
+                "reason": "remote embedding provider selected",
             }
         components["lexical"] = {
             "status": "healthy",
@@ -123,7 +129,10 @@ class HealthService:
         }
         overall = (
             "healthy"
-            if all(item["status"] == "healthy" for item in components.values())
+            if all(
+                item["status"] in {"healthy", "disabled"}
+                for item in components.values()
+            )
             else "degraded"
         )
         return {"status": overall, "components": components}

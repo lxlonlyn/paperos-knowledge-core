@@ -13,7 +13,6 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from paperos_core.application import create_application
 from paperos_core.config import load_settings
-from paperos_core.domain.knowledge import SemanticEnrichment
 
 
 async def run(args: argparse.Namespace) -> dict[str, object]:
@@ -48,22 +47,14 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
             return persisted.snapshot.model_dump(mode="json")
         if args.mode == "enrich":
             bundle = application.canonical_repository.get_bundle(args.snapshot_id)
-            enrichment, path = await application.knowledge_pipeline.enrich_bundle(bundle)
+            report, path = await application.knowledge_pipeline.ingest_bundle(bundle)
             return {
                 "path": str(path),
-                "enrichment": enrichment.model_dump(mode="json"),
+                "report": report.model_dump(mode="json"),
             }
         if args.mode == "cognee":
             bundle = application.canonical_repository.get_bundle(args.snapshot_id)
-            enrichment_path = (
-                application.paths.cognee / "enrichment" / f"{args.snapshot_id}.json"
-            )
-            enrichment = SemanticEnrichment.model_validate_json(
-                enrichment_path.read_text(encoding="utf-8")
-            )
-            report = await application.knowledge_pipeline.index_enrichment(
-                bundle, enrichment
-            )
+            report, _ = await application.knowledge_pipeline.ingest_bundle(bundle)
             return report.model_dump(mode="json")
         result = await application.services.ingestion.ingest_pdf_to_knowledge(args.pdf)
         return result.public_dict()
@@ -72,7 +63,6 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
             await application.aclose()
         else:
             await application.local_inference_client.aclose()
-            await application.deepseek.aclose()
             await application.mineru.aclose()
 
 

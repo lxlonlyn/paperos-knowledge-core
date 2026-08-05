@@ -1,4 +1,4 @@
-import {accessSync, constants, readFileSync, statSync} from "node:fs";
+import {accessSync, constants, statSync} from "node:fs";
 import {resolve} from "node:path";
 
 export interface LocalInferenceConfig {
@@ -8,13 +8,10 @@ export interface LocalInferenceConfig {
   embeddingModelName: string;
   embeddingDimensions: number;
   embeddingMaxTokens: number;
+  rerankerEnabled: boolean;
   rerankerModelPath: string;
   rerankerModelName: string;
   rerankerMaxTokens: number;
-  queryExpansionModelPath: string;
-  queryExpansionModelName: string;
-  queryExpansionMaxTokens: number;
-  queryExpansionPrompt: string;
 }
 
 function positiveInteger(name: string, fallback: number): number {
@@ -33,14 +30,10 @@ export function loadConfig(): LocalInferenceConfig {
   }
   const modelPath = resolve(modelValue);
   validateModel("Embedding", modelPath);
-  const rerankerModelPath = requiredModelPath(
-    "PAPEROS_RERANKER_MODEL_PATH",
-    "Reranker",
-  );
-  const queryExpansionModelPath = requiredModelPath(
-    "PAPEROS_QUERY_EXPANSION_MODEL_PATH",
-    "Query expansion",
-  );
+  const rerankerEnabled = process.env.PAPEROS_RERANKER_ENABLED === "true";
+  const rerankerModelPath = rerankerEnabled
+    ? requiredModelPath("PAPEROS_RERANKER_MODEL_PATH", "Reranker")
+    : "";
   return {
     host: process.env.PAPEROS_LOCAL_INFERENCE_HOST ?? "127.0.0.1",
     port: positiveInteger("PAPEROS_LOCAL_INFERENCE_PORT", 8081),
@@ -48,30 +41,11 @@ export function loadConfig(): LocalInferenceConfig {
     embeddingModelName: process.env.PAPEROS_EMBEDDING_MODEL_NAME ?? "embeddinggemma-300M",
     embeddingDimensions: positiveInteger("PAPEROS_EMBEDDING_DIMENSIONS", 768),
     embeddingMaxTokens: positiveInteger("PAPEROS_EMBEDDING_MAX_TOKENS", 2048),
+    rerankerEnabled,
     rerankerModelPath,
     rerankerModelName: process.env.PAPEROS_RERANKER_MODEL_NAME ?? "qwen3-reranker-0.6b",
     rerankerMaxTokens: positiveInteger("PAPEROS_RERANKER_MAX_TOKENS", 4096),
-    queryExpansionModelPath,
-    queryExpansionModelName:
-      process.env.PAPEROS_QUERY_EXPANSION_MODEL_NAME ?? "qmd-query-expansion-1.7b",
-    queryExpansionMaxTokens: positiveInteger(
-      "PAPEROS_QUERY_EXPANSION_MAX_TOKENS",
-      512,
-    ),
-    queryExpansionPrompt: requiredPrompt("PAPEROS_QUERY_EXPANSION_PROMPT_PATH"),
   };
-}
-
-function requiredPrompt(variable: string): string {
-  const value = process.env[variable];
-  if (!value) throw new Error(`${variable} is required`);
-  const path = resolve(value);
-  accessSync(path, constants.R_OK);
-  const content = readFileSync(path, "utf8")
-    .replace(/<!--\s*prompt-version:\s*[^\s]+\s*-->/u, "")
-    .trim();
-  if (!content) throw new Error(`Prompt file is empty: ${path}`);
-  return content;
 }
 
 function requiredModelPath(variable: string, label: string): string {

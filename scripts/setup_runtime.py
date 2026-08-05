@@ -37,11 +37,10 @@ def main() -> None:
 
     node_entry = REPOSITORY_ROOT / "services" / "local_models" / "dist" / "server.js"
     checks.append({"name": "node_entry", "ok": node_entry.is_file(), "path": str(node_entry)})
-    for name, model in (
-        ("embedding_model", settings.local_inference.embedding),
-        ("reranker_model", settings.local_inference.reranker),
-        ("query_expansion_model", settings.local_inference.query_expansion),
-    ):
+    model_checks = [("embedding_model", settings.local_inference.embedding)]
+    if settings.retrieval.rerank_enabled:
+        model_checks.append(("reranker_model", settings.local_inference.reranker))
+    for name, model in model_checks:
         path = resolve_local_model_path(settings, model.model_path)
         item: dict[str, object] = {"name": name, "ok": path.is_file(), "path": str(path)}
         if path.is_file() and model.sha256:

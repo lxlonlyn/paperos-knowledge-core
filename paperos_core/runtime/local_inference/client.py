@@ -13,8 +13,6 @@ from paperos_core.errors import (
 from paperos_core.runtime.local_inference.schemas import (
     EmbeddingRequest,
     EmbeddingResponse,
-    QueryExpansionRequest,
-    QueryExpansionResponse,
     RerankRequest,
     RerankResponse,
     RerankResult,
@@ -112,22 +110,6 @@ class LocalInferenceClient:
                 affected=f"{self.endpoint}/v1/rerank",
             )
         return payload.results
-
-    async def expand_query(
-        self, query: str, *, profile: str
-    ) -> QueryExpansionResponse:
-        request = QueryExpansionRequest(query=query, profile=profile)
-        try:
-            response = await self.client.post(
-                "/v1/query-expansion", json=request.model_dump(mode="json")
-            )
-            response.raise_for_status()
-            return QueryExpansionResponse.model_validate(response.json())
-        except (httpx.HTTPError, ValueError) as exc:
-            raise LocalInferenceResponseError(
-                f"Local query-expansion request failed: {exc}",
-                affected=f"{self.endpoint}/v1/query-expansion",
-            ) from exc
 
     async def aclose(self) -> None:
         await self.client.aclose()

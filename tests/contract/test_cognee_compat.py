@@ -131,6 +131,29 @@ def test_custom_pipeline_tasks_are_declared() -> None:
         assert callable(task_function)
 
 
+def test_single_triplet_representation_keeps_canonical_provenance() -> None:
+    """Cognee embed_triplets=True cannot preserve stable IDs/provenance."""
+    from cognee.modules.engine.models import Triplet
+
+    fields = set(Triplet.model_fields)
+    assert "canonical_id" not in fields
+    assert "source_chunk_ids" not in fields
+    assert "derived_from_ids" not in fields
+    source = (
+        ROOT
+        / "paperos_core"
+        / "adapters"
+        / "cognee"
+        / "pipeline_tasks.py"
+    ).read_text(encoding="utf-8")
+    assert "embed_triplets=False" in source
+    from paperos_core.domain.datapoints import TripletDataPoint
+
+    assert "canonical_id" in TripletDataPoint.model_fields
+    assert "source_chunk_ids" in TripletDataPoint.model_fields
+    assert "derived_from_ids" in TripletDataPoint.model_fields
+
+
 def test_search_and_pipeline_adapter_entry_points() -> None:
     from paperos_core.adapters.cognee.pipeline import CogneePipelineAdapter
     from paperos_core.adapters.cognee.search import CogneeSearchAdapter

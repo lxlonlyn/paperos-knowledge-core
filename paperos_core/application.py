@@ -80,7 +80,8 @@ class Application:
                 + ", ".join(status.missing_tables)
             )
         try:
-            await self.runtime.local_inference.start()
+            if self.runtime.local_inference.required:
+                await self.runtime.local_inference.start()
             await self.runtime.worker.start()
         except BaseException:
             await self.aclose()
@@ -164,8 +165,8 @@ def create_application(settings: RuntimeSettings) -> Application:
     search = CogneeSearchAdapter(paths, compat)
     index_manager = IndexManager(
         paths,
-        embedding_model=local.embedding.model,
-        embedding_dimensions=local.embedding.dimensions,
+        embedding_model=settings.cognee.embedding.model,
+        embedding_dimensions=settings.cognee.embedding.dimensions,
     )
     knowledge_pipeline = CogneePipelineAdapter(
         paths,
@@ -225,7 +226,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         canonical_repository,
         mineru,
         llm,
-        local_inference_client,
+        local_inference_runtime,
         compat,
         index_manager,
         queue,

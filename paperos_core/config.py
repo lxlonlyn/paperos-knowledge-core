@@ -85,12 +85,6 @@ class RerankerSettings(StrictSettings):
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
 
 
-class QueryExpansionSettings(StrictSettings):
-    model_path: Path = Path("models/query-expansion/qmd-query-expansion-1.7B-q4_k_m.gguf")
-    max_output_tokens: int = Field(default=512, gt=0)
-    sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
-
-
 class LocalInferenceSettings(StrictSettings):
     host: Literal["127.0.0.1", "localhost"] = "127.0.0.1"
     port: int = Field(default=8081, ge=1, le=65535)
@@ -98,7 +92,22 @@ class LocalInferenceSettings(StrictSettings):
     startup_timeout_seconds: int = Field(default=180, gt=0)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     reranker: RerankerSettings = Field(default_factory=RerankerSettings)
-    query_expansion: QueryExpansionSettings = Field(default_factory=QueryExpansionSettings)
+
+
+class CogneeEmbeddingSettings(StrictSettings):
+    """Provider-neutral embedding settings translated into Cognee's environment."""
+
+    provider: str = "openai_compatible"
+    model: str = "default"
+    endpoint: str = ""
+    api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
+    dimensions: int = Field(default=768, gt=0)
+    max_tokens: int = Field(default=2048, gt=0)
+    batch_size: int = Field(default=5, gt=0)
+    local_runtime: bool = True
+
+    def api_key_value(self) -> str | None:
+        return self.api_key.get_secret_value() if self.api_key is not None else None
 
 
 class CogneeSettings(StrictSettings):
@@ -108,6 +117,9 @@ class CogneeSettings(StrictSettings):
     db_provider: str = "sqlite"
     vector_provider: str = "lancedb"
     graph_provider: str = "kuzu"
+    embedding: CogneeEmbeddingSettings = Field(
+        default_factory=CogneeEmbeddingSettings
+    )
     llm: LLMSettings = Field(default_factory=LLMSettings, exclude=True)
     local_inference: LocalInferenceSettings = Field(
         default_factory=LocalInferenceSettings, exclude=True
@@ -228,6 +240,17 @@ def load_settings(
     cognee_raw = raw.setdefault("cognee", {})
     if not isinstance(cognee_raw, dict):
         raise ConfigurationError("The [cognee] section must be a TOML table.")
+    embedding_raw = cognee_raw.setdefault("embedding", {})
+    if not isinstance(embedding_raw, dict):
+        raise ConfigurationError("The [cognee.embedding] section must be a TOML table.")
+    if "api_key" in embedding_raw:
+        raise ConfigurationError(
+            "API keys are forbidden in paperos.toml; use the EMBEDDING_API_KEY "
+            "environment variable."
+        )
+    embedding_key = env.get("EMBEDDING_API_KEY", "").strip()
+    if embedding_key:
+        embedding_raw["api_key"] = embedding_key
     for key, default in (
         ("system_database", "cognee/system/databases"),
         ("vector_database", "cognee/vector"),
@@ -256,13 +279,6 @@ def load_settings(
                 update={
                     "model_path": _resolve_path(
                         local.reranker.model_path, base_dir=config_root
-                    )
-                }
-            ),
-            "query_expansion": local.query_expansion.model_copy(
-                update={
-                    "model_path": _resolve_path(
-                        local.query_expansion.model_path, base_dir=config_root
                     )
                 }
             ),

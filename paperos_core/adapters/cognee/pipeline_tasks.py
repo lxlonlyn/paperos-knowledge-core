@@ -114,6 +114,12 @@ async def store_datapoints_task(
         custom_edges = [
             _custom_edge(relation, graph.id_mapping) for relation in graph.relations
         ]
+        # Single triplet representation: PaperOS TripletDataPoint carries
+        # canonical_id, source_chunk_ids, and derived_from_ids. Cognee's
+        # embed_triplets=True produces Triplet(text, from_node_id, to_node_id)
+        # without stable canonical IDs or chunk provenance, so enabling it
+        # would store a second, lower-fidelity triplet set. Keep it disabled
+        # until a contract test proves Cognee's Triplet preserves provenance.
         await compat.add_data_points(
             graph.nodes,
             custom_edges=custom_edges,

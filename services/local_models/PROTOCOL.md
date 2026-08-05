@@ -3,7 +3,7 @@
 - Verify enabled local files before binding the port.
 - Never download models.
 - Missing files return actionable errors.
-- Endpoints: `/health`, `/v1/models`, `/v1/embeddings`, `/v1/rerank`, `/v1/query-expansion`.
+- Endpoints: `/health`, `/v1/models`, `/v1/embeddings`, `/v1/rerank`.
 
 - The PaperOS `Application` lifecycle is the sole owner of this private child
   process. It captures logs, waits for readiness, and terminates the process

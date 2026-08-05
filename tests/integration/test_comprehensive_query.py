@@ -56,12 +56,18 @@ def _contains_concept(searchable: str, concept: str) -> bool:
 
 def _assert_case(case: dict, response: QueryResponse) -> None:
     assert response.profile.value == case["profile"]
-    assert response.expansion.raw_output
+    # First version runs the raw query through profile mapping only.
+    assert response.expansion.lexical_queries == []
+    assert response.expansion.semantic_queries == []
     assert set(case.get("required_channels", [])) <= set(response.channels_used)
     assert set(case.get("required_stages", [])) <= set(response.stages)
     assert response.provenance_complete is True
     assert len(response.evidence) == len(response.candidates) > 0
-    assert all(candidate.rerank_score is not None for candidate in response.candidates)
+    if "rerank" in response.stages:
+        assert all(
+            candidate.rerank_score is not None
+            for candidate in response.candidates
+        )
     assert all(evidence.chunk_id for evidence in response.evidence)
     assert any(
         evidence.evidence_id in response.answer for evidence in response.evidence

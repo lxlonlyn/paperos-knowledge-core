@@ -45,14 +45,18 @@ async def diagnose() -> dict[str, object]:
         checks["node"] = {"compatible": False, "error": str(exc)}
 
     models: dict[str, object] = {}
-    for name, configured in (
-        ("embedding", settings.local_inference.embedding.model_path),
-        ("reranker", settings.local_inference.reranker.model_path),
-        ("query_expansion", settings.local_inference.query_expansion.model_path),
-    ):
+    model_checks = [("embedding", settings.local_inference.embedding.model_path)]
+    if settings.retrieval.rerank_enabled:
+        model_checks.append(("reranker", settings.local_inference.reranker.model_path))
+    for name, configured in model_checks:
         path = resolve_local_model_path(settings, configured)
         models[name] = {"exists": path.is_file(), "path": str(path.resolve(strict=False))}
     checks["models"] = models
+    checks["local_runtime"] = {
+        "required": settings.cognee.embedding.local_runtime,
+        "embedding_provider": settings.cognee.embedding.provider,
+        "embedding_model": settings.cognee.embedding.model,
+    }
 
     mineru_endpoint = (settings.mineru.endpoint or DEFAULT_MINERU_CLOUD_ENDPOINT).rstrip("/")
     try:
@@ -65,10 +69,11 @@ async def diagnose() -> dict[str, object]:
         }
     except httpx.HTTPError as exc:
         checks["mineru"] = {"reachable": False, "error": str(exc)}
-    checks["deepseek"] = {
-        "endpoint": settings.deepseek.endpoint,
-        "model": settings.deepseek.model,
-        "api_key_configured": bool(settings.deepseek.api_key_value()),
+    checks["llm"] = {
+        "provider": settings.llm.provider,
+        "endpoint": settings.llm.endpoint,
+        "model": settings.llm.model,
+        "api_key_configured": bool(settings.llm.api_key_value()),
     }
     checks["data_directory"] = {
         "path": str(settings.data_dir),

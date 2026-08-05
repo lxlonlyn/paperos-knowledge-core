@@ -87,7 +87,6 @@ GET  /health
 GET  /v1/models
 POST /v1/embeddings
 POST /v1/rerank
-POST /v1/query-expansion
 ```
 
 No public command or remote-provider mode exposes this protocol. Missing models,

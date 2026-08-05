@@ -13,10 +13,12 @@ One command owns the complete application lifecycle:
 python server.py
 ```
 
-The FastAPI lifespan initializes local schemas, starts the private Node inference
-child process, waits for its three local models, starts one background Worker,
-and then accepts HTTP requests. Shutdown stops the Worker, terminates the child
-process, and closes Cognee and HTTP clients.
+The FastAPI lifespan initializes local schemas, starts the private Node
+inference child process when the Cognee embedding configuration selects the
+PaperOS local runtime (embedding model, optional reranker), starts one
+background Worker, and then accepts HTTP requests. With a remote embedding
+provider, local GGUF files are never checked or loaded. Shutdown stops the
+Worker, terminates the child process, and closes Cognee and HTTP clients.
 
 MinerU and the LLM provider selected by Cognee configuration are external
 dependencies. PaperOS checks and calls them but never starts them, and its code
@@ -38,10 +40,10 @@ python server.py
 ```
 
 MinerU and the configured LLM provider must already be reachable. Users
-manually place all three GGUF files at the configured paths; relative model
-paths are resolved from `config/paperos.toml`, independently of the runtime
-data directory. PaperOS never installs dependencies or downloads models at
-runtime.
+manually place the local embedding (and optional reranker) GGUF files at the
+configured paths; relative model paths are resolved from
+`config/paperos.toml`, independently of the runtime data directory. PaperOS
+never installs dependencies or downloads models at runtime.
 
 `config/paperos.toml` is the only structured configuration source. The two API
 keys are environment-only secrets. PaperOS does not load `.env` as a Cognee

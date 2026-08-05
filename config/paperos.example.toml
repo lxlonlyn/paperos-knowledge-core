@@ -33,10 +33,6 @@ max_tokens = 2048
 model_path = "../data/models/reranker/qwen3-reranker-0.6b-q8_0.gguf"
 candidate_limit = 40
 
-[local_inference.query_expansion]
-model_path = "../data/models/query-expansion/qmd-query-expansion-1.7B-q4_k_m.gguf"
-max_output_tokens = 512
-
 [cognee]
 system_database = "cognee/system/databases"
 vector_database = "cognee/vector"
@@ -44,6 +40,14 @@ graph_database = "cognee/graph"
 db_provider = "sqlite"
 vector_provider = "lancedb"
 graph_provider = "kuzu"
+
+[cognee.embedding]
+provider = "openai_compatible"
+model = "default"
+endpoint = ""
+dimensions = 768
+max_tokens = 2048
+local_runtime = true
 
 [ingestion]
 max_file_mb = 200

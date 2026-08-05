@@ -44,18 +44,3 @@ class RerankResult(InferenceModel):
 class RerankResponse(InferenceModel):
     model: str
     results: list[RerankResult]
-
-
-class QueryExpansionRequest(InferenceModel):
-    query: str
-    profile: str
-
-
-class QueryExpansionResponse(InferenceModel):
-    model: str
-    lexical_queries: list[str] = Field(min_length=1)
-    semantic_queries: list[str] = Field(min_length=1)
-    entity_queries: list[str] = Field(min_length=1)
-    relation_queries: list[str] = Field(min_length=1)
-    hyde_text: str
-    raw_output: str

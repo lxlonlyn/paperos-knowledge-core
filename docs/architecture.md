@@ -33,9 +33,11 @@ PaperOS services.
 
 ### A5: Private local inference runtime
 
-The Node embedding, reranking, and query-expansion runtime is a private child
-process. The Application lifecycle starts it, waits for readiness, and stops it.
-Its loopback HTTP port is an implementation detail.
+The Node embedding and optional-reranking runtime is a private child process.
+It starts only when the Cognee embedding configuration selects the PaperOS
+local runtime; with a remote embedding provider, PaperOS never checks or loads
+local GGUF files. The Application lifecycle starts it, waits for readiness, and
+stops it. Its loopback HTTP port is an implementation detail.
 
 ### A6: Worker ownership
 
