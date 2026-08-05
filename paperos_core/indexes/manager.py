@@ -7,7 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from paperos_core.adapters.cognee.repository import CogneeDatasetBinding
+from paperos_core.adapters.cognee.compat import CogneeDatasetBinding
 from paperos_core.domain.canonical import CanonicalBundle
 from paperos_core.errors import IndexStorageError
 from paperos_core.indexes.lexical_store import LexicalStore

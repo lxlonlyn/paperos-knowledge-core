@@ -49,30 +49,6 @@ def configure_cognee(settings: CogneeSettings) -> None:
     )
 
 
-def reset_cognee_configuration_caches() -> None:
-    """Make Cognee observe the values installed by ``configure_cognee``."""
-
-    from cognee.base_config import get_base_config  # type: ignore[import-untyped]
-    from cognee.infrastructure.databases.graph.config import (  # type: ignore[import-untyped]
-        get_graph_config,
-    )
-    from cognee.infrastructure.databases.relational.config import (  # type: ignore[import-untyped]
-        get_relational_config,
-    )
-    from cognee.infrastructure.databases.vector.config import (  # type: ignore[import-untyped]
-        get_vectordb_config,
-    )
-    from cognee.infrastructure.databases.vector.embeddings.config import (  # type: ignore[import-untyped]
-        get_embedding_config,
-    )
-
-    get_base_config.cache_clear()
-    get_graph_config.cache_clear()
-    get_relational_config.cache_clear()
-    get_vectordb_config.cache_clear()
-    get_embedding_config.cache_clear()
-
-
 def _no_proxy(existing: str) -> str:
     entries = [item.strip() for item in existing.split(",") if item.strip()]
     for value in ("127.0.0.1", "localhost"):

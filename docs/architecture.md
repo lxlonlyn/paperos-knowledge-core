@@ -146,17 +146,33 @@ Downstream code consumes versioned canonical models. Stable IDs include an
 explicit ID version and are shared by Cognee, graph edges, vectors, FTS rows,
 evidence, and API responses.
 
-Cognee is the structural and semantic retrieval layer:
+The ingestion chain is a Cognee custom pipeline:
 
 ```text
-Cognee vectors -> Chunk / Entity / Claim / Summary / Triplet lookup
-Cognee graph   -> typed traversal -> edge provenance -> source chunks
-SQLite FTS     -> exact lexical supplement
+MinerU -> Canonical Document / Section / Element / Reference
+       -> AcademicChunkTask -> SemanticEnrichmentTask
+       -> DataPointMappingTask -> add_data_points
 ```
 
-PaperOS does not retain a duplicate embedding BLOB store. Every inferred object
-and relation carries source chunk IDs. Dataset, Data item, User, and PipelineRun
-context is propagated through Cognee writes.
+PaperOS decides the academic chunking rules; Cognee executes the pipeline and
+provides the tokenizer, token limits, and the final DataPoint write. Dataset,
+Data item, User, and PipelineRun context is Cognee-owned and no longer managed
+by PaperOS ORM code.
+
+Retrieval calls Cognee's public search/recall surface:
+
+```text
+truth        -> FTS5 + Cognee chunk search + strict provenance
+associative  -> Cognee graph / context search + Entity / Claim
+comprehensive-> FTS5 + Cognee recall + PaperOS candidate fusion
+```
+
+PaperOS does not generate query embeddings, open vector collections, or retain
+a duplicate embedding BLOB store. Every inferred object and relation carries
+source chunk IDs; a narrow compat reader backtracks search hits to canonical
+chunks. Private Cognee API calls are centralized in
+`paperos_core/adapters/cognee/compat.py` and pinned to cognee 1.4.0 by a
+contract test.
 
 ## Prompt ownership
 

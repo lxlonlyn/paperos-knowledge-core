@@ -9,7 +9,11 @@ from paperos_core.retrieval.candidates import QueryPlan, QueryRequest, Retrieval
 def build_query_plan(request: QueryRequest, config: RuntimeSettings) -> QueryPlan:
     profile_config = getattr(config.retrieval.profiles, request.profile.value)
     channels = {
-        RetrievalProfile.TRUTH: ["lexical", "semantic", "confirmed_knowledge"],
+        RetrievalProfile.TRUTH: [
+            "lexical",
+            "semantic",
+            "confirmed_knowledge",
+        ],
         RetrievalProfile.ASSOCIATIVE: [
             "semantic",
             "entity_claim",
@@ -23,6 +27,7 @@ def build_query_plan(request: QueryRequest, config: RuntimeSettings) -> QueryPla
             "entity_claim",
             "graph",
             "global_context",
+            "recall",
             "confirmed_knowledge",
         ],
     }[request.profile]
@@ -38,6 +43,7 @@ def build_query_plan(request: QueryRequest, config: RuntimeSettings) -> QueryPla
             "entity_claim": profile_config.semantic_weight,
             "graph": profile_config.graph_weight,
             "global_context": profile_config.global_context_weight,
+            "recall": profile_config.graph_weight,
             "confirmed_knowledge": profile_config.confirmed_knowledge_weight,
         },
     )

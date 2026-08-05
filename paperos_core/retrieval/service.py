@@ -1,8 +1,9 @@
-"""Cumulative Gate 5 query orchestration over real derived stores."""
+"""Query orchestration: raw query -> profile mapping -> Cognee search/recall."""
 
 from __future__ import annotations
 
-from paperos_core.adapters.cognee.repository import CogneeRepository
+from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
+from paperos_core.adapters.cognee.search import CogneeSearchAdapter
 from paperos_core.adapters.llm import LLMClient
 from paperos_core.config import RuntimeSettings
 from paperos_core.feedback.service import FeedbackService
@@ -27,6 +28,7 @@ from paperos_core.retrieval.global_context import global_context_retrieve
 from paperos_core.retrieval.graph import graph_retrieve
 from paperos_core.retrieval.lexical import lexical_retrieve
 from paperos_core.retrieval.planner import QueryPlanner
+from paperos_core.retrieval.recall import recall_retrieve
 from paperos_core.retrieval.rerank import rerank_candidates
 from paperos_core.retrieval.semantic import (
     entity_claim_retrieve,
@@ -37,7 +39,7 @@ from paperos_core.runtime.local_inference.client import LocalInferenceClient
 
 
 class RetrievalService:
-    """Run planning through answer synthesis without mutating source evidence."""
+    """Run profile mapping through answer synthesis without mutating evidence."""
 
     def __init__(
         self,
@@ -45,7 +47,8 @@ class RetrievalService:
         paths: DataPaths,
         canonical_repository: CanonicalRepository,
         registry: SourceRegistry,
-        cognee_repository: CogneeRepository,
+        search: CogneeSearchAdapter,
+        compat: CogneeCompatibilityAdapter,
         index_manager: IndexManager,
         model_client: LocalInferenceClient,
         llm: LLMClient,
@@ -55,7 +58,8 @@ class RetrievalService:
         self.paths = paths
         self.canonical_repository = canonical_repository
         self.registry = registry
-        self.cognee_repository = cognee_repository
+        self.search = search
+        self.compat = compat
         self.index_manager = index_manager
         self.model_client = model_client
         self.llm = llm
@@ -77,140 +81,101 @@ class RetrievalService:
             request.document_ids, dataset_name
         )
         plan = self.planner.plan(request)
-        expansion_result = await self.model_client.expand_query(
-            request.query, profile=request.profile.value
-        )
-        llm_plan, planner_raw = await self.llm.plan_query(
-            query=request.query, profile=request.profile.value
-        )
-        expansion = ExpansionTrace(
-            model=expansion_result.model,
-            lexical_queries=list(
-                dict.fromkeys(
-                    [
-                        *expansion_result.lexical_queries,
-                        *llm_plan.lexical_queries,
-                    ]
-                )
-            ),
-            semantic_queries=list(
-                dict.fromkeys(
-                    [
-                        *expansion_result.semantic_queries,
-                        *llm_plan.semantic_queries,
-                    ]
-                )
-            ),
-            entity_queries=list(
-                dict.fromkeys(
-                    [
-                        *expansion_result.entity_queries,
-                        *llm_plan.entity_queries,
-                    ]
-                )
-            ),
-            relation_queries=list(
-                dict.fromkeys(
-                    [
-                        *expansion_result.relation_queries,
-                        *llm_plan.relation_queries,
-                    ]
-                )
-            ),
-            hyde_text=llm_plan.hyde_text or expansion_result.hyde_text,
-            raw_output=expansion_result.raw_output,
-            planner_model=self.llm.config.model,
-            planner_raw_output=planner_raw,
-        )
         pool = plan.candidate_pool_size
-        queries = list(
-            dict.fromkeys(
-                [
-                    request.query,
-                    *expansion.semantic_queries,
-                    expansion.hyde_text,
-                ]
-            )
-        )
-        stages = ["query_planning", "query_expansion"]
+        query = request.query
+        stages = ["profile_mapping"]
         channels: dict[str, list[Candidate]] = {}
 
         if "lexical" in plan.channels:
             channels["lexical"] = lexical_retrieve(
                 self.index_manager.lexical,
                 corpus,
-                [request.query, *expansion.lexical_queries],
+                [query],
                 limit=pool,
                 document_ids=document_ids,
             )
             stages.append("lexical_retrieval")
         if "semantic" in plan.channels:
             channels["semantic"] = await semantic_retrieve(
-                self.cognee_repository,
+                self.search,
+                self.compat,
                 corpus,
-                queries,
+                query,
+                dataset_name=dataset_name,
                 limit=pool,
                 document_ids=document_ids,
             )
-            stages.append("semantic_retrieval")
+            stages.append("cognee_search")
         if "entity_claim" in plan.channels:
             channels["entity_claim"] = await entity_claim_retrieve(
-                self.cognee_repository,
+                self.search,
+                self.compat,
                 corpus,
-                [
-                    request.query,
-                    *expansion.entity_queries,
-                    *expansion.relation_queries,
-                ],
+                query,
+                dataset_name=dataset_name,
                 limit=pool,
                 document_ids=document_ids,
             )
-            stages.append("entity_claim_retrieval")
+            stages.append("entity_claim_search")
         if "graph" in plan.channels:
             channels["graph"] = await graph_retrieve(
-                self.cognee_repository,
+                self.search,
+                self.compat,
                 corpus,
-                [
-                    request.query,
-                    *expansion.entity_queries,
-                    *expansion.relation_queries,
-                ],
+                query,
+                dataset_name=dataset_name,
                 limit=pool,
                 depth=plan.graph_depth,
                 document_ids=document_ids,
             )
-            stages.append("graph_traversal")
+            stages.append("typed_traversal")
         if "global_context" in plan.channels:
             channels["global_context"] = await global_context_retrieve(
-                self.cognee_repository,
+                self.search,
+                self.compat,
                 corpus,
-                queries,
+                query,
+                dataset_name=dataset_name,
                 limit=pool,
                 document_ids=document_ids,
             )
             stages.append("global_context")
+        if "recall" in plan.channels:
+            contexts = await self.search.recall_context(
+                query,
+                dataset=dataset_name,
+                top_k=pool,
+            )
+            channels["recall"] = recall_retrieve(
+                contexts,
+                corpus,
+                query,
+                limit=pool,
+                document_ids=document_ids,
+            )
+            stages.append("cognee_recall")
         if "confirmed_knowledge" in plan.channels:
             channels["confirmed_knowledge"] = confirmed_knowledge_retrieve(
                 self.feedback,
                 corpus,
-                [request.query, *expansion.semantic_queries],
+                [query],
                 limit=pool,
                 document_ids=document_ids,
             )
             stages.append("confirmed_knowledge_retrieval")
 
         fused = weighted_rrf(channels, plan.weights)[:pool]
-        stages.extend(["fusion", "evidence_backtracking"])
-        reranked = await rerank_candidates(
-            self.model_client,
-            (
-                f"{request.query}\nRetrieval intent: "
-                + " ; ".join(llm_plan.semantic_queries[:3])
-            ),
-            fused,
-            limit=pool,
-        )
-        stages.append("rerank")
+        stages.append("fusion")
+        if self.config.retrieval.rerank_enabled:
+            reranked = await rerank_candidates(
+                self.model_client,
+                query,
+                fused,
+                limit=pool,
+            )
+            stages.append("rerank")
+        else:
+            reranked = fused
         truth_profile = request.profile is RetrievalProfile.TRUTH
         selected = diversify(
             reranked,
@@ -222,10 +187,7 @@ class RetrievalService:
             ),
             max_per_section=self.config.retrieval.max_chunks_per_section,
             seed_each_document=not truth_profile,
-            aspect_queries=[
-                *llm_plan.lexical_queries,
-                *llm_plan.entity_queries,
-            ],
+            aspect_queries=[query],
         )
         stages.append("diversification")
         evidence = format_evidence(selected, corpus.bundles)
@@ -236,6 +198,15 @@ class RetrievalService:
             evidence=evidence,
         )
         stages.append("synthesis")
+        expansion = ExpansionTrace(
+            model="",
+            lexical_queries=[],
+            semantic_queries=[],
+            entity_queries=[],
+            relation_queries=[],
+            hyde_text="",
+            raw_output="",
+        )
         response = QueryResponse(
             id=cache_key,
             query=request.query,

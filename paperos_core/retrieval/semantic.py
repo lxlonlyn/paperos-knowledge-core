@@ -1,32 +1,35 @@
-"""Semantic and entity/claim retrieval through Cognee's vector indexes."""
+"""Semantic, entity/claim, and summary retrieval through Cognee public search."""
 
 from __future__ import annotations
 
-from paperos_core.adapters.cognee.repository import (
-    ENTITY_CLAIM_VECTOR_COLLECTIONS,
-    SEMANTIC_VECTOR_COLLECTIONS,
-    CogneeRepository,
-    CogneeVectorHit,
-)
+from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
+from paperos_core.adapters.cognee.search import CogneeSearchAdapter, CogneeSearchHit
 from paperos_core.retrieval.candidates import Candidate
 from paperos_core.retrieval.corpus import CorpusView
 
+_CHUNK_TYPE = "ChunkDataPoint"
+_SUMMARY_TYPE = "SummaryDataPoint"
+_ENTITY_CLAIM_TYPES = {"EntityDataPoint", "ClaimDataPoint"}
+
 
 async def semantic_retrieve(
-    repository: CogneeRepository,
+    search: CogneeSearchAdapter,
+    compat: CogneeCompatibilityAdapter,
     corpus: CorpusView,
-    queries: list[str],
+    query: str,
     *,
+    dataset_name: str,
     limit: int,
     document_ids: set[str],
 ) -> list[Candidate]:
-    hits = await repository.search_vectors(
-        queries[:4],
-        collections=SEMANTIC_VECTOR_COLLECTIONS,
-        limit=limit * 2,
+    hits = await search.graph_search(
+        query,
+        dataset=dataset_name,
+        top_k=limit * 2,
     )
-    return _hits_to_candidates(
+    return await _hits_to_candidates(
         hits,
+        compat,
         corpus,
         channel="semantic",
         limit=limit,
@@ -35,20 +38,24 @@ async def semantic_retrieve(
 
 
 async def entity_claim_retrieve(
-    repository: CogneeRepository,
+    search: CogneeSearchAdapter,
+    compat: CogneeCompatibilityAdapter,
     corpus: CorpusView,
-    queries: list[str],
+    query: str,
     *,
+    dataset_name: str,
     limit: int,
     document_ids: set[str],
 ) -> list[Candidate]:
-    hits = await repository.search_vectors(
-        queries[:4],
-        collections=ENTITY_CLAIM_VECTOR_COLLECTIONS,
-        limit=limit * 2,
+    hits = await search.graph_search(
+        query,
+        dataset=dataset_name,
+        top_k=limit * 2,
     )
-    return _hits_to_candidates(
-        hits,
+    filtered = [hit for hit in hits if hit.object_type in _ENTITY_CLAIM_TYPES]
+    return await _hits_to_candidates(
+        filtered,
+        compat,
         corpus,
         channel="entity_claim",
         limit=limit,
@@ -56,19 +63,56 @@ async def entity_claim_retrieve(
     )
 
 
-def _hits_to_candidates(
-    hits: list[CogneeVectorHit],
+async def summary_retrieve(
+    search: CogneeSearchAdapter,
+    compat: CogneeCompatibilityAdapter,
+    corpus: CorpusView,
+    query: str,
+    *,
+    dataset_name: str,
+    limit: int,
+    document_ids: set[str],
+) -> list[Candidate]:
+    hits = await search.graph_search(
+        query,
+        dataset=dataset_name,
+        top_k=limit,
+    )
+    filtered = [hit for hit in hits if hit.object_type == _SUMMARY_TYPE]
+    return await _hits_to_candidates(
+        filtered,
+        compat,
+        corpus,
+        channel="global_context",
+        limit=limit,
+        document_ids=document_ids,
+    )
+
+
+async def _hits_to_candidates(
+    hits: list[CogneeSearchHit],
+    compat: CogneeCompatibilityAdapter,
     corpus: CorpusView,
     *,
     channel: str,
     limit: int,
     document_ids: set[str],
 ) -> list[Candidate]:
+    non_chunk = [
+        hit
+        for hit in hits
+        if hit.object_type != _CHUNK_TYPE
+    ]
+    resolved = await compat.resolve_graph_nodes(
+        [hit.cognee_id for hit in non_chunk]
+    )
     candidates: dict[str, Candidate] = {}
     for hit in hits:
-        chunk_ids = list(hit.source_chunk_ids)
-        if hit.object_type == "ChunkDataPoint" and hit.canonical_id not in chunk_ids:
-            chunk_ids.insert(0, hit.canonical_id)
+        if hit.object_type == _CHUNK_TYPE:
+            chunk_ids = [hit.canonical_id]
+        else:
+            properties = resolved.get(hit.cognee_id, {})
+            chunk_ids = _string_list(properties.get("source_chunk_ids"))
         for chunk_id in chunk_ids:
             chunk = corpus.chunks.get(chunk_id)
             if chunk is None or chunk.document_id not in document_ids:
@@ -82,12 +126,13 @@ def _hits_to_candidates(
                 object_type=object_type,
                 knowledge_kind=(
                     "source_fact"
-                    if hit.object_type == "ChunkDataPoint"
-                    else "structured_relation"
-                    if hit.object_type in {"TripletDataPoint", "ConceptRelationDataPoint"}
+                    if hit.object_type == _CHUNK_TYPE
                     else "system_inference"
                 ),
-                derived_from_ids=[hit.canonical_id, *hit.derived_from_ids],
+                derived_from_ids=[
+                    hit.canonical_id,
+                    *_string_list(properties.get("derived_from_ids")),
+                ],
             )
             existing = candidates.get(chunk_id)
             if existing is None or hit.score > existing.channel_scores[channel]:
@@ -96,3 +141,7 @@ def _hits_to_candidates(
         candidates.values(),
         key=lambda item: (-item.channel_scores[channel], item.id),
     )[:limit]
+
+
+def _string_list(value: object) -> list[str]:
+    return [str(item) for item in value] if isinstance(value, list) else []

@@ -27,6 +27,19 @@ def test_single_source_entry_and_removed_facades() -> None:
     assert "serve_forever" not in source
     assert "LocalModelGateway" not in source
     assert "import typer" not in source
+    assert "class CogneeRepository" not in source
+
+
+def test_cognee_adapter_keeps_three_responsibility_entries() -> None:
+    for relative in (
+        "paperos_core/adapters/cognee/compat.py",
+        "paperos_core/adapters/cognee/search.py",
+        "paperos_core/adapters/cognee/pipeline.py",
+        "paperos_core/adapters/cognee/pipeline_tasks.py",
+    ):
+        assert (ROOT / relative).is_file()
+    assert not (ROOT / "paperos_core" / "adapters" / "cognee" / "repository.py").exists()
+    assert not (ROOT / "paperos_core" / "adapters" / "cognee" / "tasks.py").exists()
 
 
 def test_all_business_routes_are_http_routers() -> None:

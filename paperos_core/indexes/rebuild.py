@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from paperos_core.adapters.cognee.pipeline import CogneePipeline
+from paperos_core.adapters.cognee.pipeline import CogneePipelineAdapter
 from paperos_core.indexes.manifest import IndexingReport
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.paths import DataPaths
@@ -27,7 +27,7 @@ class DerivedDataRebuilder:
         self,
         paths: DataPaths,
         canonical_repository: CanonicalRepository,
-        pipeline: CogneePipeline,
+        pipeline: CogneePipelineAdapter,
         storage: StorageInitializer,
     ) -> None:
         self.paths = paths
@@ -92,6 +92,7 @@ class DerivedDataRebuilder:
         ]
         targets.extend((self.paths.indexes / "manifests").glob("*.json"))
         targets.extend((self.paths.cognee / "manifests").glob("*.json"))
+        targets.extend((self.paths.cognee / "chunks").glob("*.jsonl"))
         targets.extend((self.paths.cognee / "enrichment").glob("*.json"))
         targets.extend((self.paths.cache / "query").glob("*.json"))
         deleted: list[Path] = []

@@ -55,6 +55,7 @@ default_profile = "comprehensive"
 top_k = 12
 candidate_pool_size = 40
 graph_depth = 2
+rerank_enabled = false
 max_chunks_per_document = 3
 max_chunks_per_section = 2
 

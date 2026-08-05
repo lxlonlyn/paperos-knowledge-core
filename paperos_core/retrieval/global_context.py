@@ -1,41 +1,30 @@
-"""Document summary retrieval with source-chunk backtracking."""
+"""Document summary retrieval through Cognee public search."""
 
-from paperos_core.adapters.cognee.repository import (
-    SUMMARY_VECTOR_COLLECTIONS,
-    CogneeRepository,
-)
+from __future__ import annotations
+
+from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
+from paperos_core.adapters.cognee.search import CogneeSearchAdapter
 from paperos_core.retrieval.candidates import Candidate
 from paperos_core.retrieval.corpus import CorpusView
+from paperos_core.retrieval.semantic import summary_retrieve
 
 
 async def global_context_retrieve(
-    repository: CogneeRepository,
+    search: CogneeSearchAdapter,
+    compat: CogneeCompatibilityAdapter,
     corpus: CorpusView,
-    queries: list[str],
+    query: str,
     *,
+    dataset_name: str,
     limit: int,
     document_ids: set[str],
 ) -> list[Candidate]:
-    hits = await repository.search_vectors(
-        queries[:4],
-        collections=SUMMARY_VECTOR_COLLECTIONS,
+    return await summary_retrieve(
+        search,
+        compat,
+        corpus,
+        query,
+        dataset_name=dataset_name,
         limit=limit,
+        document_ids=document_ids,
     )
-    candidates: list[Candidate] = []
-    for hit in hits:
-        for chunk_id in hit.source_chunk_ids[:2]:
-            chunk = corpus.chunks.get(chunk_id)
-            if chunk is None or chunk.document_id not in document_ids:
-                continue
-            candidates.append(
-                corpus.candidate_for_chunk(
-                    chunk_id,
-                    channel="global_context",
-                    score=hit.score,
-                    object_id=hit.canonical_id,
-                    object_type="summary",
-                    knowledge_kind="system_inference",
-                    derived_from_ids=[hit.canonical_id, *hit.derived_from_ids],
-                )
-            )
-    return candidates[:limit]

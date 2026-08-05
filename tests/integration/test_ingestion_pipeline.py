@@ -10,9 +10,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from paperos_core.adapters.cognee.repository import (
-    GRAPH_SEED_VECTOR_COLLECTIONS,
-    SEMANTIC_VECTOR_COLLECTIONS,
+from paperos_core.adapters.cognee.compat import CogneeVectorHit
+from paperos_core.adapters.cognee.search import (
+    CogneeSearchAdapter,
 )
 from paperos_core.api.app import create_app
 from paperos_core.application import create_application
@@ -213,7 +213,7 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
         if relation["source_id"] in semantic_ids
     )
     document_node = asyncio.run(
-        application.knowledge_pipeline.cognee_repository.get_datapoint(canonical.document.id)
+        application.knowledge_pipeline.compat.get_datapoint(canonical.document.id)
     )
     document_properties = document_node.get("properties", document_node)
     assert document_properties["canonical_id"] == canonical.document.id
@@ -226,7 +226,7 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
             == knowledge["lexical_object_count"]
         )
     vector_status = asyncio.run(
-        application.knowledge_pipeline.cognee_repository.vector_status()
+        application.knowledge_pipeline.compat.vector_status()
     )
     assert vector_status["backend"] == "cognee"
     assert vector_status["dimensions"] == 768
@@ -240,23 +240,42 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
     async def verify_cognee_query_backbone() -> None:
         await application.start()
         try:
-            repository = application.knowledge_pipeline.cognee_repository
-            semantic_hits = await repository.search_vectors(
-                [canonical.chunks[0].text[:200]],
-                collections=SEMANTIC_VECTOR_COLLECTIONS,
-                limit=10,
+            search = CogneeSearchAdapter(
+                application.paths, application.knowledge_pipeline.compat
+            )
+            semantic_hits = await search.graph_search(
+                canonical.chunks[0].text[:200],
+                dataset="papers",
+                top_k=10,
             )
             assert semantic_hits
             assert any(hit.object_type == "ChunkDataPoint" for hit in semantic_hits)
             entity_ids = {item["id"] for item in enrichment["entities"]}
-            entity_hits = await repository.search_vectors(
-                [item["name"] for item in enrichment["entities"]],
-                collections=GRAPH_SEED_VECTOR_COLLECTIONS,
-                limit=40,
+            entity_hits = await search.graph_search(
+                " ".join(item["name"] for item in enrichment["entities"]),
+                dataset="papers",
+                top_k=40,
             )
             assert entity_ids.intersection(hit.canonical_id for hit in entity_hits)
-            traversed = await repository.traverse(
-                entity_hits,
+            resolved = await application.knowledge_pipeline.compat.resolve_graph_nodes(
+                [hit.cognee_id for hit in entity_hits]
+            )
+            seeds = [
+                CogneeVectorHit(
+                    cognee_id=hit.cognee_id,
+                    canonical_id=hit.canonical_id,
+                    object_type=hit.object_type,
+                    score=hit.score,
+                    source_chunk_ids=tuple(
+                        resolved.get(hit.cognee_id, {}).get("source_chunk_ids", [])
+                    ),
+                    derived_from_ids=(),
+                    canonical_snapshot_id=None,
+                )
+                for hit in entity_hits
+            ]
+            traversed = await application.knowledge_pipeline.compat.typed_traverse(
+                seeds,
                 depth=2,
                 edge_types={relation.value for relation in RelationType},
             )

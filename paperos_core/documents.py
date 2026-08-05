@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from paperos_core.adapters.cognee.repository import CogneeRepository
+from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
 from paperos_core.errors import DocumentNotFoundError
 from paperos_core.indexes.manager import IndexManager
 from paperos_core.indexes.rebuild import DerivedDataRebuilder
@@ -55,7 +55,7 @@ class DocumentService:
         ingestion: IngestionService,
         rebuilder: DerivedDataRebuilder,
         indexes: IndexManager,
-        cognee: CogneeRepository,
+        cognee: CogneeCompatibilityAdapter,
     ) -> None:
         self.paths = paths
         self.canonical_repository = canonical_repository

@@ -16,7 +16,7 @@ from paperos_core.ingestion.service import IngestionService
 from paperos_core.paths import DataPaths, build_data_paths
 
 if TYPE_CHECKING:
-    from paperos_core.adapters.cognee.pipeline import CogneePipeline
+    from paperos_core.adapters.cognee.pipeline import CogneePipelineAdapter
     from paperos_core.adapters.llm import LLMClient
     from paperos_core.documents import DocumentService
     from paperos_core.feedback.service import FeedbackService
@@ -59,7 +59,7 @@ class Application:
     mineru: MinerUClient
     local_inference_client: LocalInferenceClient
     llm: LLMClient
-    knowledge_pipeline: CogneePipeline
+    knowledge_pipeline: CogneePipelineAdapter
     queue: JobQueue
     storage: StorageInitializer
     _started: bool = field(default=False, init=False)
@@ -96,7 +96,7 @@ class Application:
         failures: list[Exception] = []
         for close in (
             self.runtime.worker.stop,
-            self.knowledge_pipeline.cognee_repository.aclose,
+            self.knowledge_pipeline.compat.aclose,
             self.runtime.local_inference.stop,
             self.local_inference_client.aclose,
             self.mineru.aclose,
@@ -130,14 +130,15 @@ def create_application(settings: RuntimeSettings) -> Application:
         raise CogneeConfigurationError(
             "Project configuration is required to configure Cognee."
         )
-    from paperos_core.adapters.cognee.config import (
-        configure_cognee,
-        reset_cognee_configuration_caches,
-    )
+    from paperos_core.adapters.cognee.config import configure_cognee
 
     configure_cognee(settings.cognee)
-    from paperos_core.adapters.cognee.pipeline import CogneePipeline
-    from paperos_core.adapters.cognee.repository import CogneeRepository
+    from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
+
+    compat = CogneeCompatibilityAdapter(paths)
+    compat.reset_configuration_caches()
+    from paperos_core.adapters.cognee.pipeline import CogneePipelineAdapter
+    from paperos_core.adapters.cognee.search import CogneeSearchAdapter
     from paperos_core.adapters.llm import LLMClient
     from paperos_core.documents import DocumentService
     from paperos_core.feedback.service import FeedbackService
@@ -151,7 +152,6 @@ def create_application(settings: RuntimeSettings) -> Application:
     from paperos_core.runtime.local_inference.client import LocalInferenceClient
     from paperos_core.runtime.local_inference.runtime import LocalInferenceRuntime
 
-    reset_cognee_configuration_caches()
     local = settings.local_inference
     local_inference_client = LocalInferenceClient(
         f"http://{local.host}:{local.port}",
@@ -161,19 +161,20 @@ def create_application(settings: RuntimeSettings) -> Application:
         settings, paths, local_inference_client
     )
     llm = LLMClient(settings.llm, PromptRepository())
-    cognee_repository = CogneeRepository(paths)
+    search = CogneeSearchAdapter(paths, compat)
     index_manager = IndexManager(
         paths,
         embedding_model=local.embedding.model,
         embedding_dimensions=local.embedding.dimensions,
     )
-    knowledge_pipeline = CogneePipeline(
+    knowledge_pipeline = CogneePipelineAdapter(
         paths,
         canonical_repository,
         registry,
-        cognee_repository,
+        compat,
         index_manager,
         llm,
+        settings.ingestion,
     )
     rebuilder = DerivedDataRebuilder(
         paths, canonical_repository, knowledge_pipeline, storage
@@ -185,7 +186,8 @@ def create_application(settings: RuntimeSettings) -> Application:
         paths,
         canonical_repository,
         registry,
-        cognee_repository,
+        search,
+        compat,
         index_manager,
         local_inference_client,
         llm,
@@ -215,7 +217,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         ingestion,
         rebuilder,
         index_manager,
-        cognee_repository,
+        compat,
     )
     health = HealthService(
         paths,
@@ -224,7 +226,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         mineru,
         llm,
         local_inference_client,
-        cognee_repository,
+        compat,
         index_manager,
         queue,
     )

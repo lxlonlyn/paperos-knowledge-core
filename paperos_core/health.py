@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from paperos_core.adapters.cognee.repository import CogneeRepository
+from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
 from paperos_core.adapters.llm import LLMClient
 from paperos_core.adapters.mineru.client import MinerUClient
 from paperos_core.indexes.manager import IndexManager
@@ -24,7 +24,7 @@ class HealthService:
         mineru: MinerUClient,
         llm: LLMClient,
         local_inference: LocalInferenceClient,
-        cognee: CogneeRepository,
+        cognee: CogneeCompatibilityAdapter,
         indexes: IndexManager,
         queue: JobQueue,
     ) -> None:

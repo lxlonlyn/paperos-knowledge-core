@@ -133,6 +133,7 @@ class RetrievalSettings(StrictSettings):
     top_k: int = Field(default=12, gt=0)
     candidate_pool_size: int = Field(default=40, gt=0)
     graph_depth: int = Field(default=2, ge=0)
+    rerank_enabled: bool = False
     max_chunks_per_document: int = Field(default=3, gt=0)
     max_chunks_per_section: int = Field(default=2, gt=0)
     profiles: RetrievalProfilesSettings = Field(default_factory=RetrievalProfilesSettings)
