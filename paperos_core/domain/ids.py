@@ -17,7 +17,7 @@ CANONICAL_ID_VERSION = "1"
 CANONICAL_PIPELINE_VERSION = "gate3.2"
 CLEANING_VERSION = "1"
 CLASSIFICATION_VERSION = "1"
-CHUNKING_VERSION = "1"
+CHUNKING_VERSION = "2"
 REFERENCE_PROCESSING_VERSION = "1"
 KNOWLEDGE_TRIPLET_ID_VERSION = "1"
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -143,17 +143,18 @@ def element_id(
 def chunk_id(
     document_id_value: str,
     order: int,
-    element_ids: list[str],
+    element_span_ids: list[str],
     *,
     chunking_version: str = CHUNKING_VERSION,
     id_version: str = CANONICAL_ID_VERSION,
 ) -> str:
+    """Identify one chunk from the exact element-internal spans it covers."""
     return stable_id(
         "chunk",
         document_id_value,
         str(order),
         chunking_version,
-        *element_ids,
+        *element_span_ids,
         id_version=id_version,
     )
 

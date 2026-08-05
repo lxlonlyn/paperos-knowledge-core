@@ -34,6 +34,39 @@ class CanonicalRepository:
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
 
+    def chunk_store_path(self, snapshot_id: str) -> Path:
+        """Path of the derived chunk store written by the Cognee pipeline."""
+        path = (self.paths.cognee / "chunks" / f"{snapshot_id}.jsonl").resolve(
+            strict=False
+        )
+        self.paths.assert_within_root(path)
+        return path
+
+    def save_chunks(self, snapshot_id: str, chunks: Sequence[Chunk]) -> Path:
+        """Atomically persist chunks produced by the custom pipeline (derived)."""
+        path = self.chunk_store_path(snapshot_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = self._jsonl_bytes(chunks)
+        temporary_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=".chunks-", dir=path.parent, delete=False
+            ) as temporary:
+                temporary_name = temporary.name
+                temporary.write(payload)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_name, path)
+        except OSError as exc:
+            raise CanonicalStorageError(
+                f"Unable to persist derived chunk store: {exc}",
+                affected=path,
+            ) from exc
+        finally:
+            if temporary_name:
+                Path(temporary_name).unlink(missing_ok=True)
+        return path
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.paths.registry_db, timeout=30)
         connection.row_factory = sqlite3.Row
@@ -170,10 +203,16 @@ class CanonicalRepository:
             document=self._read_model(root / "document.json", Document),
             sections=self._read_jsonl(root / "sections.jsonl", Section),
             elements=self._read_jsonl(root / "elements.jsonl", Element),
-            chunks=self._read_jsonl(root / "chunks.jsonl", Chunk),
+            chunks=self._load_chunks(snapshot, root),
             references=self._read_jsonl(root / "references.jsonl", ReferenceEntry),
             warnings=warnings_payload,
         )
+
+    def _load_chunks(self, snapshot: CanonicalSnapshot, root: Path) -> list[Chunk]:
+        derived = self.chunk_store_path(snapshot.id)
+        if derived.is_file():
+            return self._read_jsonl(derived, Chunk)
+        return self._read_jsonl(root / "chunks.jsonl", Chunk)
 
     def list_snapshot_ids(self) -> list[str]:
         with self._connect() as connection:

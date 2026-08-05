@@ -123,16 +123,19 @@ class Chunk(DomainModel):
     id_version: str = CANONICAL_ID_VERSION
     chunking_version: str = CHUNKING_VERSION
     element_ids: list[str] = Field(min_length=1)
+    element_span_ids: list[str] = Field(default_factory=list)
     section_id: str | None = None
     section_path: str | None = None
     page_start: int | None = Field(default=None, ge=1)
     page_end: int | None = Field(default=None, ge=1)
+    bounding_box: tuple[float, float, float, float] | None = None
     token_count: int | None = Field(default=None, ge=1)
     character_start: int | None = Field(default=None, ge=0)
     character_end: int | None = Field(default=None, ge=0)
     previous_chunk_id: str | None = None
     next_chunk_id: str | None = None
     overlap_source_chunk_ids: list[str] = Field(default_factory=list)
+    overlap_element_span_ids: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

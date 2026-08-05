@@ -32,7 +32,6 @@ from paperos_core.domain.ids import (
 )
 from paperos_core.domain.parsing import ParserArtifact, ParseRun
 from paperos_core.errors import CanonicalMappingError
-from paperos_core.ingestion.chunking import build_chunks
 from paperos_core.ingestion.classification import classify_element
 from paperos_core.ingestion.cleaning import (
     MarginText,
@@ -146,14 +145,6 @@ class MinerUCanonicalMapper:
                 item for item in elements if item.element_type == ElementType.REFERENCE
             )
         ]
-        chunks = build_chunks(
-            document_id=document_identifier,
-            snapshot_id=snapshot_identifier,
-            sections=sections,
-            elements=elements,
-            target_tokens=self.config.chunk_target_tokens,
-            overlap_tokens=self.config.chunk_overlap_tokens,
-        )
         warnings: list[str] = []
         if not authors:
             warnings.append("No author names could be mapped from parser artifacts.")
@@ -168,7 +159,7 @@ class MinerUCanonicalMapper:
             document=document,
             sections=sections,
             elements=elements,
-            chunks=chunks,
+            chunks=[],
             references=references,
             warnings=warnings,
         )
