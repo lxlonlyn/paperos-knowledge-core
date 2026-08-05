@@ -98,10 +98,12 @@ supplement. Both use the same canonical IDs.
 ## Local inference
 
 The repository-owned Node runtime is private to PaperOS and listens on a loopback
-implementation port. It loads manually supplied EmbeddingGemma, Qwen3 Reranker,
-and QMD Query Expansion GGUF files. Application services receive only a
-`LocalInferenceClient`; only the Application lifecycle can start or stop the
-child process.
+implementation port. It starts only when the Cognee embedding configuration
+selects the PaperOS local runtime, and loads the manually supplied EmbeddingGemma
+GGUF plus the optional Qwen3 Reranker GGUF when `retrieval.rerank_enabled` is
+true. With a remote embedding provider, local GGUF files are never checked or
+loaded. Application services receive only a `LocalInferenceClient`; only the
+Application lifecycle can start or stop the child process.
 
 ## Operational scripts
 

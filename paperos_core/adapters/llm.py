@@ -72,14 +72,6 @@ class _EnrichmentExtraction(_StrictModel):
     summary: _SummaryExtraction
 
 
-class _QueryPlanExtraction(_StrictModel):
-    lexical_queries: list[str] = Field(min_length=1)
-    semantic_queries: list[str] = Field(min_length=1)
-    entity_queries: list[str] = Field(min_length=1)
-    relation_queries: list[str] = Field(min_length=1)
-    hyde_text: str
-
-
 class LLMClient:
     """Run PaperOS prompts through Cognee's configured LLMGateway."""
 
@@ -92,9 +84,9 @@ class LLMClient:
         self.prompts = prompts
 
     async def health_check(self) -> dict[str, Any]:
-        if not self.config.model or not self.config.endpoint or not self.config.api_key_value():
+        if not self.config.model or not self.config.api_key_value():
             raise SemanticEnrichmentError(
-                "LLM requires provider/model configuration and LLM_API_KEY.",
+                "LLM requires model configuration and LLM_API_KEY.",
                 affected="LLM_API_KEY",
                 retryable=False,
             )
@@ -250,49 +242,6 @@ class LLMClient:
             affected=self.config.endpoint,
             details={"attempts": failures},
         )
-
-    async def plan_query(
-        self, *, query: str, profile: str
-    ) -> tuple[_QueryPlanExtraction, str]:
-        """Generate retrieval-only bilingual expansions with a validated schema."""
-        from cognee.infrastructure.llm import LLMGateway  # type: ignore[import-untyped]
-
-        failures: list[str] = []
-        for attempt in range(1, self.config.max_attempts + 1):
-            try:
-                result = await LLMGateway.acreate_structured_output(
-                    text_input=json.dumps(
-                        {
-                            "profile": profile,
-                            "query": query,
-                            "schema": {
-                                "lexical_queries": ["string"],
-                                "semantic_queries": ["string"],
-                                "entity_queries": ["string"],
-                                "relation_queries": ["string"],
-                                "hyde_text": "short hypothetical relevant passage",
-                            },
-                        },
-                        ensure_ascii=False,
-                    ),
-                    system_prompt=self.prompts.load("query_planning"),
-                    response_model=_QueryPlanExtraction,
-                    temperature=0.1,
-                    max_tokens=2_000,
-                )
-                if not isinstance(result, _QueryPlanExtraction):
-                    raise TypeError("structured completion is not the expected schema")
-                return result, result.model_dump_json()
-            except (ValidationError, TypeError, ValueError) as exc:
-                failures.append(f"attempt {attempt}: {type(exc).__name__}: {exc}")
-                if attempt < self.config.max_attempts:
-                    await asyncio.sleep(min(2 ** (attempt - 1), 4))
-        raise SemanticEnrichmentError(
-            "LLM query planning failed after finite retries.",
-            affected=self.config.endpoint,
-            details={"attempts": failures},
-        )
-
 
 def _select_evidence(bundle: CanonicalBundle) -> list[dict[str, str]]:
     """Keep all real chunks represented while bounding one provider request."""

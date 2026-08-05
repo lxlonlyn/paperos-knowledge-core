@@ -96,6 +96,58 @@ HTTP upload -> queued job -> SourceFile -> live MinerU -> 46 parser files
 - Logical delete removed 92 lexical and 82 vector objects while retaining source evidence.
 - Hashes of every pre-existing PDF, MinerU artifact, and canonical file remained unchanged.
 
+# PaperOS x Cognee responsibility convergence checkpoint
+
+- Time: 2026-08-05T13:10:00+00:00
+- Baseline: `ae67214` (live real-PDF cumulative pipeline)
+- Status: vendor-neutral LLM, Cognee custom pipeline, public search/recall,
+  provider switching, and boundary contracts implemented.
+
+## Commits
+
+1. `3d7beb2` replace DeepSeek-specific LLM client with Cognee LLMGateway
+2. `4768823` rewrite academic chunking with real tokenizer and span provenance
+3. `d94b8d6` migrate ingestion to Cognee custom pipeline and public search
+4. `3bc182a` remove query expansion, make reranker optional, obey Cognee
+   embedding config
+
+## What changed
+
+- PaperOS keeps only prompts, Pydantic response schemas, canonical mapping,
+  source-chunk validation, chunking rules, FTS5, and candidate fusion.
+- LLM calls go exclusively through `cognee.infrastructure.llm.LLMGateway`;
+  provider switching is configuration-only (`[llm]`).
+- Ingestion runs as `cognee.run_custom_pipeline` with AcademicChunkTask,
+  SemanticEnrichmentTask, DataPointMappingTask, and `add_data_points`.
+  PaperOS no longer manages User/Dataset/Data/PipelineRun ORM state.
+- Retrieval uses `cognee.search`/`cognee.recall` per profile
+  (truth/associative/comprehensive); no direct query embeddings, vector
+  collections, or generic graph expansion in business code.
+- All private Cognee API calls live in `adapters/cognee/compat.py`, pinned to
+  cognee 1.4.0 by `tests/contract/test_cognee_compat.py`.
+- Chunk IDs embed element-internal spans (version 2), sections are never
+  crossed, oversize elements split, tables are searchable, formulas carry
+  context, and overlap records exact source spans.
+- Query expansion and LLM planning are removed from the default path; the
+  Qwen3 reranker is an optional experiment (`retrieval.rerank_enabled`).
+- Embedding provider/model/endpoint follow `[cognee.embedding]`; the local
+  Node runtime starts only when `local_runtime = true`.
+- `TripletDataPoint` remains the single triplet representation because
+  Cognee `embed_triplets=True` cannot preserve canonical IDs/provenance.
+
+## Validation
+
+```bash
+python -m compileall paperos_core
+pytest tests/unit tests/contract -q   # 35 passed
+ruff check paperos_core tests scripts server.py
+npm run build                          # services/local_models
+```
+
+Live MinerU -> Canonical -> AcademicChunkTask -> Cognee LLM enrichment ->
+custom DataPoints -> Cognee embedding/graph -> FTS5 -> search/recall ->
+evidence -> answer remains gated behind `PAPEROS_RUN_LIVE_CUMULATIVE=true`.
+
 ## Data and logs
 
 - Test run: `data/test-runs/architecture-final-20260804/server-cumulative/`

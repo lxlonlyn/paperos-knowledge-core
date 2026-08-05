@@ -36,8 +36,9 @@ error, and result. Status is one of `pending`, `running`, `completed`, or
 ### Query
 
 `POST /api/v1/query` accepts the shared `QueryRequest` domain model and returns
-`QueryResponse` with answer, expansion trace, candidates, evidence, channel
-usage, and provenance.
+`QueryResponse` with answer, the raw-query trace, candidates, evidence, channel
+usage, and provenance. The first version routes the raw query through profile
+mapping to Cognee search/recall without query expansion or LLM planning.
 
 ### Documents and maintenance
 
