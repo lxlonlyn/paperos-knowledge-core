@@ -12,7 +12,7 @@ from paperos_core.paths import DataPaths
 from paperos_core.retrieval.candidates import QueryRequest, QueryResponse
 from paperos_core.retrieval.corpus import CorpusView
 
-QUERY_CACHE_VERSION = "4"
+QUERY_CACHE_VERSION = "5"
 
 
 class QueryCache:

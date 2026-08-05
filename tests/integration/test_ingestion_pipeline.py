@@ -142,7 +142,10 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
     assert rebuilt.snapshot.id == canonical.snapshot.id
     assert [item.id for item in rebuilt.sections] == [item.id for item in canonical.sections]
     assert [item.id for item in rebuilt.elements] == [item.id for item in canonical.elements]
-    assert [item.id for item in rebuilt.chunks] == [item.id for item in canonical.chunks]
+    # Chunking moved out of the MinerU mapper into the Cognee AcademicChunkTask;
+    # the mapper emits the canonical structure, the pipeline emits chunks.
+    assert rebuilt.chunks == []
+    assert [item.id for item in canonical.chunks]
     assert [item.id for item in rebuilt.references] == [item.id for item in canonical.references]
     expected = expected_path_for_source(configured_data_dir / "test-corpus" / "expected", source)
     report = validate_expected_case(bundle=canonical, source=source, expected_path=expected)
