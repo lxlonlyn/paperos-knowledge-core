@@ -21,8 +21,9 @@ There are no `paperos serve`, `paperos model-gateway`, `paperos worker`, or
 
 ### A3: External services
 
-PaperOS configures, checks, and calls MinerU, DeepSeek, and future remote
-providers. It never starts or manages them.
+PaperOS configures, checks, and calls MinerU and the LLM provider selected by
+Cognee configuration. It never starts or manages them. PaperOS business code
+does not know the LLM vendor: all model calls go through Cognee's LLMGateway.
 
 ### A4: Internal libraries and stores
 
@@ -67,8 +68,8 @@ Cognee graph/vector   SQLite FTS
 canonical provenance
 ```
 
-MinerU and DeepSeek remain outside the process boundary. The private Node child
-process and Worker are owned by `Application`.
+MinerU and the configured LLM provider remain outside the process boundary. The
+private Node child process and Worker are owned by `Application`.
 
 ## Application lifecycle
 
@@ -86,12 +87,12 @@ Application.aclose
   1. stop the Worker
   2. dispose Cognee relational, graph, vector, and cache engines
   3. stop local inference
-  4. close inference, DeepSeek, and MinerU clients
+  4. close inference and MinerU clients
 ```
 
 Health checks are read-only. They never start or restart resources. A local model
 file, Node entry, occupied implementation port, early child exit, or readiness
-timeout fails startup with an actionable error. External MinerU or DeepSeek
+timeout fails startup with an actionable error. External MinerU or LLM provider
 failure is reported as degraded health and is never treated as authority to
 launch those providers.
 
@@ -107,15 +108,16 @@ rebuild, reprocess, and improve jobs. It never holds the Application.
 ## Configuration ownership
 
 `config/paperos.toml` is the only structured configuration. It owns data,
-MinerU, DeepSeek, local inference, Cognee, ingestion, retrieval, and API
-settings. `MINERU_API_KEY` and `DEEPSEEK_API_KEY` are environment-only
-secrets. Relative GGUF paths are resolved from the TOML directory rather than
-the mutable runtime data directory.
+MinerU, the provider-neutral `[llm]` section, local inference, Cognee,
+ingestion, retrieval, and API settings. `MINERU_API_KEY` and `LLM_API_KEY` are
+environment-only secrets. Relative GGUF paths are resolved from the TOML
+directory rather than the mutable runtime data directory.
 
 Only `configure_cognee(CogneeSettings)` translates PaperOS settings into the
 environment variables required by Cognee. Cognee does not read a separate
-project configuration source. `DeepSeekClient` receives
-`DeepSeekSettings` directly.
+project configuration source. `LLMClient` receives `LLMSettings` directly and
+reaches the provider only through `cognee.infrastructure.llm.LLMGateway`;
+switching LLM, embedding, vector, or graph providers is configuration-only.
 
 ## Storage and schema
 

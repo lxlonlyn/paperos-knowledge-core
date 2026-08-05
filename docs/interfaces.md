@@ -64,7 +64,7 @@ chunks.
 ### Health
 
 `GET /api/v1/health` reports application and dependency health. MinerU or
-DeepSeek failure degrades health. Health is read-only and cannot start a process,
+LLM provider failure degrades health. Health is read-only and cannot start a process,
 download a model, or initialize an external service.
 
 ## External provider interfaces
@@ -73,9 +73,9 @@ The MinerU adapter owns submission, task polling, finite timeout/retry handling,
 result retrieval, and provider-specific response parsing. No MinerU field passes
 the canonical boundary.
 
-`DeepSeekClient` uses `DeepSeekSettings` and provides semantic enrichment,
-retrieval planning, and evidence-bound answer synthesis. It never starts the
-provider.
+`LLMClient` uses `LLMSettings` and provides semantic enrichment, retrieval
+planning, and evidence-bound answer synthesis exclusively through Cognee's
+`LLMGateway`. It never starts the provider and never knows the LLM vendor.
 
 ## Private local inference protocol
 

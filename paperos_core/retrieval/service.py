@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from paperos_core.adapters.cognee.repository import CogneeRepository
-from paperos_core.adapters.llm import DeepSeekClient
+from paperos_core.adapters.llm import LLMClient
 from paperos_core.config import RuntimeSettings
 from paperos_core.feedback.service import FeedbackService
 from paperos_core.indexes.manager import IndexManager
@@ -48,7 +48,7 @@ class RetrievalService:
         cognee_repository: CogneeRepository,
         index_manager: IndexManager,
         model_client: LocalInferenceClient,
-        deepseek: DeepSeekClient,
+        llm: LLMClient,
         feedback: FeedbackService,
     ) -> None:
         self.config = config
@@ -58,7 +58,7 @@ class RetrievalService:
         self.cognee_repository = cognee_repository
         self.index_manager = index_manager
         self.model_client = model_client
-        self.deepseek = deepseek
+        self.llm = llm
         self.feedback = feedback
         self.cache = QueryCache(paths, feedback)
         self.planner = QueryPlanner(config)
@@ -80,7 +80,7 @@ class RetrievalService:
         expansion_result = await self.model_client.expand_query(
             request.query, profile=request.profile.value
         )
-        llm_plan, planner_raw = await self.deepseek.plan_query(
+        llm_plan, planner_raw = await self.llm.plan_query(
             query=request.query, profile=request.profile.value
         )
         expansion = ExpansionTrace(
@@ -119,7 +119,7 @@ class RetrievalService:
             ),
             hyde_text=llm_plan.hyde_text or expansion_result.hyde_text,
             raw_output=expansion_result.raw_output,
-            planner_model=self.deepseek.config.model,
+            planner_model=self.llm.config.model,
             planner_raw_output=planner_raw,
         )
         pool = plan.candidate_pool_size
@@ -230,7 +230,7 @@ class RetrievalService:
         stages.append("diversification")
         evidence = format_evidence(selected, corpus.bundles)
         answer = await synthesize_answer(
-            self.deepseek,
+            self.llm,
             query=request.query,
             profile=request.profile,
             evidence=evidence,
@@ -242,7 +242,7 @@ class RetrievalService:
             profile=request.profile,
             dataset=dataset_name,
             answer=answer,
-            answer_model=self.deepseek.config.model,
+            answer_model=self.llm.config.model,
             stages=stages,
             channels_used=list(channels),
             expansion=expansion,

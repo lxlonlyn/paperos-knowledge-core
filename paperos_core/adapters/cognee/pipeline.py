@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict
 from paperos_core.adapters.cognee.models import canonical_to_datapoints
 from paperos_core.adapters.cognee.reference_resolution import resolve_citations
 from paperos_core.adapters.cognee.repository import CogneeRepository
-from paperos_core.adapters.llm import DeepSeekClient
+from paperos_core.adapters.llm import LLMClient
 from paperos_core.domain.canonical import CanonicalBundle, CanonicalIngestionResult
 from paperos_core.domain.knowledge import SemanticEnrichment
 from paperos_core.errors import CogneeStorageError
@@ -45,14 +45,14 @@ class CogneePipeline:
         source_registry: SourceRegistry,
         cognee_repository: CogneeRepository,
         index_manager: IndexManager,
-        deepseek: DeepSeekClient,
+        llm: LLMClient,
     ) -> None:
         self.paths = paths
         self.canonical_repository = canonical_repository
         self.source_registry = source_registry
         self.cognee_repository = cognee_repository
         self.index_manager = index_manager
-        self.deepseek = deepseek
+        self.llm = llm
 
     async def ingest_canonical_snapshot(
         self, canonical_result: CanonicalIngestionResult, *, rebuilt: bool = False
@@ -80,8 +80,8 @@ class CogneePipeline:
         """Generate and persist provenance-bound semantic enrichment."""
 
         self.canonical_repository.verify_snapshot(bundle.snapshot.id)
-        await self.deepseek.health_check()
-        enrichment = await self.deepseek.enrich(bundle)
+        await self.llm.health_check()
+        enrichment = await self.llm.enrich(bundle)
         _validate_semantic_provenance(bundle, enrichment)
         enrichment_path = self._persist_enrichment(bundle, enrichment)
         return enrichment, enrichment_path

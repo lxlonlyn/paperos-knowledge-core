@@ -17,7 +17,7 @@ async def test_health_degrades_without_starting_or_restarting_resources(
             **os.environ,
             "PAPEROS_DATA_DIR": str(gate1_run_dir / "health-ownership"),
             "MINERU_API_KEY": "invalid-health-test-key",
-            "DEEPSEEK_API_KEY": "invalid-health-test-key",
+            "LLM_API_KEY": "invalid-health-test-key",
         }
     )
     settings = settings.model_copy(
@@ -25,7 +25,7 @@ async def test_health_degrades_without_starting_or_restarting_resources(
             "mineru": settings.mineru.model_copy(
                 update={"endpoint": "http://127.0.0.1:1"}
             ),
-            "deepseek": settings.deepseek.model_copy(
+            "llm": settings.llm.model_copy(
                 update={"endpoint": "http://127.0.0.1:1", "model": "unavailable"}
             ),
         }
@@ -38,7 +38,7 @@ async def test_health_degrades_without_starting_or_restarting_resources(
         report = await application.services.health.report()
         assert report["status"] == "degraded"
         assert report["components"]["mineru"]["status"] == "unavailable"
-        assert report["components"]["deepseek"]["status"] == "unavailable"
+        assert report["components"]["llm"]["status"] == "unavailable"
         assert application.runtime.local_inference.running is False
         assert application.runtime.worker.running is False
     finally:

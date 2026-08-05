@@ -12,7 +12,7 @@ def configure_cognee(settings: CogneeSettings) -> None:
 
     cognee_root = settings.system_database.parent.parent
     local = settings.local_inference
-    deepseek = settings.deepseek
+    llm = settings.llm
     os.environ.update(
         {
             "SYSTEM_ROOT_DIRECTORY": str(settings.system_database.parent),
@@ -27,10 +27,10 @@ def configure_cognee(settings: CogneeSettings) -> None:
             "GRAPH_DATABASE_PROVIDER": settings.graph_provider,
             "GRAPH_DATASET_DATABASE_HANDLER": settings.graph_provider,
             "GRAPH_FILE_PATH": str(settings.graph_database),
-            "LLM_PROVIDER": "custom",
-            "LLM_MODEL": deepseek.model,
-            "LLM_ENDPOINT": deepseek.endpoint.rstrip("/"),
-            "LLM_API_KEY": deepseek.api_key_value() or "",
+            "LLM_PROVIDER": llm.provider,
+            "LLM_MODEL": llm.model,
+            "LLM_ENDPOINT": llm.endpoint.rstrip("/"),
+            "LLM_API_KEY": llm.api_key_value() or "",
             "EMBEDDING_PROVIDER": "openai_compatible",
             "EMBEDDING_MODEL": local.embedding.model,
             "EMBEDDING_ENDPOINT": (

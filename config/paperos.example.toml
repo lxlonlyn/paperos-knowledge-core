@@ -10,9 +10,10 @@ poll_interval_seconds = 2.0
 timeout_seconds = 1800
 preferred_backend = "auto"
 
-[deepseek]
-endpoint = "https://api.deepseek.com/v1"
-model = "deepseek/deepseek-v4-flash"
+[llm]
+provider = "custom"
+endpoint = "https://api.example.com/v1"
+model = "your-model"
 timeout_seconds = 180
 max_attempts = 3
 

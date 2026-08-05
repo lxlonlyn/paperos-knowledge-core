@@ -85,7 +85,7 @@ Tests must not:
 * seed query indexes manually;
 * use precomputed embeddings;
 * use fixed reranking output;
-* use fixed DeepSeek output;
+* use fixed LLM output;
 * skip an earlier stage because downstream code is under test.
 
 Pure transformation assertions may inspect real artifacts produced during the same cumulative test run. They must not use independently fabricated input.

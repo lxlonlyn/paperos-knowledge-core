@@ -1,4 +1,11 @@
-"""Typed DeepSeek adapter for evidence-bound semantic enrichment."""
+"""Provider-neutral LLM client backed exclusively by Cognee's LLMGateway.
+
+PaperOS never talks to a specific LLM vendor or endpoint. It supplies the
+prompt, the Pydantic response schema, the canonical-domain mapping, and the
+source-chunk validation; Cognee's LLMGateway resolves the configured provider,
+model, endpoint, retries, and structured-output framework. Switching providers
+is a configuration-only change.
+"""
 
 from __future__ import annotations
 
@@ -6,10 +13,9 @@ import asyncio
 import json
 from typing import Any
 
-import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from paperos_core.config import DeepSeekSettings
+from paperos_core.config import LLMSettings
 from paperos_core.domain.canonical import CanonicalBundle
 from paperos_core.domain.ids import semantic_object_id
 from paperos_core.domain.knowledge import (
@@ -74,51 +80,43 @@ class _QueryPlanExtraction(_StrictModel):
     hyde_text: str
 
 
-class DeepSeekClient:
-    """Call only the configured DeepSeek-compatible endpoint."""
+class LLMClient:
+    """Run PaperOS prompts through Cognee's configured LLMGateway."""
 
     def __init__(
         self,
-        config: DeepSeekSettings,
+        config: LLMSettings,
         prompts: PromptRepository,
     ) -> None:
         self.config = config
         self.prompts = prompts
-        self.max_attempts = config.max_attempts
-        headers = {"Content-Type": "application/json"}
-        if config.api_key_value():
-            headers["Authorization"] = f"Bearer {config.api_key_value()}"
-        self.client = httpx.AsyncClient(
-            base_url=config.endpoint,
-            headers=headers,
-            timeout=config.timeout_seconds,
-            trust_env=False,
-        )
 
     async def health_check(self) -> dict[str, Any]:
-        if not self.config.endpoint or not self.config.model or not self.config.api_key_value():
+        if not self.config.model or not self.config.endpoint or not self.config.api_key_value():
             raise SemanticEnrichmentError(
-                "DeepSeek requires endpoint/model configuration and DEEPSEEK_API_KEY.",
-                affected="DEEPSEEK_API_KEY",
+                "LLM requires provider/model configuration and LLM_API_KEY.",
+                affected="LLM_API_KEY",
                 retryable=False,
             )
+        from cognee.infrastructure.llm.utils import (  # type: ignore[import-untyped]
+            test_llm_connection,
+        )
+
         try:
-            response = await self.client.get(
-                "/models", timeout=min(self.config.timeout_seconds, 10)
+            await asyncio.wait_for(
+                test_llm_connection(),
+                timeout=min(self.config.timeout_seconds, 15),
             )
-            response.raise_for_status()
-            payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
+        except Exception as exc:
             raise SemanticEnrichmentError(
-                f"DeepSeek health check failed: {exc}",
-                affected=f"{self.config.endpoint}/models",
+                f"LLM health check failed: {exc}",
+                affected=self.config.endpoint,
             ) from exc
-        if not isinstance(payload, dict):
-            raise SemanticEnrichmentError(
-                "DeepSeek health response is not a JSON object.",
-                affected=f"{self.config.endpoint}/models",
-            )
-        return payload
+        return {
+            "status": "healthy",
+            "provider": self.config.provider,
+            "model": self.config.model,
+        }
 
     async def enrich(self, bundle: CanonicalBundle) -> SemanticEnrichment:
         chunks = _select_evidence(bundle)
@@ -170,51 +168,39 @@ class DeepSeekClient:
                 },
                 ensure_ascii=False,
             ),
+            response_model=_EnrichmentExtraction,
         )
         return _to_domain(bundle, extraction, self.config.model, prompt)
 
-    async def _generate_structured(self, *, system: str, user: str) -> _EnrichmentExtraction:
-        request = {
-            "model": _deepseek_request_model(self.config.model),
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "response_format": {"type": "json_object"},
-            "temperature": 0.1,
-            "max_tokens": 16_000,
-            "stream": False,
-        }
+    async def _generate_structured(
+        self,
+        *,
+        system: str,
+        user: str,
+        response_model: type[_EnrichmentExtraction],
+    ) -> _EnrichmentExtraction:
+        from cognee.infrastructure.llm import LLMGateway  # type: ignore[import-untyped]
+
         failures: list[str] = []
-        for attempt in range(1, self.max_attempts + 1):
+        for attempt in range(1, self.config.max_attempts + 1):
             try:
-                response = await self.client.post("/chat/completions", json=request)
-                if response.status_code in {429, 500, 502, 503, 504}:
-                    raise httpx.HTTPStatusError(
-                        "retryable DeepSeek response",
-                        request=response.request,
-                        response=response,
-                    )
-                response.raise_for_status()
-                payload = response.json()
-                content = payload["choices"][0]["message"]["content"]
-                if not isinstance(content, str):
-                    raise TypeError("completion content is not text")
-                return _EnrichmentExtraction.model_validate_json(_strip_json_fence(content))
-            except (
-                httpx.HTTPError,
-                KeyError,
-                IndexError,
-                TypeError,
-                ValueError,
-                ValidationError,
-            ) as exc:
+                result = await LLMGateway.acreate_structured_output(
+                    text_input=user,
+                    system_prompt=system,
+                    response_model=response_model,
+                    temperature=0.1,
+                    max_tokens=16_000,
+                )
+                if not isinstance(result, _EnrichmentExtraction):
+                    raise TypeError("structured completion is not the expected schema")
+                return result
+            except (ValidationError, TypeError, ValueError) as exc:
                 failures.append(f"attempt {attempt}: {type(exc).__name__}: {exc}")
-                if attempt < self.max_attempts:
+                if attempt < self.config.max_attempts:
                     await asyncio.sleep(min(2 ** (attempt - 1), 4))
         raise SemanticEnrichmentError(
-            "DeepSeek structured semantic enrichment failed after finite retries.",
-            affected=f"{self.config.endpoint}/chat/completions",
+            "LLM structured semantic enrichment failed after finite retries.",
+            affected=self.config.endpoint,
             details={"attempts": failures},
         )
 
@@ -226,6 +212,8 @@ class DeepSeekClient:
         evidence: list[dict[str, Any]],
     ) -> str:
         """Synthesize one evidence-bound answer through the configured provider."""
+        from cognee.infrastructure.llm import LLMGateway  # type: ignore[import-untyped]
+
         compact_evidence: list[dict[str, Any]] = []
         for item in evidence:
             compact = dict(item)
@@ -233,16 +221,11 @@ class DeepSeekClient:
             if isinstance(text, str):
                 compact["text"] = text[:3_000]
             compact_evidence.append(compact)
-        request = {
-            "model": _deepseek_request_model(self.config.model),
-            "messages": [
-                {
-                    "role": "system",
-                    "content": self.prompts.load("answer_synthesis"),
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(
+        failures: list[str] = []
+        for attempt in range(1, self.config.max_attempts + 1):
+            try:
+                content = await LLMGateway.acreate_structured_output(
+                    text_input=json.dumps(
                         {
                             "profile": profile,
                             "question": query,
@@ -250,41 +233,21 @@ class DeepSeekClient:
                         },
                         ensure_ascii=False,
                     ),
-                },
-            ],
-            "temperature": 0.1,
-            "max_tokens": 16_000,
-            "stream": False,
-        }
-        failures: list[str] = []
-        for attempt in range(1, self.max_attempts + 1):
-            try:
-                response = await self.client.post("/chat/completions", json=request)
-                if response.status_code in {429, 500, 502, 503, 504}:
-                    raise httpx.HTTPStatusError(
-                        "retryable DeepSeek response",
-                        request=response.request,
-                        response=response,
-                    )
-                response.raise_for_status()
-                payload = response.json()
-                content = payload["choices"][0]["message"]["content"]
+                    system_prompt=self.prompts.load("answer_synthesis"),
+                    response_model=str,
+                    temperature=0.1,
+                    max_tokens=16_000,
+                )
                 if not isinstance(content, str) or not content.strip():
                     raise TypeError("completion content is empty or not text")
                 return content.strip()
-            except (
-                httpx.HTTPError,
-                KeyError,
-                IndexError,
-                TypeError,
-                ValueError,
-            ) as exc:
+            except (TypeError, ValueError) as exc:
                 failures.append(f"attempt {attempt}: {type(exc).__name__}: {exc}")
-                if attempt < self.max_attempts:
+                if attempt < self.config.max_attempts:
                     await asyncio.sleep(min(2 ** (attempt - 1), 4))
         raise SemanticEnrichmentError(
-            "DeepSeek answer synthesis failed after finite retries.",
-            affected=f"{self.config.endpoint}/chat/completions",
+            "LLM answer synthesis failed after finite retries.",
+            affected=self.config.endpoint,
             details={"attempts": failures},
         )
 
@@ -292,16 +255,13 @@ class DeepSeekClient:
         self, *, query: str, profile: str
     ) -> tuple[_QueryPlanExtraction, str]:
         """Generate retrieval-only bilingual expansions with a validated schema."""
-        request = {
-            "model": _deepseek_request_model(self.config.model),
-            "messages": [
-                {
-                    "role": "system",
-                    "content": self.prompts.load("query_planning"),
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(
+        from cognee.infrastructure.llm import LLMGateway  # type: ignore[import-untyped]
+
+        failures: list[str] = []
+        for attempt in range(1, self.config.max_attempts + 1):
+            try:
+                result = await LLMGateway.acreate_structured_output(
+                    text_input=json.dumps(
                         {
                             "profile": profile,
                             "query": query,
@@ -315,69 +275,23 @@ class DeepSeekClient:
                         },
                         ensure_ascii=False,
                     ),
-                },
-            ],
-            "response_format": {"type": "json_object"},
-            "temperature": 0.1,
-            "max_tokens": 2_000,
-            "stream": False,
-        }
-        failures: list[str] = []
-        for attempt in range(1, self.max_attempts + 1):
-            try:
-                response = await self.client.post("/chat/completions", json=request)
-                if response.status_code in {429, 500, 502, 503, 504}:
-                    raise httpx.HTTPStatusError(
-                        "retryable DeepSeek response",
-                        request=response.request,
-                        response=response,
-                    )
-                response.raise_for_status()
-                payload = response.json()
-                content = payload["choices"][0]["message"]["content"]
-                if not isinstance(content, str) or not content.strip():
-                    raise TypeError("completion content is empty or not text")
-                return (
-                    _QueryPlanExtraction.model_validate_json(
-                        _strip_json_fence(content)
-                    ),
-                    content,
+                    system_prompt=self.prompts.load("query_planning"),
+                    response_model=_QueryPlanExtraction,
+                    temperature=0.1,
+                    max_tokens=2_000,
                 )
-            except (
-                httpx.HTTPError,
-                KeyError,
-                IndexError,
-                TypeError,
-                ValueError,
-                ValidationError,
-            ) as exc:
+                if not isinstance(result, _QueryPlanExtraction):
+                    raise TypeError("structured completion is not the expected schema")
+                return result, result.model_dump_json()
+            except (ValidationError, TypeError, ValueError) as exc:
                 failures.append(f"attempt {attempt}: {type(exc).__name__}: {exc}")
-                if attempt < self.max_attempts:
+                if attempt < self.config.max_attempts:
                     await asyncio.sleep(min(2 ** (attempt - 1), 4))
         raise SemanticEnrichmentError(
-            "DeepSeek query planning failed after finite retries.",
-            affected=f"{self.config.endpoint}/chat/completions",
+            "LLM query planning failed after finite retries.",
+            affected=self.config.endpoint,
             details={"attempts": failures},
         )
-
-    async def aclose(self) -> None:
-        await self.client.aclose()
-
-
-def _strip_json_fence(content: str) -> str:
-    stripped = content.strip()
-    if stripped.startswith("```"):
-        first_newline = stripped.find("\n")
-        if first_newline >= 0:
-            stripped = stripped[first_newline + 1 :]
-        stripped = stripped.removesuffix("```")
-    return stripped.strip()
-
-
-def _deepseek_request_model(configured_model: str) -> str:
-    """Cognee/LiteLLM uses a provider prefix; DeepSeek's own API does not."""
-    prefix = "deepseek/"
-    return configured_model.removeprefix(prefix)
 
 
 def _select_evidence(bundle: CanonicalBundle) -> list[dict[str, str]]:
@@ -430,7 +344,7 @@ def _to_domain(
                 invalid.append(value)
         if invalid:
             raise SemanticEnrichmentError(
-                "DeepSeek returned source chunk IDs outside the canonical snapshot.",
+                "LLM returned source chunk IDs outside the canonical snapshot.",
                 affected=object_key,
                 details={"invalid_or_ambiguous_chunk_ids": sorted(invalid)},
             )
@@ -448,7 +362,7 @@ def _to_domain(
         )
         if entity_item.key in key_to_id:
             raise SemanticEnrichmentError(
-                "DeepSeek returned duplicate entity keys.", affected=entity_item.key
+                "LLM returned duplicate entity keys.", affected=entity_item.key
             )
         key_to_id[entity_item.key] = entity_id
         entities.append(
@@ -490,7 +404,7 @@ def _to_domain(
     for relation_item in extracted.relations:
         if relation_item.source_key not in key_to_id or relation_item.target_key not in key_to_id:
             raise SemanticEnrichmentError(
-                "DeepSeek relation references an unknown entity key.",
+                "LLM relation references an unknown entity key.",
                 affected=f"{relation_item.source_key}->{relation_item.target_key}",
             )
         source_ids = validated(

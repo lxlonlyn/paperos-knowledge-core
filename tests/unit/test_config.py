@@ -53,22 +53,22 @@ def test_secrets_are_loaded_only_from_documented_environment(gate1_run_dir: Path
     _write_config(
         config_path,
         gate1_run_dir / "secret-data",
-        extra='[mineru]\nprovider = "cloud"\n[deepseek]\nendpoint = "https://example.test/v1"\nmodel = "deepseek/test"\n',
+        extra='[mineru]\nprovider = "cloud"\n[llm]\nendpoint = "https://example.test/v1"\nmodel = "example-model"\nprovider = "custom"\n',
     )
 
     config = load_settings(
         config_path,
         environ={
             "MINERU_API_KEY": "mineru-environment-token",
-            "DEEPSEEK_API_KEY": "deepseek-environment-token",
+            "LLM_API_KEY": "llm-environment-token",
         },
     )
 
     assert config.mineru.api_key_value() == "mineru-environment-token"
-    assert config.deepseek.api_key_value() == "deepseek-environment-token"
+    assert config.llm.api_key_value() == "llm-environment-token"
     serialized = config.model_dump_json()
     assert "mineru-environment-token" not in serialized
-    assert "deepseek-environment-token" not in serialized
+    assert "llm-environment-token" not in serialized
 
 
 def test_secret_in_toml_is_rejected(gate1_run_dir: Path) -> None:

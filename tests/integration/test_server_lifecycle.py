@@ -98,7 +98,7 @@ def test_python_server_owns_one_runtime_and_worker(gate1_run_dir: Path) -> None:
         "PAPEROS_DATA_DIR": str(run_root),
         "NODE_LLAMA_CPP_SKIP_DOWNLOAD": "true",
         "MINERU_API_KEY": "",
-        "DEEPSEEK_API_KEY": "",
+        "LLM_API_KEY": "",
     }
     process: subprocess.Popen[bytes] | None = None
     local_pid: int | None = None
@@ -117,7 +117,7 @@ def test_python_server_owns_one_runtime_and_worker(gate1_run_dir: Path) -> None:
             assert health["status"] == "degraded"
             assert health["components"]["local_models"]["status"] == "healthy"
             assert health["components"]["mineru"]["status"] == "unavailable"
-            assert health["components"]["deepseek"]["status"] == "unavailable"
+            assert health["components"]["llm"]["status"] == "unavailable"
 
             local_record_path = run_root / "jobs" / "local-inference-process.json"
             worker_record_path = run_root / "jobs" / "worker-process.json"
@@ -164,7 +164,7 @@ def test_python_server_owns_one_runtime_and_worker(gate1_run_dir: Path) -> None:
 
 @pytest.mark.skipif(
     os.getenv("PAPEROS_RUN_LIVE_CUMULATIVE") != "true",
-    reason="requires live MinerU, DeepSeek, Cognee, and prepared local models",
+    reason="requires live MinerU, LLM, Cognee, and prepared local models",
 )
 def test_real_pdf_cumulative_pipeline_uses_only_http(
     gate1_run_dir: Path,
@@ -172,7 +172,7 @@ def test_real_pdf_cumulative_pipeline_uses_only_http(
     configured_data_dir: Path,
 ) -> None:
     assert os.getenv("MINERU_API_KEY"), "live MinerU key is required"
-    assert os.getenv("DEEPSEEK_API_KEY"), "live DeepSeek key is required"
+    assert os.getenv("LLM_API_KEY"), "live LLM key is required"
     assert not _port_is_open(8000), "PaperOS API port is already occupied"
     assert not _port_is_open(8081), "private local inference port is already occupied"
     pdf_path, paper = real_pdf_case
@@ -311,7 +311,7 @@ def test_real_pdf_cumulative_pipeline_uses_only_http(
 )
 def test_real_http_maintenance_routes_preserve_source_evidence() -> None:
     assert os.getenv("MINERU_API_KEY"), "live MinerU key is required"
-    assert os.getenv("DEEPSEEK_API_KEY"), "live DeepSeek key is required"
+    assert os.getenv("LLM_API_KEY"), "live LLM key is required"
     assert not _port_is_open(8000), "PaperOS API port is already occupied"
     assert not _port_is_open(8081), "private local inference port is already occupied"
     run_root = Path(os.environ["PAPEROS_MAINTENANCE_RUN_ROOT"]).resolve()

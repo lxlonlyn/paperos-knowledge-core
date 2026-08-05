@@ -51,7 +51,10 @@ class MinerUSettings(StrictSettings):
         return self.api_key.get_secret_value() if self.api_key is not None else None
 
 
-class DeepSeekSettings(StrictSettings):
+class LLMSettings(StrictSettings):
+    """Provider-neutral LLM settings translated into Cognee's environment."""
+
+    provider: str = "custom"
     endpoint: str = ""
     model: str = ""
     api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
@@ -105,7 +108,7 @@ class CogneeSettings(StrictSettings):
     db_provider: str = "sqlite"
     vector_provider: str = "lancedb"
     graph_provider: str = "kuzu"
-    deepseek: DeepSeekSettings = Field(default_factory=DeepSeekSettings, exclude=True)
+    llm: LLMSettings = Field(default_factory=LLMSettings, exclude=True)
     local_inference: LocalInferenceSettings = Field(
         default_factory=LocalInferenceSettings, exclude=True
     )
@@ -138,7 +141,7 @@ class RetrievalSettings(StrictSettings):
 class RuntimeSettings(StrictSettings):
     data: DataSettings = Field(default_factory=DataSettings)
     mineru: MinerUSettings = Field(default_factory=MinerUSettings)
-    deepseek: DeepSeekSettings = Field(default_factory=DeepSeekSettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
     local_inference: LocalInferenceSettings = Field(default_factory=LocalInferenceSettings)
     cognee: CogneeSettings = Field(default_factory=CogneeSettings)
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
@@ -206,20 +209,20 @@ def load_settings(
     data_raw["directory"] = data_root
 
     mineru_raw = raw.setdefault("mineru", {})
-    deepseek_raw = raw.setdefault("deepseek", {})
-    if not isinstance(mineru_raw, dict) or not isinstance(deepseek_raw, dict):
-        raise ConfigurationError("The [mineru] and [deepseek] sections must be TOML tables.")
-    if "api_key" in mineru_raw or "api_key" in deepseek_raw:
+    llm_raw = raw.setdefault("llm", {})
+    if not isinstance(mineru_raw, dict) or not isinstance(llm_raw, dict):
+        raise ConfigurationError("The [mineru] and [llm] sections must be TOML tables.")
+    if "api_key" in mineru_raw or "api_key" in llm_raw:
         raise ConfigurationError(
             "API keys are forbidden in paperos.toml; use MINERU_API_KEY and "
-            "DEEPSEEK_API_KEY environment variables."
+            "LLM_API_KEY environment variables."
         )
     mineru_key = env.get("MINERU_API_KEY", "").strip()
-    deepseek_key = env.get("DEEPSEEK_API_KEY", "").strip()
+    llm_key = env.get("LLM_API_KEY", "").strip()
     if mineru_key:
         mineru_raw["api_key"] = mineru_key
-    if deepseek_key:
-        deepseek_raw["api_key"] = deepseek_key
+    if llm_key:
+        llm_raw["api_key"] = llm_key
 
     cognee_raw = raw.setdefault("cognee", {})
     if not isinstance(cognee_raw, dict):
@@ -266,7 +269,7 @@ def load_settings(
     )
     cognee = settings.cognee.model_copy(
         update={
-            "deepseek": settings.deepseek,
+            "llm": settings.llm,
             "local_inference": local,
         }
     )

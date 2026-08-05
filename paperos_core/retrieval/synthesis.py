@@ -1,13 +1,13 @@
-"""DeepSeek evidence-grounded answer synthesis."""
+"""Provider-neutral evidence-grounded answer synthesis."""
 
 import re
 
-from paperos_core.adapters.llm import DeepSeekClient
+from paperos_core.adapters.llm import LLMClient
 from paperos_core.retrieval.candidates import Evidence, RetrievalProfile
 
 
 async def synthesize_answer(
-    client: DeepSeekClient,
+    client: LLMClient,
     *,
     query: str,
     profile: RetrievalProfile,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from paperos_core.adapters.cognee.repository import CogneeRepository
-from paperos_core.adapters.llm import DeepSeekClient
+from paperos_core.adapters.llm import LLMClient
 from paperos_core.adapters.mineru.client import MinerUClient
 from paperos_core.indexes.manager import IndexManager
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
@@ -22,7 +22,7 @@ class HealthService:
         registry: SourceRegistry,
         canonical_repository: CanonicalRepository,
         mineru: MinerUClient,
-        deepseek: DeepSeekClient,
+        llm: LLMClient,
         local_inference: LocalInferenceClient,
         cognee: CogneeRepository,
         indexes: IndexManager,
@@ -32,7 +32,7 @@ class HealthService:
         self.registry = registry
         self.canonical_repository = canonical_repository
         self.mineru = mineru
-        self.deepseek = deepseek
+        self.llm = llm
         self.local_inference = local_inference
         self.cognee = cognee
         self.indexes = indexes
@@ -51,13 +51,14 @@ class HealthService:
                 "error": f"{type(exc).__name__}: {exc}",
             }
         try:
-            models = await self.deepseek.health_check()
-            components["deepseek"] = {
+            model_status = await self.llm.health_check()
+            components["llm"] = {
                 "status": "healthy",
-                "model_count": len(models.get("data", [])),
+                "provider": model_status["provider"],
+                "model": model_status["model"],
             }
         except Exception as exc:  # noqa: BLE001 - health reports component failures.
-            components["deepseek"] = {
+            components["llm"] = {
                 "status": "unavailable",
                 "error": f"{type(exc).__name__}: {exc}",
             }

@@ -17,7 +17,7 @@ from paperos_core.paths import DataPaths, build_data_paths
 
 if TYPE_CHECKING:
     from paperos_core.adapters.cognee.pipeline import CogneePipeline
-    from paperos_core.adapters.llm import DeepSeekClient
+    from paperos_core.adapters.llm import LLMClient
     from paperos_core.documents import DocumentService
     from paperos_core.feedback.service import FeedbackService
     from paperos_core.health import HealthService
@@ -58,7 +58,7 @@ class Application:
     canonical_mapper: MinerUCanonicalMapper
     mineru: MinerUClient
     local_inference_client: LocalInferenceClient
-    deepseek: DeepSeekClient
+    llm: LLMClient
     knowledge_pipeline: CogneePipeline
     queue: JobQueue
     storage: StorageInitializer
@@ -99,7 +99,6 @@ class Application:
             self.knowledge_pipeline.cognee_repository.aclose,
             self.runtime.local_inference.stop,
             self.local_inference_client.aclose,
-            self.deepseek.aclose,
             self.mineru.aclose,
         ):
             try:
@@ -139,7 +138,7 @@ def create_application(settings: RuntimeSettings) -> Application:
     configure_cognee(settings.cognee)
     from paperos_core.adapters.cognee.pipeline import CogneePipeline
     from paperos_core.adapters.cognee.repository import CogneeRepository
-    from paperos_core.adapters.llm import DeepSeekClient
+    from paperos_core.adapters.llm import LLMClient
     from paperos_core.documents import DocumentService
     from paperos_core.feedback.service import FeedbackService
     from paperos_core.health import HealthService
@@ -161,7 +160,7 @@ def create_application(settings: RuntimeSettings) -> Application:
     local_inference_runtime = LocalInferenceRuntime(
         settings, paths, local_inference_client
     )
-    deepseek = DeepSeekClient(settings.deepseek, PromptRepository())
+    llm = LLMClient(settings.llm, PromptRepository())
     cognee_repository = CogneeRepository(paths)
     index_manager = IndexManager(
         paths,
@@ -174,7 +173,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         registry,
         cognee_repository,
         index_manager,
-        deepseek,
+        llm,
     )
     rebuilder = DerivedDataRebuilder(
         paths, canonical_repository, knowledge_pipeline, storage
@@ -189,7 +188,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         cognee_repository,
         index_manager,
         local_inference_client,
-        deepseek,
+        llm,
         feedback,
     )
     if settings.mineru.provider not in {"cloud", "mineru_cloud"}:
@@ -223,7 +222,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         registry,
         canonical_repository,
         mineru,
-        deepseek,
+        llm,
         local_inference_client,
         cognee_repository,
         index_manager,
@@ -260,7 +259,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         canonical_mapper=canonical_mapper,
         mineru=mineru,
         local_inference_client=local_inference_client,
-        deepseek=deepseek,
+        llm=llm,
         knowledge_pipeline=knowledge_pipeline,
         queue=queue,
         storage=storage,
