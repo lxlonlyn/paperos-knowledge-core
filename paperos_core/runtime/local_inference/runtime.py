@@ -18,6 +18,9 @@ from paperos_core.errors import (
 from paperos_core.paths import DataPaths
 from paperos_core.runtime.local_inference.client import LocalInferenceClient
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+SERVICES_ROOT = PROJECT_ROOT / "services"
+
 
 class LocalInferenceRuntime:
     def __init__(
@@ -74,11 +77,7 @@ class LocalInferenceRuntime:
         return result
 
     def _service_root(self) -> Path:
-        if self.settings.config_path is None:
-            raise LocalInferenceConfigurationError(
-                "A project config path is required to locate local inference."
-            )
-        root = self.settings.config_path.parent.parent / "services" / "local_models"
+        root = SERVICES_ROOT / "local_models"
         server = root / "dist" / "server.js"
         if not server.is_file():
             raise LocalInferenceConfigurationError(
