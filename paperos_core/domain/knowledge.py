@@ -91,3 +91,6 @@ class SemanticEnrichment(DomainModel):
     prompt_name: str
     prompt_version: str
     prompt_sha256: str
+    covered_chunk_ids: list[str] = Field(default_factory=list)
+    uncovered_chunk_ids: list[str] = Field(default_factory=list)
+    coverage_ratio: float = Field(default=0.0, ge=0, le=1)
