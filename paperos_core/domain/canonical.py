@@ -6,7 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from paperos_core.domain.documents import DomainModel, utc_now
 from paperos_core.domain.enums import ElementType, ReferenceResolutionStatus
@@ -166,6 +166,10 @@ class ReferenceEntry(DomainModel):
 
 
 class CanonicalSnapshot(DomainModel):
+    # Legacy snapshots persisted a chunking_version before the chunk projection
+    # split; tolerate it on load while never writing it again.
+    model_config = ConfigDict(extra="allow")
+
     id: str
     source_file_id: str
     parse_run_id: str

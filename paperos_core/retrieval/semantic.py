@@ -119,6 +119,7 @@ async def _hits_to_candidates(
     )
     candidates: dict[str, Candidate] = {}
     for hit in hits:
+        properties: dict[str, object] = {}
         if hit.object_type == _CHUNK_TYPE:
             chunk_ids = [hit.canonical_id]
         else:
