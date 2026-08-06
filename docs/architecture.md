@@ -171,17 +171,18 @@ minimal private registration stays centralized in
 Retrieval calls Cognee's public search/recall surface:
 
 ```text
-truth        -> FTS5 + Cognee chunk search + strict provenance
-associative  -> Cognee graph / context search + Entity / Claim
-comprehensive-> FTS5 + Cognee recall + PaperOS candidate fusion
+truth        -> FTS5 + GRAPH_COMPLETION restricted to ChunkDataPoint
+associative  -> GRAPH_COMPLETION_DECOMPOSITION + Entity / Claim + typed graph
+comprehensive-> FTS5 + GRAPH_COMPLETION + Cognee recall context + fusion
 ```
 
-PaperOS does not generate query embeddings, open vector collections, or retain
-a duplicate embedding BLOB store. Every inferred object and relation carries
-source chunk IDs; a narrow compat reader backtracks search hits to canonical
-chunks. Private Cognee API calls are centralized in
-`paperos_core/adapters/cognee/compat.py` and pinned to cognee 1.4.0 by a
-contract test.
+Each profile maps to a real Cognee SearchType, hits are constrained by the
+returned node type, and candidates backtrack through canonical IDs / node IDs
+/ source references (never by text-prefix matching). Absent vector distances
+score 0.0 explicitly. PaperOS does not generate query embeddings, open vector
+collections, or retain a duplicate embedding BLOB store. Private Cognee API
+calls are centralized in `paperos_core/adapters/cognee/compat.py` and pinned
+to cognee 1.4.0 by contract tests.
 
 ## Prompt ownership
 

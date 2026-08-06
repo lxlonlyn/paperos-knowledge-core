@@ -16,6 +16,7 @@ async def global_context_retrieve(
     query: str,
     *,
     dataset_name: str,
+    search_type: str,
     limit: int,
     document_ids: set[str],
 ) -> list[Candidate]:
@@ -25,6 +26,7 @@ async def global_context_retrieve(
         corpus,
         query,
         dataset_name=dataset_name,
+        search_type=search_type,
         limit=limit,
         document_ids=document_ids,
     )

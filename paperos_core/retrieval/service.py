@@ -28,7 +28,6 @@ from paperos_core.retrieval.global_context import global_context_retrieve
 from paperos_core.retrieval.graph import graph_retrieve
 from paperos_core.retrieval.lexical import lexical_retrieve
 from paperos_core.retrieval.planner import QueryPlanner
-from paperos_core.retrieval.recall import recall_retrieve
 from paperos_core.retrieval.rerank import rerank_candidates
 from paperos_core.retrieval.semantic import (
     entity_claim_retrieve,
@@ -102,8 +101,10 @@ class RetrievalService:
                 corpus,
                 query,
                 dataset_name=dataset_name,
+                search_type=plan.search_type,
                 limit=pool,
                 document_ids=document_ids,
+                chunk_only=request.profile is RetrievalProfile.TRUTH,
             )
             stages.append("cognee_search")
         if "entity_claim" in plan.channels:
@@ -113,6 +114,7 @@ class RetrievalService:
                 corpus,
                 query,
                 dataset_name=dataset_name,
+                search_type=plan.search_type,
                 limit=pool,
                 document_ids=document_ids,
             )
@@ -124,6 +126,7 @@ class RetrievalService:
                 corpus,
                 query,
                 dataset_name=dataset_name,
+                search_type=plan.search_type,
                 limit=pool,
                 depth=plan.graph_depth,
                 document_ids=document_ids,
@@ -136,24 +139,11 @@ class RetrievalService:
                 corpus,
                 query,
                 dataset_name=dataset_name,
+                search_type=plan.search_type,
                 limit=pool,
                 document_ids=document_ids,
             )
             stages.append("global_context")
-        if "recall" in plan.channels:
-            contexts = await self.search.recall_context(
-                query,
-                dataset=dataset_name,
-                top_k=pool,
-            )
-            channels["recall"] = recall_retrieve(
-                contexts,
-                corpus,
-                query,
-                limit=pool,
-                document_ids=document_ids,
-            )
-            stages.append("cognee_recall")
         if "confirmed_knowledge" in plan.channels:
             channels["confirmed_knowledge"] = confirmed_knowledge_retrieve(
                 self.feedback,
@@ -191,11 +181,20 @@ class RetrievalService:
         )
         stages.append("diversification")
         evidence = format_evidence(selected, corpus.bundles)
+        recall_context: list[str] | None = None
+        if request.profile is RetrievalProfile.COMPREHENSIVE:
+            recall_context = await self.search.recall_context(
+                query,
+                dataset=dataset_name,
+                top_k=pool,
+            )
+            stages.append("cognee_recall")
         answer = await synthesize_answer(
             self.llm,
             query=request.query,
             profile=request.profile,
             evidence=evidence,
+            recall_context=recall_context,
         )
         stages.append("synthesis")
         expansion = ExpansionTrace(

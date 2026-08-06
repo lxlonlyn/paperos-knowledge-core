@@ -19,13 +19,16 @@ async def semantic_retrieve(
     query: str,
     *,
     dataset_name: str,
+    search_type: str,
     limit: int,
     document_ids: set[str],
+    chunk_only: bool = False,
 ) -> list[Candidate]:
     hits = await search.graph_search(
         query,
         dataset=dataset_name,
         top_k=limit * 2,
+        search_type=search_type,
     )
     return await _hits_to_candidates(
         hits,
@@ -34,6 +37,7 @@ async def semantic_retrieve(
         channel="semantic",
         limit=limit,
         document_ids=document_ids,
+        chunk_only=chunk_only,
     )
 
 
@@ -44,6 +48,7 @@ async def entity_claim_retrieve(
     query: str,
     *,
     dataset_name: str,
+    search_type: str,
     limit: int,
     document_ids: set[str],
 ) -> list[Candidate]:
@@ -51,6 +56,7 @@ async def entity_claim_retrieve(
         query,
         dataset=dataset_name,
         top_k=limit * 2,
+        search_type=search_type,
     )
     filtered = [hit for hit in hits if hit.object_type in _ENTITY_CLAIM_TYPES]
     return await _hits_to_candidates(
@@ -70,6 +76,7 @@ async def summary_retrieve(
     query: str,
     *,
     dataset_name: str,
+    search_type: str,
     limit: int,
     document_ids: set[str],
 ) -> list[Candidate]:
@@ -77,6 +84,7 @@ async def summary_retrieve(
         query,
         dataset=dataset_name,
         top_k=limit,
+        search_type=search_type,
     )
     filtered = [hit for hit in hits if hit.object_type == _SUMMARY_TYPE]
     return await _hits_to_candidates(
@@ -97,7 +105,10 @@ async def _hits_to_candidates(
     channel: str,
     limit: int,
     document_ids: set[str],
+    chunk_only: bool = False,
 ) -> list[Candidate]:
+    if chunk_only:
+        hits = [hit for hit in hits if hit.object_type == _CHUNK_TYPE]
     non_chunk = [
         hit
         for hit in hits

@@ -12,11 +12,13 @@ async def synthesize_answer(
     query: str,
     profile: RetrievalProfile,
     evidence: list[Evidence],
+    recall_context: list[str] | None = None,
 ) -> str:
     answer = await client.synthesize_answer(
         query=query,
         profile=profile.value,
         evidence=[item.model_dump(mode="json") for item in evidence],
+        recall_context=recall_context,
     )
     for item in evidence:
         canonical = f"[{item.evidence_id}]"

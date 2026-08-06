@@ -345,6 +345,7 @@ class LLMClient:
         query: str,
         profile: str,
         evidence: list[dict[str, Any]],
+        recall_context: list[str] | None = None,
     ) -> str:
         """Synthesize one evidence-bound answer with an explicit Pydantic schema."""
         from cognee.infrastructure.llm import LLMGateway  # type: ignore[import-untyped]
@@ -365,6 +366,7 @@ class LLMClient:
                             "profile": profile,
                             "question": query,
                             "evidence": compact_evidence,
+                            "recall_context": recall_context or [],
                         },
                         ensure_ascii=False,
                     ),

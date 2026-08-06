@@ -17,6 +17,15 @@ from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
 from paperos_core.errors import CogneeStorageError
 from paperos_core.paths import DataPaths
 
+_NO_DISTANCE_SCORE = 0.0
+
+_GRAPH_SEARCH_TYPES = {
+    "GRAPH_COMPLETION",
+    "GRAPH_COMPLETION_DECOMPOSITION",
+    "GRAPH_COMPLETION_CONTEXT_EXTENSION",
+    "GRAPH_SUMMARY_COMPLETION",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class CogneeSearchHit:
@@ -59,16 +68,22 @@ class CogneeSearchAdapter:
         *,
         dataset: str,
         top_k: int,
+        search_type: str = "GRAPH_COMPLETION",
     ) -> list[CogneeSearchHit]:
         """Run Cognee's graph/context search and normalize node hits."""
         if top_k <= 0:
             return []
+        if search_type not in _GRAPH_SEARCH_TYPES:
+            raise CogneeStorageError(
+                f"Unsupported graph search type: {search_type}",
+                affected=dataset,
+            )
         import cognee  # type: ignore[import-untyped]
 
         try:
             results = await cognee.search(
                 query_text=query,
-                query_type=cognee.SearchType.GRAPH_COMPLETION,
+                query_type=cognee.SearchType(search_type),
                 only_context=True,
                 verbose=True,
                 datasets=[dataset],
@@ -156,10 +171,11 @@ def _node_hit(node: Any, mapping: dict[str, str]) -> CogneeSearchHit | None:
 
 
 def _distance_score(value: Any) -> float:
+    """Map vector distances to scores; absent distances score ``_NO_DISTANCE_SCORE``."""
     distances = value if isinstance(value, (list, tuple)) else [value]
     numeric = [
         float(item) for item in distances if isinstance(item, (int, float))
     ]
     if not numeric:
-        return 0.0
+        return _NO_DISTANCE_SCORE
     return 1.0 / (1.0 + max(min(numeric), 0.0))

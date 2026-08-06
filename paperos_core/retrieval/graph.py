@@ -27,6 +27,7 @@ async def graph_retrieve(
     query: str,
     *,
     dataset_name: str,
+    search_type: str,
     limit: int,
     depth: int,
     document_ids: set[str],
@@ -35,6 +36,7 @@ async def graph_retrieve(
         query,
         dataset=dataset_name,
         top_k=limit,
+        search_type=search_type,
     )
     resolved = await compat.resolve_graph_nodes(
         [hit.cognee_id for hit in hits if hit.object_type in _SEED_TYPES]
