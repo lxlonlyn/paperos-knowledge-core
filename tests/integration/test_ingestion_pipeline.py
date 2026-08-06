@@ -128,11 +128,12 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
     snapshot_id = result["canonical_snapshot"]["id"]
     application.canonical_repository.verify_snapshot(snapshot_id)
     canonical = application.canonical_repository.get_bundle(snapshot_id)
+    projection = application.canonical_repository.get_chunk_projection(snapshot_id)
     assert canonical.document.source_file_id == source.id
     assert canonical.document.parse_run_id == parse_run.id
     assert canonical.document.canonical_snapshot_id == snapshot_id
     assert all(element.source_span is not None for element in canonical.elements)
-    assert all(chunk.element_ids for chunk in canonical.chunks)
+    assert all(chunk.element_ids for chunk in projection.chunks)
     rebuilt = application.canonical_mapper.build_canonical_snapshot(
         source=source,
         parse_run=parse_run,
@@ -144,11 +145,16 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
     assert [item.id for item in rebuilt.elements] == [item.id for item in canonical.elements]
     # Chunking moved out of the MinerU mapper into the Cognee AcademicChunkTask;
     # the mapper emits the canonical structure, the pipeline emits chunks.
-    assert rebuilt.chunks == []
-    assert [item.id for item in canonical.chunks]
+    assert "chunks" not in rebuilt.public_dict()["counts"]
+    assert [item.id for item in projection.chunks]
     assert [item.id for item in rebuilt.references] == [item.id for item in canonical.references]
     expected = expected_path_for_source(configured_data_dir / "test-corpus" / "expected", source)
-    report = validate_expected_case(bundle=canonical, source=source, expected_path=expected)
+    report = validate_expected_case(
+        bundle=canonical,
+        chunks=projection.chunks,
+        source=source,
+        expected_path=expected,
+    )
     assert report["passed"] is True
 
     index_manifest_path = Path(knowledge["manifest_path"])
@@ -160,7 +166,7 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
     index_manifest = json.loads(index_manifest_path.read_text())
     cognee_manifest = json.loads(cognee_manifest_path.read_text())
     enrichment = json.loads(enrichment_path.read_text())
-    canonical_chunk_ids = {chunk.id for chunk in canonical.chunks}
+    canonical_chunk_ids = {chunk.id for chunk in projection.chunks}
     assert index_manifest["vector_backend"] == "cognee"
     assert index_manifest["dataset_name"] == "papers"
     assert index_manifest["cognee_dataset_id"] == knowledge["cognee_dataset_id"]
@@ -234,7 +240,7 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
     assert vector_status["backend"] == "cognee"
     assert vector_status["dimensions"] == 768
     assert vector_status["collections"]["ChunkDataPoint_text"] == len(
-        canonical.chunks
+        projection.chunks
     )
     assert vector_status["collections"]["TripletDataPoint_text"] == len(triplet_ids)
     assert Path(knowledge["vector_database"]) == application.paths.cognee / "vector"
@@ -247,7 +253,7 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
                 application.paths, application.knowledge_pipeline.compat
             )
             semantic_hits = await search.graph_search(
-                canonical.chunks[0].text[:200],
+                projection.chunks[0].text[:200],
                 dataset="papers",
                 top_k=10,
             )
@@ -322,7 +328,7 @@ def test_gate4_real_pdf_through_live_cumulative_api_and_rebuild(
     assert rebuild["rebuilt_snapshot_ids"] == [snapshot_id]
     assert rebuild["reports"][0]["rebuilt"] is True
     assert rebuild["reports"][0]["consistency_valid"] is True
-    assert rebuild["reports"][0]["vector_object_count"] > len(canonical.chunks)
+    assert rebuild["reports"][0]["vector_object_count"] > len(projection.chunks)
     assert rebuild["reports"][0]["dataset_name"] == "papers"
     assert {
         str(path): hashlib.sha256(path.read_bytes()).hexdigest()

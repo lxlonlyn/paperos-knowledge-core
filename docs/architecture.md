@@ -160,7 +160,10 @@ MinerU -> Canonical Document / Section / Element / Reference
 ```
 
 PaperOS decides the academic chunking rules; Cognee executes the pipeline and
-provides the tokenizer, token limits, and the final DataPoint write. Cognee's
+provides the tokenizer, token limits, and the final DataPoint write. Chunks are
+formally split from the canonical snapshot: canonical artifacts carry
+document/sections/elements/references only, and the derived
+``ChunkProjection`` is produced by the pipeline and rebuilt on demand. Cognee's
 public pipeline auto-creates the dataset and logs pipeline runs. Stable
 data-item provenance (the relational Data row and DatasetData association
 that ``add_data_points`` attributes nodes and edges to) is not auto-established

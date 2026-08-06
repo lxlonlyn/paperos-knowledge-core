@@ -21,7 +21,9 @@ def validate_feedback(
     chunk_ids = {
         chunk.id
         for bundle in canonical_repository.list_bundles()
-        for chunk in bundle.chunks
+        for chunk in canonical_repository.get_chunk_projection(
+            bundle.snapshot.id
+        ).chunks
     }
     source_chunk_ids: list[str] = []
     for evidence_id in request.evidence_ids:

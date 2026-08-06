@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import re
 
-from paperos_core.domain.canonical import CanonicalBundle
+from paperos_core.domain.canonical import CanonicalBundle, Chunk
 from paperos_core.domain.provenance import RelationRecord, RelationType
 
 _NON_WORD = re.compile(r"[^\w]+", re.UNICODE)
 
 
 def resolve_citations(
-    bundle: CanonicalBundle, candidates: list[CanonicalBundle]
+    bundle: CanonicalBundle,
+    chunks: list[Chunk],
+    candidates: list[CanonicalBundle],
 ) -> list[RelationRecord]:
     """Return only high-confidence citation relations backed by ReferenceEntry."""
     relations: list[RelationRecord] = []
@@ -43,7 +45,9 @@ def resolve_citations(
         if match_id is None:
             continue
         evidence_chunks = [
-            chunk.id for chunk in bundle.chunks if reference.source_element_id in chunk.element_ids
+            chunk.id
+            for chunk in chunks
+            if reference.source_element_id in chunk.element_ids
         ]
         relations.extend(
             [

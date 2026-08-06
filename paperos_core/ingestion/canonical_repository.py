@@ -17,12 +17,13 @@ from paperos_core.domain.canonical import (
     CanonicalBundle,
     CanonicalSnapshot,
     Chunk,
+    ChunkProjection,
     Document,
     Element,
     ReferenceEntry,
     Section,
 )
-from paperos_core.domain.ids import canonical_snapshot_id
+from paperos_core.domain.ids import CHUNKING_VERSION, canonical_snapshot_id
 from paperos_core.errors import CanonicalStorageError, CanonicalValidationError
 from paperos_core.ingestion.validation import calculate_sha256
 from paperos_core.paths import DataPaths
@@ -90,7 +91,7 @@ class CanonicalRepository:
                 affected=snapshot.manifest_path,
                 details={"expected": str(expected_manifest)},
             )
-        self._validate_bundle(bundle)
+        self._validate_bundle(bundle, chunks=[])
         root = expected_manifest.parent
         root.mkdir(parents=True, exist_ok=True)
         payloads = {
@@ -98,7 +99,6 @@ class CanonicalRepository:
             "document.json": self._json_bytes(bundle.document),
             "sections.jsonl": self._jsonl_bytes(bundle.sections),
             "elements.jsonl": self._jsonl_bytes(bundle.elements),
-            "chunks.jsonl": self._jsonl_bytes(bundle.chunks),
             "references.jsonl": self._jsonl_bytes(bundle.references),
             "warnings.json": json.dumps(
                 bundle.warnings,
@@ -130,7 +130,6 @@ class CanonicalRepository:
             "counts": {
                 "sections": len(bundle.sections),
                 "elements": len(bundle.elements),
-                "chunks": len(bundle.chunks),
                 "references": len(bundle.references),
             },
             "files": files,
@@ -162,7 +161,7 @@ class CanonicalRepository:
                         snapshot.pipeline_version,
                         snapshot.cleaning_version,
                         snapshot.classification_version,
-                        snapshot.chunking_version,
+                        CHUNKING_VERSION,
                         snapshot.reference_processing_version,
                     ),
                 )
@@ -203,16 +202,20 @@ class CanonicalRepository:
             document=self._read_model(root / "document.json", Document),
             sections=self._read_jsonl(root / "sections.jsonl", Section),
             elements=self._read_jsonl(root / "elements.jsonl", Element),
-            chunks=self._load_chunks(snapshot, root),
             references=self._read_jsonl(root / "references.jsonl", ReferenceEntry),
             warnings=warnings_payload,
         )
 
-    def _load_chunks(self, snapshot: CanonicalSnapshot, root: Path) -> list[Chunk]:
-        derived = self.chunk_store_path(snapshot.id)
-        if derived.is_file():
-            return self._read_jsonl(derived, Chunk)
-        return self._read_jsonl(root / "chunks.jsonl", Chunk)
+    def get_chunk_projection(self, snapshot_id: str) -> ChunkProjection:
+        """Load the derived chunk projection for one canonical snapshot."""
+        self.get_snapshot(snapshot_id)
+        derived = self.chunk_store_path(snapshot_id)
+        chunks = self._read_jsonl(derived, Chunk) if derived.is_file() else []
+        return ChunkProjection(
+            snapshot_id=snapshot_id,
+            chunking_version=CHUNKING_VERSION,
+            chunks=chunks,
+        )
 
     def list_snapshot_ids(self) -> list[str]:
         with self._connect() as connection:
@@ -249,9 +252,13 @@ class CanonicalRepository:
                     "Canonical artifact checksum verification failed.",
                     affected=path,
                 )
-        self._validate_bundle(self.get_bundle(snapshot_id))
+        bundle = self.get_bundle(snapshot_id)
+        projection = self.get_chunk_projection(snapshot_id)
+        self._validate_bundle(bundle, chunks=projection.chunks)
 
-    def _validate_bundle(self, bundle: CanonicalBundle) -> None:
+    def _validate_bundle(
+        self, bundle: CanonicalBundle, *, chunks: list[Chunk] | None = None
+    ) -> None:
         snapshot = bundle.snapshot
         document = bundle.document
         if document.id != snapshot.document_id:
@@ -285,7 +292,7 @@ class CanonicalRepository:
                     "Canonical Element is missing parser provenance.",
                     affected=element.id,
                 )
-        for chunk in bundle.chunks:
+        for chunk in chunks or []:
             if not set(chunk.element_ids) <= element_ids:
                 raise CanonicalValidationError(
                     "Canonical Chunk references an unknown Element.",

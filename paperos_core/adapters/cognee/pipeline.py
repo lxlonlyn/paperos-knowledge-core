@@ -25,10 +25,8 @@ from paperos_core.adapters.cognee.compat import (
 )
 from paperos_core.adapters.cognee.models import (
     DataPointGraph,
-    canonical_to_datapoints,
 )
 from paperos_core.adapters.cognee.pipeline_tasks import configure_pipeline_tasks
-from paperos_core.adapters.cognee.reference_resolution import resolve_citations
 from paperos_core.adapters.llm import LLMClient
 from paperos_core.config import IngestionSettings
 from paperos_core.domain.canonical import CanonicalBundle, CanonicalIngestionResult
@@ -80,10 +78,12 @@ class CogneePipelineAdapter:
         bundle = canonical_result.canonical
         report, enrichment_path = await self.ingest_bundle(bundle, rebuilt=rebuilt)
         fresh_bundle = self.canonical_repository.get_bundle(bundle.snapshot.id)
+        projection = self.canonical_repository.get_chunk_projection(bundle.snapshot.id)
         return KnowledgeIngestionResult(
             canonical_result=CanonicalIngestionResult(
                 parsed=canonical_result.parsed,
                 canonical=fresh_bundle,
+                chunk_count=len(projection.chunks),
             ),
             indexing=report,
             enrichment_path=enrichment_path,
@@ -109,6 +109,7 @@ class CogneePipelineAdapter:
             compat=self.compat,
             llm=self.llm,
             enrichment_root=self.paths.cognee / "enrichment",
+            graph_root=self.paths.cognee / "graphs",
             chunk_target_tokens=self.ingestion.chunk_target_tokens,
             chunk_overlap_tokens=self.ingestion.chunk_overlap_tokens,
         )
@@ -126,9 +127,10 @@ class CogneePipelineAdapter:
         run_info = _single_run_info(run_infos, dataset_name)
         run_id = UUID(str(run_info.pipeline_run_id))
         fresh_bundle = self.canonical_repository.get_bundle(bundle.snapshot.id)
+        projection = self.canonical_repository.get_chunk_projection(bundle.snapshot.id)
         enrichment = self._load_enrichment(bundle.snapshot.id)
-        _validate_semantic_provenance(fresh_bundle, enrichment)
-        graph = _build_graph(fresh_bundle, enrichment, self.canonical_repository)
+        _validate_semantic_provenance(projection.chunks, enrichment)
+        graph = self._load_graph(bundle.snapshot.id)
         binding = await self.compat.provenance_counts(
             dataset_id=UUID(str(dataset.id)),
             data_id=data_id,
@@ -158,6 +160,7 @@ class CogneePipelineAdapter:
         )
         index_manifest, index_manifest_path = await self.index_manager.index_bundle(
             fresh_bundle,
+            chunks=projection.chunks,
             cognee_manifest=cognee_manifest,
             cognee_object_ids=sorted(graph.id_mapping),
             cognee_vector_object_ids=cognee_vector_ids,
@@ -222,6 +225,23 @@ class CogneePipelineAdapter:
                 affected=path,
             ) from exc
 
+    def _load_graph(self, snapshot_id: str) -> DataPointGraph:
+        path = self.paths.cognee / "graphs" / f"{snapshot_id}.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise CogneeStorageError(
+                f"Unable to read the DataPoint graph projection: {exc}",
+                affected=path,
+            ) from exc
+        try:
+            return DataPointGraph.from_json(payload)
+        except ValueError as exc:
+            raise CogneeStorageError(
+                f"Invalid DataPoint graph projection: {exc}",
+                affected=path,
+            ) from exc
+
     def _persist_manifest(
         self,
         *,
@@ -268,18 +288,6 @@ class CogneePipelineAdapter:
         return manifest_path
 
 
-def _build_graph(
-    bundle: CanonicalBundle,
-    enrichment: SemanticEnrichment,
-    canonical_repository: CanonicalRepository,
-) -> DataPointGraph:
-    graph = canonical_to_datapoints(bundle, enrichment)
-    graph.relations.extend(
-        resolve_citations(bundle, canonical_repository.list_bundles())
-    )
-    return graph
-
-
 def _single_run_info(run_infos: dict[str, Any], dataset_name: str) -> Any:
     if isinstance(run_infos, dict):
         if len(run_infos) == 1:
@@ -308,9 +316,9 @@ def _vector_collection_manifest(graph: DataPointGraph) -> dict[str, list[str]]:
 
 
 def _validate_semantic_provenance(
-    bundle: CanonicalBundle, enrichment: SemanticEnrichment
+    chunks: list[Any], enrichment: SemanticEnrichment
 ) -> None:
-    chunk_ids = {chunk.id for chunk in bundle.chunks}
+    chunk_ids = {chunk.id for chunk in chunks}
     for entity in enrichment.entities:
         _validate_provenance(entity.id, entity.source_chunk_ids, chunk_ids)
     for claim in enrichment.claims:

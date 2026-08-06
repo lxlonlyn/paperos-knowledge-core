@@ -58,12 +58,16 @@ class CorpusView:
         chunks = {
             chunk.id: chunk
             for bundle in retained_bundles
-            for chunk in bundle.chunks
+            for chunk in canonical_repository.get_chunk_projection(
+                bundle.snapshot.id
+            ).chunks
         }
         chunk_bundles = {
             chunk.id: bundle
             for bundle in retained_bundles
-            for chunk in bundle.chunks
+            for chunk in canonical_repository.get_chunk_projection(
+                bundle.snapshot.id
+            ).chunks
         }
         source_filenames = {
             bundle.document.source_file_id: registry.get_source(

@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from paperos_core.domain.canonical import CanonicalBundle
+from paperos_core.domain.canonical import CanonicalBundle, Chunk
 from paperos_core.domain.documents import SourceFile
 from paperos_core.domain.enums import ElementType
 from paperos_core.errors import CanonicalValidationError
@@ -17,6 +17,7 @@ from paperos_core.ingestion.normalization import normalized_match_text
 def validate_expected_case(
     *,
     bundle: CanonicalBundle,
+    chunks: list[Chunk],
     source: SourceFile,
     expected_path: Path,
 ) -> dict[str, Any]:
@@ -104,8 +105,8 @@ def validate_expected_case(
         failures,
     )
     _check(
-        len(bundle.chunks) >= structure["minimum_chunk_count"],
-        f"chunk count {len(bundle.chunks)} is below minimum",
+        len(chunks) >= structure["minimum_chunk_count"],
+        f"chunk count {len(chunks)} is below minimum",
         failures,
     )
     _check(
@@ -181,14 +182,14 @@ def validate_expected_case(
             )
             and all(
                 chunk.page_start is not None and chunk.page_end is not None
-                for chunk in bundle.chunks
+                for chunk in chunks
             ),
             "one or more sections/chunks have no page range",
             failures,
         )
     if canonical.get("require_chunk_element_links"):
         _check(
-            all(chunk.element_ids for chunk in bundle.chunks),
+            all(chunk.element_ids for chunk in chunks),
             "one or more chunks have no element links",
             failures,
         )
@@ -211,7 +212,7 @@ def validate_expected_case(
         "counts": {
             "pages": actual_pages,
             "sections": len(bundle.sections),
-            "chunks": len(bundle.chunks),
+            "chunks": len(chunks),
             "references": len(bundle.references),
             "element_types": type_counts,
         },

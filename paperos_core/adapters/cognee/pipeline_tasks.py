@@ -26,7 +26,7 @@ from paperos_core.adapters.cognee.models import (
 )
 from paperos_core.adapters.cognee.reference_resolution import resolve_citations
 from paperos_core.adapters.llm import LLMClient
-from paperos_core.domain.canonical import CanonicalBundle
+from paperos_core.domain.canonical import CanonicalBundle, ChunkProjection
 from paperos_core.domain.datapoints import cognee_uuid
 from paperos_core.domain.knowledge import SemanticEnrichment
 from paperos_core.errors import CogneeStorageError
@@ -35,8 +35,15 @@ from paperos_core.ingestion.chunking import build_chunks, resolve_cognee_tokeniz
 
 
 @dataclass(slots=True)
+class ChunkedBundle:
+    bundle: CanonicalBundle
+    projection: ChunkProjection
+
+
+@dataclass(slots=True)
 class EnrichedBundle:
     bundle: CanonicalBundle
+    projection: ChunkProjection
     enrichment: SemanticEnrichment
 
 
@@ -47,10 +54,10 @@ async def academic_chunk_task(
     repository: CanonicalRepository,
     chunk_target_tokens: int,
     chunk_overlap_tokens: int,
-) -> list[CanonicalBundle]:
+) -> list[ChunkedBundle]:
     """Produce canonical chunks from sections/elements and persist them."""
     tokenizer = resolve_cognee_tokenizer()
-    results: list[CanonicalBundle] = []
+    results: list[ChunkedBundle] = []
     for item in data:
         bundle = getattr(item, "bundle", item)
         chunks = build_chunks(
@@ -63,12 +70,20 @@ async def academic_chunk_task(
             tokenizer=tokenizer,
         )
         repository.save_chunks(bundle.snapshot.id, chunks)
-        results.append(bundle.model_copy(update={"chunks": chunks}))
+        results.append(
+            ChunkedBundle(
+                bundle=bundle,
+                projection=ChunkProjection(
+                    snapshot_id=bundle.snapshot.id,
+                    chunks=chunks,
+                ),
+            )
+        )
     return results
 
 
 async def semantic_enrichment_task(
-    data: list[CanonicalBundle],
+    data: list[ChunkedBundle],
     ctx: Any = None,
     *,
     llm: LLMClient,
@@ -76,12 +91,19 @@ async def semantic_enrichment_task(
 ) -> list[EnrichedBundle]:
     """Run PaperOS's enrichment schema through Cognee's LLMGateway."""
     results: list[EnrichedBundle] = []
-    for bundle in data:
-        await llm.health_check()
-        enrichment = await llm.enrich(bundle)
-        _validate_semantic_provenance(bundle, enrichment)
-        _persist_enrichment(enrichment_root, bundle.snapshot.id, enrichment)
-        results.append(EnrichedBundle(bundle=bundle, enrichment=enrichment))
+    for chunked in data:
+        enrichment = await llm.enrich(chunked.bundle, chunked.projection.chunks)
+        _validate_semantic_provenance(chunked.projection.chunks, enrichment)
+        _persist_enrichment(
+            enrichment_root, chunked.bundle.snapshot.id, enrichment
+        )
+        results.append(
+            EnrichedBundle(
+                bundle=chunked.bundle,
+                projection=chunked.projection,
+                enrichment=enrichment,
+            )
+        )
     return results
 
 
@@ -90,14 +112,24 @@ async def datapoint_mapping_task(
     ctx: Any = None,
     *,
     repository: CanonicalRepository,
+    graph_root: Path,
 ) -> list[DataPointGraph]:
     """Map one canonical/enrichment pair to a Cognee DataPoint graph."""
     results: list[DataPointGraph] = []
     for enriched in data:
-        graph = canonical_to_datapoints(enriched.bundle, enriched.enrichment)
-        graph.relations.extend(
-            resolve_citations(enriched.bundle, repository.list_bundles())
+        graph = canonical_to_datapoints(
+            enriched.bundle,
+            enriched.projection.chunks,
+            enriched.enrichment,
         )
+        graph.relations.extend(
+            resolve_citations(
+                enriched.bundle,
+                enriched.projection.chunks,
+                repository.list_bundles(),
+            )
+        )
+        _persist_graph(graph_root, enriched.bundle.snapshot.id, graph)
         results.append(graph)
     return results
 
@@ -136,6 +168,7 @@ def configure_pipeline_tasks(
     compat: CogneeCompatibilityAdapter,
     llm: LLMClient,
     enrichment_root: Path,
+    graph_root: Path,
     chunk_target_tokens: int,
     chunk_overlap_tokens: int,
 ) -> list[Any]:
@@ -158,6 +191,7 @@ def configure_pipeline_tasks(
             datapoint_mapping_task,
             batch_size=1,
             repository=repository,
+            graph_root=graph_root,
         ).task,
         task(
             store_datapoints_task,
@@ -186,9 +220,9 @@ def _custom_edge(
 
 
 def _validate_semantic_provenance(
-    bundle: CanonicalBundle, enrichment: SemanticEnrichment
+    chunks: list[Any], enrichment: SemanticEnrichment
 ) -> None:
-    chunk_ids = {chunk.id for chunk in bundle.chunks}
+    chunk_ids = {chunk.id for chunk in chunks}
     for entity in enrichment.entities:
         _validate_provenance(entity.id, entity.source_chunk_ids, chunk_ids)
     for claim in enrichment.claims:
@@ -214,6 +248,14 @@ def _persist_enrichment(
 ) -> Path:
     path = root / f"{snapshot_id}.json"
     _atomic_json(path, enrichment.model_dump(mode="json"))
+    return path
+
+
+def _persist_graph(
+    root: Path, snapshot_id: str, graph: DataPointGraph
+) -> Path:
+    path = root / f"{snapshot_id}.json"
+    _atomic_json(path, graph.to_json())
     return path
 
 

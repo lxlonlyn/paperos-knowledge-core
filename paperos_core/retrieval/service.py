@@ -14,7 +14,6 @@ from paperos_core.paths import DataPaths
 from paperos_core.retrieval.cache import QueryCache
 from paperos_core.retrieval.candidates import (
     Candidate,
-    ExpansionTrace,
     QueryRequest,
     QueryResponse,
     RetrievalProfile,
@@ -27,7 +26,7 @@ from paperos_core.retrieval.fusion import weighted_rrf
 from paperos_core.retrieval.global_context import global_context_retrieve
 from paperos_core.retrieval.graph import graph_retrieve
 from paperos_core.retrieval.lexical import lexical_retrieve
-from paperos_core.retrieval.planner import QueryPlanner
+from paperos_core.retrieval.profiles import build_query_plan
 from paperos_core.retrieval.rerank import rerank_candidates
 from paperos_core.retrieval.semantic import (
     entity_claim_retrieve,
@@ -64,7 +63,6 @@ class RetrievalService:
         self.llm = llm
         self.feedback = feedback
         self.cache = QueryCache(paths, feedback)
-        self.planner = QueryPlanner(config)
 
     async def query(self, request: QueryRequest) -> QueryResponse:
         dataset_name = (request.dataset or self.config.dataset).strip()
@@ -79,7 +77,7 @@ class RetrievalService:
         document_ids = corpus.filtered_document_ids(
             request.document_ids, dataset_name
         )
-        plan = self.planner.plan(request)
+        plan = build_query_plan(request, self.config)
         pool = plan.candidate_pool_size
         query = request.query
         stages = ["profile_mapping"]
@@ -197,15 +195,6 @@ class RetrievalService:
             recall_context=recall_context,
         )
         stages.append("synthesis")
-        expansion = ExpansionTrace(
-            model="",
-            lexical_queries=[],
-            semantic_queries=[],
-            entity_queries=[],
-            relation_queries=[],
-            hyde_text="",
-            raw_output="",
-        )
         response = QueryResponse(
             id=cache_key,
             query=request.query,
@@ -215,7 +204,6 @@ class RetrievalService:
             answer_model=self.llm.config.model,
             stages=stages,
             channels_used=list(channels),
-            expansion=expansion,
             evidence=evidence,
             candidates=selected,
             distinct_documents=len({item.document_id for item in evidence}),

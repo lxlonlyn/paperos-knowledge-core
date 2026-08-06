@@ -88,6 +88,7 @@ class DerivedDataRebuilder:
         ]
         targets.extend((self.paths.indexes / "manifests").glob("*.json"))
         targets.extend((self.paths.cognee / "manifests").glob("*.json"))
+        targets.extend((self.paths.cognee / "graphs").glob("*.json"))
         targets.extend((self.paths.cognee / "chunks").glob("*.jsonl"))
         targets.extend((self.paths.cognee / "enrichment").glob("*.json"))
         targets.extend((self.paths.cache / "query").glob("*.json"))

@@ -75,25 +75,25 @@ def _bundle() -> CanonicalBundle:
             token_count=max(1, len(text.split())),
         )
 
+    chunks = [
+        chunk("chunk_front", None, "front matter text"),
+        chunk("chunk_a", first.id, "first section content alpha"),
+        chunk("chunk_b", first.id, "first section content beta"),
+        chunk("chunk_c", second.id, "second section content gamma"),
+    ]
     return CanonicalBundle(
         snapshot=snapshot,
         document=document,
         sections=[first, second],
         elements=[],
-        chunks=[
-            chunk("chunk_front", None, "front matter text"),
-            chunk("chunk_a", first.id, "first section content alpha"),
-            chunk("chunk_b", first.id, "first section content beta"),
-            chunk("chunk_c", second.id, "second section content gamma"),
-        ],
         references=[],
         warnings=[],
-    )
+    ), chunks
 
 
 def test_chunks_are_grouped_by_section_in_document_order() -> None:
-    bundle = _bundle()
-    groups = _chunks_by_section(bundle)
+    bundle, chunks = _bundle()
+    groups = _chunks_by_section(chunks, bundle.sections)
     assert [section_id for section_id, _chunks in groups] == [
         None,
         "section_first",
@@ -109,15 +109,15 @@ def test_chunks_are_grouped_by_section_in_document_order() -> None:
 
 
 def test_batches_cover_every_chunk_exactly_once() -> None:
-    bundle = _bundle()
-    batches = _chunk_batches(bundle.chunks, character_budget=120)
+    _, chunks = _bundle()
+    batches = _chunk_batches(chunks, character_budget=120)
     assert len(batches) > 1
     seen = [chunk.id for batch in batches for chunk in batch]
-    assert len(seen) == len(set(seen)) == len(bundle.chunks)
+    assert len(seen) == len(set(seen)) == len(chunks)
 
 
 def test_merge_deduplicates_entities_claims_and_resolves_relations() -> None:
-    bundle = _bundle()
+    bundle, chunks = _bundle()
     first_batch = _SectionExtraction(
         entities=[
             _EntityExtraction(
@@ -183,8 +183,8 @@ def test_merge_deduplicates_entities_claims_and_resolves_relations() -> None:
     entities, claims, relations = _merge_section_extractions(
         bundle,
         [
-            ("section_first", [bundle.chunks[1]], first_batch),
-            ("section_second", [bundle.chunks[2]], second_batch),
+            ("section_first", [chunks[1]], first_batch),
+            ("section_second", [chunks[2]], second_batch),
         ],
         model="test-model",
     )
@@ -200,7 +200,7 @@ def test_merge_deduplicates_entities_claims_and_resolves_relations() -> None:
 
 
 def test_merge_rejects_chunk_ids_outside_the_batch() -> None:
-    bundle = _bundle()
+    bundle, chunks = _bundle()
     extraction = _SectionExtraction(
         entities=[
             _EntityExtraction(
@@ -216,6 +216,6 @@ def test_merge_rejects_chunk_ids_outside_the_batch() -> None:
     with pytest.raises(SemanticEnrichmentError, match="outside the supplied evidence"):
         _merge_section_extractions(
             bundle,
-            [("section_first", [bundle.chunks[1]], extraction)],
+            [("section_first", [chunks[1]], extraction)],
             model="test-model",
         )

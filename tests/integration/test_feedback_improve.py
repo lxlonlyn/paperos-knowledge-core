@@ -367,7 +367,9 @@ def test_gate6_live_feedback_improve_rebuild_and_operations(
         assert result["target_id"] in {
             chunk.id
             for bundle in deleted_application.canonical_repository.list_bundles()
-            for chunk in bundle.chunks
+            for chunk in deleted_application.canonical_repository.get_chunk_projection(
+                bundle.snapshot.id
+            ).chunks
         }
     finally:
         asyncio.run(deleted_application.aclose())

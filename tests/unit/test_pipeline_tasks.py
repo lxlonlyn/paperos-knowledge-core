@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 from paperos_core.adapters.cognee.models import DataPointGraph
 from paperos_core.adapters.cognee.pipeline_tasks import (
+    ChunkedBundle,
     EnrichedBundle,
     _custom_edge,
     academic_chunk_task,
@@ -18,6 +19,7 @@ from paperos_core.adapters.cognee.pipeline_tasks import (
 from paperos_core.domain.canonical import (
     CanonicalBundle,
     CanonicalSnapshot,
+    ChunkProjection,
     Document,
     Element,
     Section,
@@ -78,7 +80,6 @@ def _bundle(snapshot_id: str = "snapshot_test") -> CanonicalBundle:
         document=document,
         sections=[section],
         elements=elements,
-        chunks=[],
         references=[],
         warnings=[],
     )
@@ -118,7 +119,7 @@ async def test_academic_chunk_task_builds_and_persists_chunks(monkeypatch) -> No
         chunk_overlap_tokens=4,
     )
     assert len(results) == 1
-    chunks = results[0].chunks
+    chunks = results[0].projection.chunks
     assert chunks
     assert saved and saved[0][0] == bundle.snapshot.id
     assert saved[0][1] == chunks
@@ -130,12 +131,15 @@ async def test_semantic_enrichment_task_persists_through_llm_client(
     tmp_path: Path,
 ) -> None:
     llm = AsyncMock()
-    llm.health_check = AsyncMock(return_value={"status": "healthy"})
     bundle = _bundle()
     enrichment = _enrichment(bundle.snapshot.id)
     llm.enrich = AsyncMock(return_value=enrichment)
+    chunked = ChunkedBundle(
+        bundle=bundle,
+        projection=ChunkProjection(snapshot_id=bundle.snapshot.id, chunks=[]),
+    )
     results = await semantic_enrichment_task(
-        [bundle],
+        [chunked],
         llm=llm,
         enrichment_root=tmp_path,
     )
@@ -145,14 +149,19 @@ async def test_semantic_enrichment_task_persists_through_llm_client(
         (tmp_path / f"{bundle.snapshot.id}.json").read_text(encoding="utf-8")
     )
     assert payload["model"] == "example-model"
-    llm.enrich.assert_awaited_once_with(bundle)
+    llm.enrich.assert_awaited_once_with(bundle, [])
 
 
 async def test_datapoint_mapping_task_builds_graph_without_external_calls(
-    monkeypatch,
+    tmp_path: Path,
 ) -> None:
     bundle = _bundle()
-    enriched = EnrichedBundle(bundle=bundle, enrichment=_enrichment(bundle.snapshot.id))
+    projection = ChunkProjection(snapshot_id=bundle.snapshot.id, chunks=[])
+    enriched = EnrichedBundle(
+        bundle=bundle,
+        projection=projection,
+        enrichment=_enrichment(bundle.snapshot.id),
+    )
 
     class _Repository:
         def list_bundles(self):
@@ -161,12 +170,14 @@ async def test_datapoint_mapping_task_builds_graph_without_external_calls(
     results = await datapoint_mapping_task(
         [enriched],
         repository=_Repository(),
+        graph_root=tmp_path,
     )
     assert len(results) == 1
     graph = results[0]
     assert graph.nodes
     assert graph.id_mapping
     assert graph.relations
+    assert (tmp_path / f"{bundle.snapshot.id}.json").is_file()
 
 
 async def test_store_datapoints_task_writes_single_triplet_representation() -> None:

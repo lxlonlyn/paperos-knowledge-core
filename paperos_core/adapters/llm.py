@@ -25,7 +25,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from paperos_core.config import LLMSettings
-from paperos_core.domain.canonical import CanonicalBundle, Chunk
+from paperos_core.domain.canonical import CanonicalBundle, Chunk, Section
 from paperos_core.domain.ids import semantic_object_id
 from paperos_core.domain.knowledge import (
     Claim,
@@ -158,12 +158,14 @@ class LLMClient:
             "model": self.config.model,
         }
 
-    async def enrich(self, bundle: CanonicalBundle) -> SemanticEnrichment:
+    async def enrich(
+        self, bundle: CanonicalBundle, chunks: list[Chunk]
+    ) -> SemanticEnrichment:
         """Section-grouped, batch-local semantic enrichment with coverage."""
         prompt = self.prompts.describe("semantic_enrichment")
         raw_sections: list[tuple[str | None, list[Chunk], _SectionExtraction]] = []
         covered: list[str] = []
-        for section_id, section_chunks in _chunks_by_section(bundle):
+        for section_id, section_chunks in _chunks_by_section(chunks, bundle.sections):
             for batch in _chunk_batches(section_chunks):
                 covered.extend(chunk.id for chunk in batch)
                 extraction = await self._extract_batch(
@@ -173,13 +175,13 @@ class LLMClient:
         entities, claims, relations = _merge_section_extractions(
             bundle, raw_sections, model=self.config.model
         )
-        summary = await self._summarize_document(bundle, prompt)
+        summary = await self._summarize_document(bundle, chunks, prompt)
         covered_ids = list(dict.fromkeys(covered))
         covered_set = set(covered_ids)
         uncovered_ids = [
-            chunk.id for chunk in bundle.chunks if chunk.id not in covered_set
+            chunk.id for chunk in chunks if chunk.id not in covered_set
         ]
-        total = len(bundle.chunks)
+        total = len(chunks)
         return SemanticEnrichment(
             entities=entities,
             claims=claims,
@@ -253,10 +255,11 @@ class LLMClient:
     async def _summarize_document(
         self,
         bundle: CanonicalBundle,
+        chunks: list[Chunk],
         prompt: PromptDescriptor,
     ) -> Summary:
         summary_evidence = _chunk_evidence(
-            _summary_evidence_chunks(bundle)
+            _summary_evidence_chunks(chunks)
         )
         if not summary_evidence:
             raise SemanticEnrichmentError(
@@ -390,13 +393,14 @@ class LLMClient:
 
 
 def _chunks_by_section(
-    bundle: CanonicalBundle,
+    chunks: list[Chunk],
+    sections: list[Section],
 ) -> list[tuple[str | None, list[Chunk]]]:
     groups: dict[str | None, list[Chunk]] = {}
-    for chunk in bundle.chunks:
+    for chunk in chunks:
         groups.setdefault(chunk.section_id, []).append(chunk)
     ordered: list[tuple[str | None, list[Chunk]]] = []
-    for section_id in [None, *(section.id for section in bundle.sections)]:
+    for section_id in [None, *(section.id for section in sections)]:
         if groups.get(section_id):
             ordered.append((section_id, groups[section_id]))
     return ordered
@@ -424,10 +428,10 @@ def _chunk_batches(
     return batches
 
 
-def _summary_evidence_chunks(bundle: CanonicalBundle) -> list[Chunk]:
+def _summary_evidence_chunks(chunks: list[Chunk]) -> list[Chunk]:
     selected: list[Chunk] = []
     budget = _SUMMARY_CHARACTER_BUDGET
-    for chunk in bundle.chunks:
+    for chunk in chunks:
         if budget <= 0:
             break
         text = chunk.text[: min(len(chunk.text), _CHUNK_TEXT_LIMIT, budget)]

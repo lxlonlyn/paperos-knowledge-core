@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 from paperos_core.adapters.cognee.compat import CogneeDatasetBinding
-from paperos_core.domain.canonical import CanonicalBundle
+from paperos_core.domain.canonical import CanonicalBundle, Chunk
 from paperos_core.errors import IndexStorageError
 from paperos_core.indexes.lexical_store import LexicalStore
 from paperos_core.indexes.manifest import IndexManifest
@@ -32,13 +32,14 @@ class IndexManager:
         self,
         bundle: CanonicalBundle,
         *,
+        chunks: list[Chunk],
         cognee_manifest: Path,
         cognee_object_ids: list[str],
         cognee_vector_object_ids: list[str],
         relation_count: int,
         dataset_binding: CogneeDatasetBinding,
     ) -> tuple[IndexManifest, Path]:
-        lexical_ids = self.lexical.upsert_bundle(bundle)
+        lexical_ids = self.lexical.upsert_bundle(bundle, chunks=chunks)
         manifest = IndexManifest(
             canonical_snapshot_id=bundle.snapshot.id,
             document_id=bundle.document.id,
@@ -59,11 +60,17 @@ class IndexManager:
         )
         path = self.paths.indexes / "manifests" / f"{bundle.snapshot.id}.json"
         _atomic_json(path, manifest.model_dump(mode="json"))
-        self.verify(bundle, manifest)
+        self.verify(bundle, manifest, chunks=chunks)
         return manifest, path
 
-    def verify(self, bundle: CanonicalBundle, manifest: IndexManifest) -> None:
-        chunk_ids = {chunk.id for chunk in bundle.chunks}
+    def verify(
+        self,
+        bundle: CanonicalBundle,
+        manifest: IndexManifest,
+        *,
+        chunks: list[Chunk],
+    ) -> None:
+        chunk_ids = {chunk.id for chunk in chunks}
         lexical_ids = set(self.lexical.object_ids(bundle.document.id))
         vector_ids = set(manifest.vector_object_ids)
         cognee_ids = set(manifest.cognee_object_ids)

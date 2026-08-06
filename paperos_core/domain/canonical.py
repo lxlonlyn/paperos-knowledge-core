@@ -178,8 +178,15 @@ class CanonicalSnapshot(DomainModel):
     pipeline_version: str = CANONICAL_PIPELINE_VERSION
     cleaning_version: str = CLEANING_VERSION
     classification_version: str = CLASSIFICATION_VERSION
-    chunking_version: str = CHUNKING_VERSION
     reference_processing_version: str = REFERENCE_PROCESSING_VERSION
+
+
+class ChunkProjection(DomainModel):
+    """Derived chunk layer, formally separate from the canonical snapshot."""
+
+    snapshot_id: str
+    chunking_version: str = CHUNKING_VERSION
+    chunks: list[Chunk] = Field(default_factory=list)
 
 
 class CanonicalBundle(DomainModel):
@@ -187,7 +194,6 @@ class CanonicalBundle(DomainModel):
     document: Document
     sections: list[Section]
     elements: list[Element]
-    chunks: list[Chunk]
     references: list[ReferenceEntry]
     warnings: list[str] = Field(default_factory=list)
 
@@ -199,7 +205,6 @@ class CanonicalBundle(DomainModel):
             "counts": {
                 "sections": len(self.sections),
                 "elements": len(self.elements),
-                "chunks": len(self.chunks),
                 "references": len(self.references),
             },
             "element_types": sorted({element.element_type.value for element in self.elements}),
@@ -210,8 +215,11 @@ class CanonicalBundle(DomainModel):
 class CanonicalIngestionResult(DomainModel):
     parsed: ParsedIngestionResult
     canonical: CanonicalBundle
+    chunk_count: int | None = None
 
     def public_dict(self) -> dict[str, Any]:
         payload = self.parsed.public_dict()
         payload.update(self.canonical.public_dict())
+        if self.chunk_count is not None:
+            payload["counts"]["chunks"] = self.chunk_count
         return payload

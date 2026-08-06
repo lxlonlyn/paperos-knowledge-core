@@ -89,6 +89,9 @@ class DocumentService:
             if is_deleted and not include_deleted:
                 continue
             source = self.ingestion.get_source(bundle.document.source_file_id)
+            projection = self.canonical_repository.get_chunk_projection(
+                bundle.snapshot.id
+            )
             result.append(
                 DocumentSummary(
                     document_id=document_id,
@@ -96,7 +99,7 @@ class DocumentService:
                     source_file_id=source.id,
                     source_filename=source.original_filename,
                     canonical_snapshot_id=bundle.snapshot.id,
-                    chunk_count=len(bundle.chunks),
+                    chunk_count=len(projection.chunks),
                     section_count=len(bundle.sections),
                     deleted=is_deleted,
                 )

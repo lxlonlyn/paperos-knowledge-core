@@ -138,7 +138,7 @@ class _MockProvider:
         self.thread.join(timeout=10)
 
 
-def _bundle() -> CanonicalBundle:
+def _bundle() -> tuple[CanonicalBundle, list[Chunk]]:
     snapshot = CanonicalSnapshot(
         id="snapshot_contract",
         source_file_id="src_contract",
@@ -188,48 +188,48 @@ def _bundle() -> CanonicalBundle:
             token_count=max(1, len(text.split())),
         )
 
+    chunks = [
+        chunk(
+            "chunk_first_1",
+            first,
+            "Graph Neural Networks learn node representations by aggregating "
+            "neighbor information across layers.",
+        ),
+        chunk(
+            "chunk_first_2",
+            first,
+            "The proposed loss function combines supervised classification "
+            "with a structural regularization term.",
+        ),
+        chunk(
+            "chunk_second_1",
+            second,
+            "Experiments show the model outperforms strong baselines on "
+            "standard citation datasets.",
+        ),
+    ]
     return CanonicalBundle(
         snapshot=snapshot,
         document=document,
         sections=[first, second],
         elements=[],
-        chunks=[
-            chunk(
-                "chunk_first_1",
-                first,
-                "Graph Neural Networks learn node representations by aggregating "
-                "neighbor information across layers.",
-            ),
-            chunk(
-                "chunk_first_2",
-                first,
-                "The proposed loss function combines supervised classification "
-                "with a structural regularization term.",
-            ),
-            chunk(
-                "chunk_second_1",
-                second,
-                "Experiments show the model outperforms strong baselines on "
-                "standard citation datasets.",
-            ),
-        ],
         references=[],
         warnings=[],
-    )
+    ), chunks
 
 
 async def _run_provider_flows(settings) -> None:
     configure_cognee(settings)
     CogneeCompatibilityAdapter.reset_configuration_caches()
     client = LLMClient(settings.llm, PromptRepository())
-    bundle = _bundle()
-    enrichment = await client.enrich(bundle)
+    bundle, chunks = _bundle()
+    enrichment = await client.enrich(bundle, chunks)
     assert enrichment.entities
     assert enrichment.claims
     assert enrichment.relations
     assert len(enrichment.summaries) == 1
     assert enrichment.summaries[0].text
-    assert enrichment.covered_chunk_ids == [chunk.id for chunk in bundle.chunks]
+    assert enrichment.covered_chunk_ids == [chunk.id for chunk in chunks]
     assert enrichment.uncovered_chunk_ids == []
     assert enrichment.coverage_ratio == 1.0
     answer = await client.synthesize_answer(

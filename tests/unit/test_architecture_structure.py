@@ -62,11 +62,11 @@ def test_prompt_repository_is_versioned_and_hashed() -> None:
     repository = PromptRepository()
     for name in (
         "semantic_enrichment",
-        "query_planning",
-        "query_expansion",
         "answer_synthesis",
     ):
         descriptor = repository.describe(name)
         assert descriptor.text == repository.load(name)
         assert descriptor.version == "1"
         assert len(descriptor.sha256) == 64
+    for removed in ("query_planning", "query_expansion"):
+        assert not (ROOT / "prompts" / f"{removed}.md").exists()

@@ -6,7 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from paperos_core.domain.canonical import CanonicalBundle
+from paperos_core.domain.canonical import CanonicalBundle, Chunk
 from paperos_core.errors import IndexStorageError
 from paperos_core.indexes.manifest import LEXICAL_INDEX_VERSION
 
@@ -34,8 +34,10 @@ class LexicalStore:
         connection.row_factory = sqlite3.Row
         return connection
 
-    def upsert_bundle(self, bundle: CanonicalBundle) -> list[str]:
-        records = _records_for_bundle(bundle)
+    def upsert_bundle(
+        self, bundle: CanonicalBundle, *, chunks: list[Chunk]
+    ) -> list[str]:
+        records = _records_for_bundle(bundle, chunks=chunks)
         try:
             with self._connect() as connection:
                 connection.execute(
@@ -122,7 +124,9 @@ class LexicalStore:
         return {"path": str(self.path), "record_count": count, "fts5": fts5}
 
 
-def _records_for_bundle(bundle: CanonicalBundle) -> list[LexicalRecord]:
+def _records_for_bundle(
+    bundle: CanonicalBundle, *, chunks: list[Chunk]
+) -> list[LexicalRecord]:
     snapshot = bundle.snapshot
     document = bundle.document
     records = [
@@ -152,7 +156,7 @@ def _records_for_bundle(bundle: CanonicalBundle) -> list[LexicalRecord]:
             section_path=chunk.section_path,
             text=chunk.text,
         )
-        for chunk in bundle.chunks
+        for chunk in chunks
     )
     records.extend(
         LexicalRecord(

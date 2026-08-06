@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from paperos_core.domain.canonical import CanonicalBundle
+from paperos_core.domain.canonical import CanonicalBundle, Chunk
 from paperos_core.domain.datapoints import (
     ChunkDataPoint,
     ClaimDataPoint,
@@ -23,6 +23,22 @@ from paperos_core.domain.ids import knowledge_triplet_id
 from paperos_core.domain.knowledge import SemanticEnrichment
 from paperos_core.domain.provenance import RelationRecord, RelationType
 
+_DATAPOINT_CLASSES: dict[str, type[PaperOSDataPoint]] = {
+    cls.__name__: cls
+    for cls in (
+        DocumentDataPoint,
+        SectionDataPoint,
+        ChunkDataPoint,
+        ElementDataPoint,
+        ReferenceDataPoint,
+        EntityDataPoint,
+        ClaimDataPoint,
+        ConceptRelationDataPoint,
+        SummaryDataPoint,
+        TripletDataPoint,
+    )
+}
+
 
 @dataclass(slots=True)
 class DataPointGraph:
@@ -33,9 +49,40 @@ class DataPointGraph:
     def id_mapping(self) -> dict[str, str]:
         return {node.canonical_id: str(node.id) for node in self.nodes}
 
+    def to_json(self) -> dict[str, object]:
+        return {
+            "nodes": [
+                {"__type__": type(node).__name__, **node.model_dump(mode="json")}
+                for node in self.nodes
+            ],
+            "relations": [
+                relation.model_dump(mode="json") for relation in self.relations
+            ],
+        }
+
+    @classmethod
+    def from_json(cls, payload: dict[str, object]) -> DataPointGraph:
+        nodes: list[PaperOSDataPoint] = []
+        for item in payload.get("nodes", []):
+            if not isinstance(item, dict):
+                raise TypeError("DataPointGraph node entry must be an object")
+            node_type = item.get("__type__")
+            datapoint_cls = _DATAPOINT_CLASSES.get(node_type)
+            if datapoint_cls is None:
+                raise ValueError(f"Unknown DataPoint type: {node_type}")
+            nodes.append(datapoint_cls.model_validate(item))
+        relations = [
+            RelationRecord.model_validate(relation)
+            for relation in payload.get("relations", [])
+            if isinstance(relation, dict)
+        ]
+        return cls(nodes=nodes, relations=relations)
+
 
 def canonical_to_datapoints(
-    bundle: CanonicalBundle, enrichment: SemanticEnrichment
+    bundle: CanonicalBundle,
+    chunks: list[Chunk],
+    enrichment: SemanticEnrichment,
 ) -> DataPointGraph:
     snapshot = bundle.snapshot
     common = {
@@ -82,10 +129,10 @@ def canonical_to_datapoints(
             derived_from_ids=chunk.element_ids,
             **common,
         )
-        for chunk in bundle.chunks
+        for chunk in chunks
     )
     chunks_by_element: dict[str, list[str]] = {}
-    for chunk in bundle.chunks:
+    for chunk in chunks:
         for element_id in chunk.element_ids:
             chunks_by_element.setdefault(element_id, []).append(chunk.id)
     nodes.extend(
@@ -176,7 +223,9 @@ def canonical_to_datapoints(
         )
         for summary in enrichment.summaries
     )
-    relations = _canonical_relations(bundle) + _semantic_relations(bundle, enrichment)
+    relations = _canonical_relations(bundle, chunks) + _semantic_relations(
+        bundle, enrichment
+    )
     triplet_nodes, triplet_links = _triplet_datapoints(
         bundle,
         nodes,
@@ -281,7 +330,9 @@ def _datapoint_label(node: PaperOSDataPoint) -> str:
     return node.canonical_id
 
 
-def _canonical_relations(bundle: CanonicalBundle) -> list[RelationRecord]:
+def _canonical_relations(
+    bundle: CanonicalBundle, chunks: list[Chunk]
+) -> list[RelationRecord]:
     document_id = bundle.document.id
     relations: list[RelationRecord] = []
     for section in bundle.sections:
@@ -292,7 +343,7 @@ def _canonical_relations(bundle: CanonicalBundle) -> list[RelationRecord]:
                 relation_type=RelationType.HAS_SECTION,
             )
         )
-    for chunk in bundle.chunks:
+    for chunk in chunks:
         relations.append(
             RelationRecord(
                 source_id=chunk.section_id or document_id,

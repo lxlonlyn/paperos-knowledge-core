@@ -155,7 +155,6 @@ class MinerUCanonicalMapper:
             document=document,
             sections=sections,
             elements=elements,
-            chunks=[],
             references=references,
             warnings=warnings,
         )

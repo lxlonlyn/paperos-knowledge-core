@@ -56,9 +56,6 @@ def _contains_concept(searchable: str, concept: str) -> bool:
 
 def _assert_case(case: dict, response: QueryResponse) -> None:
     assert response.profile.value == case["profile"]
-    # First version runs the raw query through profile mapping only.
-    assert response.expansion.lexical_queries == []
-    assert response.expansion.semantic_queries == []
     assert set(case.get("required_channels", [])) <= set(response.channels_used)
     assert set(case.get("required_stages", [])) <= set(response.stages)
     assert response.provenance_complete is True
@@ -93,10 +90,6 @@ def _assert_case(case: dict, response: QueryResponse) -> None:
         [
             response.answer,
             *(evidence.text for evidence in response.evidence),
-            *response.expansion.lexical_queries,
-            *response.expansion.semantic_queries,
-            *response.expansion.entity_queries,
-            *response.expansion.relation_queries,
         ]
     ).casefold()
     for group in case.get("required_evidence_groups", []):

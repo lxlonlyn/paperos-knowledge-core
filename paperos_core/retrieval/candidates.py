@@ -46,20 +46,6 @@ class QueryPlan(BaseModel):
     weights: dict[str, float]
 
 
-class ExpansionTrace(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    model: str
-    lexical_queries: list[str]
-    semantic_queries: list[str]
-    entity_queries: list[str]
-    relation_queries: list[str]
-    hyde_text: str
-    raw_output: str
-    planner_model: str | None = None
-    planner_raw_output: str | None = None
-
-
 class Candidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -120,7 +106,6 @@ class QueryResponse(BaseModel):
     answer_model: str
     stages: list[str]
     channels_used: list[str]
-    expansion: ExpansionTrace
     evidence: list[Evidence]
     candidates: list[Candidate]
     distinct_documents: int
