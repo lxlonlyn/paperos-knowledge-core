@@ -102,6 +102,74 @@ def test_sections_are_never_crossed() -> None:
         assert span_sections <= {chunk.section_id}
 
 
+def test_two_short_sections_are_never_merged() -> None:
+    first = _section("section_first", 0, "First")
+    second = _section("section_second", 1, "Second")
+    elements = [
+        _element(
+            f"first_{index}",
+            ElementType.PARAGRAPH,
+            index,
+            text="short ",
+            section_id=first.id,
+        )
+        for index in range(2)
+    ] + [
+        _element(
+            f"second_{index}",
+            ElementType.PARAGRAPH,
+            index,
+            text="tiny ",
+            section_id=second.id,
+        )
+        for index in range(2)
+    ]
+    chunks = build_chunks(
+        document_id="doc_test",
+        snapshot_id="snapshot_test",
+        sections=[first, second],
+        elements=elements,
+        target_tokens=100,
+        overlap_tokens=0,
+        tokenizer=TOKENIZER,
+    )
+    assert len(chunks) == 2
+    assert {chunk.section_id for chunk in chunks} == {first.id, second.id}
+    assert not any(
+        first.id in chunk.element_ids and second.id in chunk.element_ids
+        for chunk in chunks
+    )
+
+
+def test_overlap_never_exceeds_target_token_limit() -> None:
+    section = _section("section_intro", 0, "Introduction")
+    elements = [
+        _element(
+            f"element_{index}",
+            ElementType.PARAGRAPH,
+            index,
+            text="word " * 4,
+            section_id=section.id,
+        )
+        for index in range(14)
+    ]
+    chunks = build_chunks(
+        document_id="doc_test",
+        snapshot_id="snapshot_test",
+        sections=[section],
+        elements=elements,
+        target_tokens=16,
+        overlap_tokens=6,
+        tokenizer=TOKENIZER,
+    )
+    assert len(chunks) > 2
+    assert all(chunk.token_count and chunk.token_count <= 16 for chunk in chunks)
+    for chunk in chunks:
+        assert len(chunk.element_span_ids) == len(set(chunk.element_span_ids))
+        for span_id in chunk.overlap_element_span_ids:
+            assert span_id in chunk.element_span_ids
+
+
 def test_oversized_element_is_split_into_span_identified_chunks() -> None:
     section = _section("section_intro", 0, "Introduction")
     element = _element(
@@ -185,6 +253,48 @@ def test_formula_includes_caption_and_section_context() -> None:
     assert "L = \\sum_i" in texts
     assert "Caption: Equation 1" in texts
     assert "Section: Math" in texts
+
+
+def test_table_formula_and_oversized_paragraph_respect_token_limits() -> None:
+    section = _section("section_mixed", 0, "Mixed")
+    elements = [
+        _element(
+            "element_table",
+            ElementType.TABLE,
+            0,
+            markdown="| a | b |\n| --- | --- |\n| 1 | 2 |",
+            section_id=section.id,
+        ),
+        _element(
+            "element_formula",
+            ElementType.FORMULA,
+            1,
+            latex="E = mc^2",
+            section_id=section.id,
+        ),
+        _element(
+            "element_long",
+            ElementType.PARAGRAPH,
+            2,
+            text=("long " * 300).strip(),
+            section_id=section.id,
+        ),
+    ]
+    chunks = build_chunks(
+        document_id="doc_test",
+        snapshot_id="snapshot_test",
+        sections=[section],
+        elements=elements,
+        target_tokens=20,
+        overlap_tokens=4,
+        tokenizer=TOKENIZER,
+    )
+    assert chunks
+    assert all(chunk.token_count and chunk.token_count <= 20 for chunk in chunks)
+    all_text = " ".join(chunk.text for chunk in chunks)
+    assert "[Table]" in all_text
+    assert "[Formula]" in all_text
+    assert "E = mc^2" in all_text
 
 
 def test_overlap_records_exact_source_spans() -> None:

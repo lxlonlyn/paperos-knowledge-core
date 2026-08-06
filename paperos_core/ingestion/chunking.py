@@ -112,7 +112,9 @@ def build_chunks(
         grouped.setdefault(element.section_id, []).append(element)
 
     separator_tokens = max(1, count("\n\n"))
-    ordered_spans: list[ElementSpan] = []
+    section_spans: dict[str | None, list[ElementSpan]] = {
+        section_id: [] for section_id in [None, *(section.id for section in sections)]
+    }
     section_order: list[str | None] = [None, *(section.id for section in sections)]
     for section_id in section_order:
         rows = sorted(
@@ -126,7 +128,7 @@ def build_chunks(
                 elements_by_id,
                 section.title if section else None,
             )
-            ordered_spans.extend(
+            section_spans[section_id].extend(
                 _element_spans(
                     element,
                     text,
@@ -137,53 +139,21 @@ def build_chunks(
                 )
             )
 
-    pending: list[ElementSpan] = []
-    pending_tokens = 0
-    overlap: list[ElementSpan] = []
-    overlap_source_chunk_ids: list[str] = []
     built: list[Chunk] = []
     character_cursor = 0
-    for span in ordered_spans:
-        extra = span.tokens + (separator_tokens if pending else 0)
-        if pending and pending_tokens + extra > target_tokens:
-            built.append(
-                _make_chunk(
-                    document_id=document_id,
-                    snapshot_id=snapshot_id,
-                    order=len(built),
-                    spans=pending,
-                    count=count,
-                    separator_tokens=separator_tokens,
-                    character_cursor=character_cursor,
-                    overlap_source_chunk_ids=overlap_source_chunk_ids,
-                    overlap_spans=overlap,
-                )
-            )
-            character_cursor += _text_length(pending) + 2
-            overlap = _overlap_tail(pending, count, overlap_tokens, separator_tokens)
-            overlap_source_chunk_ids = (
-                [built[-1].id] if overlap else []
-            )
-            pending = list(overlap)
-            pending_tokens = sum(item.tokens for item in pending) + (
-                separator_tokens * max(0, len(pending) - 1)
-            )
-        pending.append(span)
-        pending_tokens += extra
-    if pending:
-        built.append(
-            _make_chunk(
-                document_id=document_id,
-                snapshot_id=snapshot_id,
-                order=len(built),
-                spans=pending,
-                count=count,
-                separator_tokens=separator_tokens,
-                character_cursor=character_cursor,
-                overlap_source_chunk_ids=overlap_source_chunk_ids,
-                overlap_spans=overlap,
-            )
+    for section_id in section_order:
+        chunks, character_cursor = _pack_section(
+            section_spans[section_id],
+            document_id=document_id,
+            snapshot_id=snapshot_id,
+            target_tokens=target_tokens,
+            overlap_tokens=overlap_tokens,
+            count=count,
+            separator_tokens=separator_tokens,
+            start_order=len(built),
+            character_cursor=character_cursor,
         )
+        built.extend(chunks)
     return [
         chunk.model_copy(
             update={
@@ -195,6 +165,82 @@ def build_chunks(
         )
         for index, chunk in enumerate(built)
     ]
+
+
+def _pack_section(
+    spans: list[ElementSpan],
+    *,
+    document_id: str,
+    snapshot_id: str,
+    target_tokens: int,
+    overlap_tokens: int,
+    count: Any,
+    separator_tokens: int,
+    start_order: int,
+    character_cursor: int,
+) -> tuple[list[Chunk], int]:
+    """Pack one section's spans into chunks, never crossing the section."""
+    built: list[Chunk] = []
+    pending: list[ElementSpan] = []
+    pending_overlap_spans: list[ElementSpan] = []
+    pending_overlap_source: list[str] = []
+    overlap_candidate: list[ElementSpan] = []
+    overlap_source_candidate: list[str] = []
+    cursor = character_cursor
+
+    def flush() -> None:
+        nonlocal cursor
+        if not pending:
+            return
+        built.append(
+            _make_chunk(
+                document_id=document_id,
+                snapshot_id=snapshot_id,
+                order=start_order + len(built),
+                spans=list(pending),
+                count=count,
+                separator_tokens=separator_tokens,
+                character_cursor=cursor,
+                overlap_source_chunk_ids=pending_overlap_source,
+                overlap_spans=pending_overlap_spans,
+            )
+        )
+        cursor += _text_length(pending) + 2
+
+    for span in spans:
+        if pending and _tokens([*pending, span], separator_tokens) > target_tokens:
+            flushed = list(pending)
+            flush()
+            pending = []
+            pending_overlap_spans = []
+            pending_overlap_source = []
+            overlap_candidate = _overlap_tail(
+                flushed, count, overlap_tokens, separator_tokens
+            )
+            overlap_source_candidate = (
+                [built[-1].id] if overlap_candidate else []
+            )
+        if not pending and overlap_candidate:
+            # Carry overlap only when the incoming span still fits the limit;
+            # otherwise drop it instead of emitting a duplicated chunk or
+            # crossing the token budget.
+            if _tokens([*overlap_candidate, span], separator_tokens) <= target_tokens:
+                pending = list(overlap_candidate)
+                pending_overlap_spans = list(overlap_candidate)
+                pending_overlap_source = overlap_source_candidate
+            overlap_candidate = []
+            overlap_source_candidate = []
+        pending.append(span)
+    flush()
+    return built, cursor
+
+
+def _tokens(spans: list[ElementSpan], separator_tokens: int) -> int:
+    if not spans:
+        return 0
+    return sum(span.tokens for span in spans) + (
+        separator_tokens * (len(spans) - 1)
+    )
 
 
 def _element_text(
