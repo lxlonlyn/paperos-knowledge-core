@@ -7,7 +7,10 @@ from pathlib import Path
 
 from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
 from paperos_core.adapters.cognee.config import configure_cognee
-from paperos_core.config import load_settings
+from paperos_core.config import CogneeEmbeddingSettings, EmbeddingSettings, load_settings
+from paperos_core.paths import build_data_paths
+from paperos_core.runtime.local_inference.client import LocalInferenceClient
+from paperos_core.runtime.local_inference.runtime import LocalInferenceRuntime
 
 _TRACKED_ENV = (
     "LLM_PROVIDER",
@@ -120,3 +123,61 @@ local_runtime = true
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+
+def test_local_runtime_starts_when_embedding_or_reranker_is_local(
+    gate1_run_dir: Path,
+) -> None:
+    paths = build_data_paths(gate1_run_dir / "local-runtime-condition")
+    client = LocalInferenceClient("http://127.0.0.1:1", 1)
+    remote = _load(
+        gate1_run_dir,
+        f'''[data]
+directory = "{gate1_run_dir / 'provider-data-remote'}"
+dataset = "papers"
+[llm]
+provider = "custom"
+model = "example-model"
+endpoint = "https://api.example.com/v1"
+[cognee.embedding]
+provider = "openai"
+model = "text-embedding-3-small"
+endpoint = "https://api.openai.com/v1"
+local_runtime = false
+''',
+    )
+    assert LocalInferenceRuntime(remote, paths, client).required is False
+    rerank_local = remote.model_copy(
+        update={
+            "retrieval": remote.retrieval.model_copy(update={"rerank_enabled": True})
+        }
+    )
+    assert LocalInferenceRuntime(rerank_local, paths, client).required is True
+    embedding_local = _load(
+        gate1_run_dir,
+        f'''[data]
+directory = "{gate1_run_dir / 'provider-data-embedding-local'}"
+dataset = "papers"
+[llm]
+provider = "custom"
+model = "example-model"
+endpoint = "https://api.example.com/v1"
+[cognee.embedding]
+provider = "openai_compatible"
+model = "default"
+endpoint = ""
+local_runtime = true
+''',
+    )
+    assert LocalInferenceRuntime(embedding_local, paths, client).required is True
+
+
+def test_embedding_parameters_have_a_single_owner() -> None:
+    local_fields = set(EmbeddingSettings.model_fields)
+    assert {"model_path", "sha256"} <= local_fields
+    assert "model" not in local_fields
+    assert "dimensions" not in local_fields
+    assert "max_tokens" not in local_fields
+    cognee_fields = set(CogneeEmbeddingSettings.model_fields)
+    assert {"provider", "model", "dimensions", "max_tokens"} <= cognee_fields
+    assert "local_runtime" in cognee_fields

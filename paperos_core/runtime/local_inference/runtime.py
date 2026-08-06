@@ -48,8 +48,11 @@ class LocalInferenceRuntime:
 
     @property
     def required(self) -> bool:
-        """Whether the configured Cognee embedding selects the local runtime."""
-        return self.settings.cognee.embedding.local_runtime
+        """Start the child when local embedding or the local reranker is enabled."""
+        return (
+            self.settings.cognee.embedding.local_runtime
+            or self.settings.retrieval.rerank_enabled
+        )
 
     def _model_path(
         self, configured: Path, *, label: str, expected_sha256: str | None
@@ -96,6 +99,7 @@ class LocalInferenceRuntime:
             label="embedding",
             expected_sha256=local.embedding.sha256,
         )
+        embedding = self.settings.cognee.embedding
         reranker_enabled = self.settings.retrieval.rerank_enabled
         reranker_path = (
             self._model_path(
@@ -116,8 +120,9 @@ class LocalInferenceRuntime:
                 "PAPEROS_LOCAL_INFERENCE_HOST": local.host,
                 "PAPEROS_LOCAL_INFERENCE_PORT": str(local.port),
                 "PAPEROS_EMBEDDING_MODEL_PATH": str(model_path),
-                "PAPEROS_EMBEDDING_DIMENSIONS": str(local.embedding.dimensions),
-                "PAPEROS_EMBEDDING_MAX_TOKENS": str(local.embedding.max_tokens),
+                "PAPEROS_EMBEDDING_MODEL_NAME": embedding.model,
+                "PAPEROS_EMBEDDING_DIMENSIONS": str(embedding.dimensions),
+                "PAPEROS_EMBEDDING_MAX_TOKENS": str(embedding.max_tokens),
                 "PAPEROS_RERANKER_ENABLED": "true" if reranker_enabled else "false",
                 **(
                     {"PAPEROS_RERANKER_MODEL_PATH": str(reranker_path)}

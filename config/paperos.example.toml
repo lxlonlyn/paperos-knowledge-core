@@ -25,9 +25,6 @@ startup_timeout_seconds = 180
 
 [local_inference.embedding]
 model_path = "../data/models/embedding/embeddinggemma-300M-Q8_0.gguf"
-model = "default"
-dimensions = 768
-max_tokens = 2048
 
 [local_inference.reranker]
 model_path = "../data/models/reranker/qwen3-reranker-0.6b-q8_0.gguf"

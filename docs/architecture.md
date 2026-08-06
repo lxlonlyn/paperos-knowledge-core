@@ -34,10 +34,13 @@ PaperOS services.
 ### A5: Private local inference runtime
 
 The Node embedding and optional-reranking runtime is a private child process.
-It starts only when the Cognee embedding configuration selects the PaperOS
-local runtime; with a remote embedding provider, PaperOS never checks or loads
-local GGUF files. The Application lifecycle starts it, waits for readiness, and
-stops it. Its loopback HTTP port is an implementation detail.
+It starts when the Cognee embedding configuration selects the PaperOS local
+runtime or when the local reranker is enabled; with a fully remote
+configuration, PaperOS never checks or loads local GGUF files. Embedding
+provider/model/dimensions/token limits live in ``[cognee.embedding]``, while
+``[local_inference]`` owns file paths, Node parameters, and the loopback port.
+The Application lifecycle starts it, waits for readiness, and stops it. Its
+loopback HTTP port is an implementation detail.
 
 ### A6: Worker ownership
 

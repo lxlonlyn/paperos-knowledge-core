@@ -72,10 +72,9 @@ class IngestionSettings(StrictSettings):
 
 
 class EmbeddingSettings(StrictSettings):
+    """Local GGUF file identity only; provider params live in [cognee.embedding]."""
+
     model_path: Path = Path("models/embedding/embeddinggemma-300M-Q8_0.gguf")
-    model: str = "default"
-    dimensions: int = Field(default=768, gt=0)
-    max_tokens: int = Field(default=2048, gt=0)
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
 
 
