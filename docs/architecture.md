@@ -115,7 +115,7 @@ ingestion, retrieval, and API settings. `MINERU_API_KEY` and `LLM_API_KEY` are
 environment-only secrets. Relative GGUF paths are resolved from the TOML
 directory rather than the mutable runtime data directory.
 
-Only `configure_cognee(CogneeSettings)` translates PaperOS settings into the
+Only `configure_cognee(RuntimeSettings)` translates PaperOS settings into the
 environment variables required by Cognee. Cognee does not read a separate
 project configuration source. `LLMClient` receives `LLMSettings` directly and
 reaches the provider only through `cognee.infrastructure.llm.LLMGateway`;

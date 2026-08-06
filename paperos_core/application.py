@@ -133,11 +133,11 @@ def create_application(settings: RuntimeSettings) -> Application:
         )
     from paperos_core.adapters.cognee.config import configure_cognee
 
-    configure_cognee(settings.cognee)
+    configure_cognee(settings)
     from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
 
     compat = CogneeCompatibilityAdapter(paths)
-    compat.reset_configuration_caches()
+    CogneeCompatibilityAdapter.reset_configuration_caches()
     from paperos_core.adapters.cognee.pipeline import CogneePipelineAdapter
     from paperos_core.adapters.cognee.search import CogneeSearchAdapter
     from paperos_core.adapters.llm import LLMClient

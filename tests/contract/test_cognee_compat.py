@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -160,3 +161,22 @@ def test_search_and_pipeline_adapter_entry_points() -> None:
 
     assert callable(CogneePipelineAdapter)
     assert callable(CogneeSearchAdapter)
+
+
+def test_reset_configuration_caches_invalidates_cognee_llm_cache() -> None:
+    """PaperOS env changes must be observable after reset, not a stale cache."""
+    from cognee.infrastructure.llm.config import get_llm_config
+
+    from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
+
+    previous = os.environ.get("LLM_MODEL")
+    try:
+        os.environ["LLM_MODEL"] = "contract-test-model"
+        CogneeCompatibilityAdapter.reset_configuration_caches()
+        assert get_llm_config().llm_model == "contract-test-model"
+    finally:
+        if previous is None:
+            os.environ.pop("LLM_MODEL", None)
+        else:
+            os.environ["LLM_MODEL"] = previous
+        get_llm_config.cache_clear()

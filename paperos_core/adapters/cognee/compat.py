@@ -96,7 +96,8 @@ class CogneeCompatibilityAdapter:
         self.paths = paths
         self.manifest_root = paths.cognee / "manifests"
 
-    def reset_configuration_caches(self) -> None:
+    @staticmethod
+    def reset_configuration_caches() -> None:
         """Make Cognee observe the environment installed by ``configure_cognee``."""
         from cognee.base_config import get_base_config  # type: ignore[import-untyped]
         from cognee.infrastructure.databases.graph.config import (  # type: ignore[import-untyped]
@@ -111,9 +112,17 @@ class CogneeCompatibilityAdapter:
         from cognee.infrastructure.databases.vector.embeddings.config import (  # type: ignore[import-untyped]
             get_embedding_config,
         )
+        from cognee.infrastructure.llm.config import (  # type: ignore[import-untyped]
+            get_llm_config,
+        )
 
         get_base_config.cache_clear()
         get_graph_config.cache_clear()
+        # Cognee caches the first LLMConfig() forever; without clearing it,
+        # PaperOS's configure_cognee environment changes are ignored after the
+        # first LLM call in the process (health checks would keep using the
+        # originally cached provider/model).
+        get_llm_config.cache_clear()
         get_relational_config.cache_clear()
         get_vectordb_config.cache_clear()
         get_embedding_config.cache_clear()

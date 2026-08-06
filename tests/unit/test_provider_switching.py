@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
 from paperos_core.adapters.cognee.config import configure_cognee
 from paperos_core.config import load_settings
 
@@ -64,7 +65,8 @@ local_runtime = false
     )
     saved = {name: os.environ.get(name) for name in _TRACKED_ENV}
     try:
-        configure_cognee(settings.cognee)
+        configure_cognee(settings)
+        CogneeCompatibilityAdapter.reset_configuration_caches()
         assert os.environ["LLM_PROVIDER"] == "openai"
         assert os.environ["LLM_MODEL"] == "openai/gpt-5-mini"
         assert os.environ["LLM_API_KEY"] == "llm-key"
@@ -104,7 +106,8 @@ local_runtime = true
     )
     saved = {name: os.environ.get(name) for name in _TRACKED_ENV}
     try:
-        configure_cognee(settings.cognee)
+        configure_cognee(settings)
+        CogneeCompatibilityAdapter.reset_configuration_caches()
         assert (
             os.environ["EMBEDDING_ENDPOINT"]
             == f"http://{settings.local_inference.host}:{settings.local_inference.port}/v1"

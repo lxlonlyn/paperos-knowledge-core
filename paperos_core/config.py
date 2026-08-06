@@ -120,7 +120,6 @@ class CogneeSettings(StrictSettings):
     embedding: CogneeEmbeddingSettings = Field(
         default_factory=CogneeEmbeddingSettings
     )
-    llm: LLMSettings = Field(default_factory=LLMSettings, exclude=True)
     local_inference: LocalInferenceSettings = Field(
         default_factory=LocalInferenceSettings, exclude=True
     )
@@ -284,12 +283,7 @@ def load_settings(
             ),
         }
     )
-    cognee = settings.cognee.model_copy(
-        update={
-            "llm": settings.llm,
-            "local_inference": local,
-        }
-    )
+    cognee = settings.cognee.model_copy(update={"local_inference": local})
     return settings.model_copy(
         update={
             "cognee": cognee,
