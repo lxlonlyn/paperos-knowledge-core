@@ -160,9 +160,13 @@ MinerU -> Canonical Document / Section / Element / Reference
 ```
 
 PaperOS decides the academic chunking rules; Cognee executes the pipeline and
-provides the tokenizer, token limits, and the final DataPoint write. Dataset,
-Data item, User, and PipelineRun context is Cognee-owned and no longer managed
-by PaperOS ORM code.
+provides the tokenizer, token limits, and the final DataPoint write. Cognee's
+public pipeline auto-creates the dataset and logs pipeline runs. Stable
+data-item provenance (the relational Data row and DatasetData association
+that ``add_data_points`` attributes nodes and edges to) is not auto-established
+for custom canonical input: the provenance spike contract proves it, and the
+minimal private registration stays centralized in
+``paperos_core/adapters/cognee/compat.py``.
 
 Retrieval calls Cognee's public search/recall surface:
 

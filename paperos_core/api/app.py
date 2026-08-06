@@ -29,7 +29,9 @@ def create_app(settings: RuntimeSettings) -> FastAPI:
             raise RuntimeError("PaperOS Application was already constructed for this server.")
         application = create_application(settings)
         app.state.paperos = application
-        _include_cognee_routers(app)
+        from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
+
+        CogneeCompatibilityAdapter.include_cognee_routers(app)
         try:
             await application.start()
             yield
@@ -55,27 +57,3 @@ def create_app(settings: RuntimeSettings) -> FastAPI:
     ):
         api.include_router(router)
     return api
-
-
-def _include_cognee_routers(app: FastAPI) -> None:
-    if getattr(app.state, "cognee_routes_attached", False):
-        return
-    from cognee.api.v1.datasets.routers import (  # type: ignore[import-untyped]
-        get_datasets_router,
-    )
-    from cognee.api.v1.users.routers import (  # type: ignore[import-untyped]
-        get_visualize_router,
-    )
-    from cognee.modules.users.methods import (  # type: ignore[import-untyped]
-        get_authenticated_user,
-        get_default_user,
-    )
-
-    app.dependency_overrides[get_authenticated_user] = get_default_user
-    app.include_router(
-        get_datasets_router(), prefix="/api/v1/datasets", tags=["cognee-datasets"]
-    )
-    app.include_router(
-        get_visualize_router(), prefix="/api/v1/visualize", tags=["cognee-visualize"]
-    )
-    app.state.cognee_routes_attached = True

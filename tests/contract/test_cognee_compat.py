@@ -40,10 +40,13 @@ def test_pinned_cognee_version_contract() -> None:
 
 def test_business_code_uses_only_the_sanctioned_cognee_surface() -> None:
     sanctioned = {
-        "cognee",  # top-level public API (search, recall, run_custom_pipeline)
+        # Top-level public API (search, recall, run_custom_pipeline) only;
+        # ``cognee.<submodule>`` paths must be individually sanctioned below.
+        "cognee",
         "cognee.infrastructure.llm",  # LLMGateway (explicit task requirement)
         "cognee.infrastructure.llm.utils",  # test_llm_connection health check
         "cognee.infrastructure.llm.tokenizer.resolver",  # Cognee-provided tokenizer
+        "cognee.infrastructure.engine",  # DataPoint base class for custom pipelines
     }
     import_pattern = re.compile(r"^\s*(?:from|import)\s+(cognee(?:\.[\w.]+)?)")
     violations: list[str] = []
@@ -53,10 +56,14 @@ def test_business_code_uses_only_the_sanctioned_cognee_surface() -> None:
             if match is None:
                 continue
             imported = match.group(1)
-            if not any(
+            if imported == "cognee":
+                continue
+            allowed = any(
                 imported == item or imported.startswith(f"{item}.")
                 for item in sanctioned
-            ):
+                if item != "cognee"
+            )
+            if not allowed:
                 violations.append(f"{path.relative_to(ROOT)}:{number}: {line.strip()}")
     assert not violations, "\n".join(violations)
 

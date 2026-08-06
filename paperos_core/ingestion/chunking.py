@@ -60,20 +60,9 @@ class ElementSpan:
 
 def resolve_cognee_tokenizer() -> Any:
     """Resolve the tokenizer Cognee would use for the configured embedding model."""
-    from cognee.infrastructure.databases.vector.embeddings.config import (  # type: ignore[import-untyped]
-        get_embedding_config,
-    )
-    from cognee.infrastructure.llm.tokenizer.resolver import (  # type: ignore[import-untyped]
-        resolve_embedding_tokenizer,
-    )
+    from paperos_core.adapters.cognee.compat import resolve_cognee_tokenizer as _resolve
 
-    config = get_embedding_config()
-    return resolve_embedding_tokenizer(
-        provider=config.embedding_provider,
-        model=config.embedding_model,
-        max_completion_tokens=config.embedding_max_completion_tokens,
-        huggingface_tokenizer=config.huggingface_tokenizer,
-    )
+    return _resolve()
 
 
 def build_chunks(

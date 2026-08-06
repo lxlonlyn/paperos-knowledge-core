@@ -78,13 +78,9 @@ class DerivedDataRebuilder:
         )
 
     async def _delete_derived_data(self) -> list[Path]:
-        from cognee.modules.data.deletion import (  # type: ignore[import-untyped]
-            prune_data,
-            prune_system,
-        )
+        from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
 
-        await prune_data()
-        await prune_system(graph=True, vector=True, metadata=True, cache=True)
+        await CogneeCompatibilityAdapter.prune_derived_data()
         targets = [
             self.paths.indexes / "lexical.sqlite3",
             # Remove pre-v2 duplicate vector projections during destructive rebuild.

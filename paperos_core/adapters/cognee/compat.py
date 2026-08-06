@@ -39,6 +39,24 @@ from paperos_core.errors import CogneeStorageError
 from paperos_core.paths import DataPaths
 
 
+def resolve_cognee_tokenizer() -> Any:
+    """Resolve the tokenizer Cognee would use for the configured embedding model."""
+    from cognee.infrastructure.databases.vector.embeddings.config import (  # type: ignore[import-untyped]
+        get_embedding_config,
+    )
+    from cognee.infrastructure.llm.tokenizer.resolver import (  # type: ignore[import-untyped]
+        resolve_embedding_tokenizer,
+    )
+
+    config = get_embedding_config()
+    return resolve_embedding_tokenizer(
+        provider=config.embedding_provider,
+        model=config.embedding_model,
+        max_completion_tokens=config.embedding_max_completion_tokens,
+        huggingface_tokenizer=config.huggingface_tokenizer,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CogneeVectorHit:
     cognee_id: str
@@ -85,10 +103,10 @@ class PipelineItem:
     custom tasks.
     """
 
-    id: UUID
-    data_id: UUID
-    bundle: Any
-    source: SourceFile
+    id: UUID | None = None
+    data_id: UUID | None = None
+    bundle: Any = None
+    source: SourceFile | None = None
 
 
 class CogneeCompatibilityAdapter:
@@ -447,10 +465,24 @@ class CogneeCompatibilityAdapter:
         self,
         *,
         dataset_id: UUID,
-        data_id: UUID,
+        data_id: UUID | None,
         pipeline_run_id: UUID,
     ) -> CogneeDatasetBinding:
         """Count provenance-attributed nodes/edges for one PaperOS PDF."""
+        if data_id is None:
+            return CogneeDatasetBinding(
+                user_id="",
+                dataset_id=str(dataset_id),
+                dataset_name="",
+                data_id="",
+                data_name="",
+                pipeline_id="",
+                pipeline_run_id=str(pipeline_run_id),
+                pipeline_name="paperos_knowledge_ingestion",
+                provenance_backend="none",
+                provenance_node_count=0,
+                provenance_edge_count=0,
+            )
         from cognee.infrastructure.databases.graph.get_graph_engine import (  # type: ignore[import-untyped]
             get_graph_engine,
         )
@@ -634,6 +666,40 @@ class CogneeCompatibilityAdapter:
         if not isinstance(payload, dict):
             raise CogneeStorageError("Invalid Cognee manifest.", affected=path)
         return payload
+
+    @staticmethod
+    def include_cognee_routers(app: Any) -> None:
+        """Attach Cognee's dataset/visualize routers with the default user."""
+        from cognee.api.v1.datasets.routers import (  # type: ignore[import-untyped]
+            get_datasets_router,
+        )
+        from cognee.api.v1.users.routers import (  # type: ignore[import-untyped]
+            get_visualize_router,
+        )
+        from cognee.modules.users.methods import (  # type: ignore[import-untyped]
+            get_authenticated_user,
+            get_default_user,
+        )
+
+        app.dependency_overrides[get_authenticated_user] = get_default_user
+        app.include_router(
+            get_datasets_router(), prefix="/api/v1/datasets", tags=["cognee-datasets"]
+        )
+        app.include_router(
+            get_visualize_router(), prefix="/api/v1/visualize", tags=["cognee-visualize"]
+        )
+        app.state.cognee_routes_attached = True
+
+    @staticmethod
+    async def prune_derived_data() -> None:
+        """Destructively prune Cognee's derived graph/vector/metadata stores."""
+        from cognee.modules.data.deletion import (  # type: ignore[import-untyped]
+            prune_data,
+            prune_system,
+        )
+
+        await prune_data()
+        await prune_system(graph=True, vector=True, metadata=True, cache=True)
 
 
 def _close_subprocess_queues(session: Any) -> None:
