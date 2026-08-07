@@ -1,4 +1,4 @@
-"""Local PDF validation and checksum calculation for Gate 1."""
+"""Local PDF validation and checksum calculation."""
 
 from __future__ import annotations
 

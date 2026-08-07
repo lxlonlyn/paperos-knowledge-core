@@ -7,8 +7,5 @@ pydantic==2.13.4
 python-multipart==0.0.32
 
 # Development and validation tools
-pytest==9.1.1
-pytest-asyncio==1.4.0
-pytest-cov==7.1.0
 ruff==0.16.0
 mypy==2.3.0

@@ -1,4 +1,4 @@
-"""Destructive, scoped rebuild of derived Gate 4 data."""
+"""Destructive, scoped rebuild of derived knowledge projections."""
 
 from __future__ import annotations
 
@@ -81,11 +81,7 @@ class DerivedDataRebuilder:
         from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
 
         await CogneeCompatibilityAdapter.prune_derived_data()
-        targets = [
-            self.paths.indexes / "lexical.sqlite3",
-            # Remove pre-v2 duplicate vector projections during destructive rebuild.
-            self.paths.indexes / "vectors.sqlite3",
-        ]
+        targets = [self.paths.indexes / "lexical.sqlite3"]
         targets.extend((self.paths.indexes / "manifests").glob("*.json"))
         targets.extend((self.paths.cognee / "manifests").glob("*.json"))
         targets.extend((self.paths.cognee / "graphs").glob("*.json"))

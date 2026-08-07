@@ -21,8 +21,8 @@ There are no `paperos serve`, `paperos model-gateway`, `paperos worker`, or
 
 ### A3: External services
 
-PaperOS configures, checks, and calls MinerU and the LLM provider selected by
-Cognee configuration. It never starts or manages them. PaperOS business code
+PaperOS configures and calls MinerU, and checks/calls the LLM provider selected
+by Cognee configuration. It never starts or manages external providers. PaperOS business code
 does not know the LLM vendor: all model calls go through Cognee's LLMGateway.
 
 ### A4: Internal libraries and stores
@@ -34,11 +34,13 @@ PaperOS services.
 ### A5: Private local inference runtime
 
 The Node embedding and optional-reranking runtime is a private child process.
-It starts when the Cognee embedding configuration selects the PaperOS local
-runtime or when the local reranker is enabled; with a fully remote
+It starts only when `[local_inference].enabled=true` and the Cognee embedding
+endpoint selects its loopback port or the local reranker is enabled; with a fully remote
 configuration, PaperOS never checks or loads local GGUF files. Embedding
-provider/model/dimensions/token limits live in ``[cognee.embedding]``, while
-``[local_inference]`` owns file paths, Node parameters, and the loopback port.
+provider/model/dimensions/token limits live in Cognee's ``.env``, while
+``[local_inference]`` owns enablement, GGUF paths, timeouts, the loopback port,
+and the CUDA device allowlist. PaperOS passes that allowlist to its Node child
+through ``CUDA_VISIBLE_DEVICES``; the child cannot allocate on other GPUs.
 The Application lifecycle starts it, waits for readiness, and stops it. Its
 loopback HTTP port is an implementation detail.
 
@@ -112,17 +114,13 @@ rebuild, reprocess, and improve jobs. It never holds the Application.
 
 ## Configuration ownership
 
-`config/paperos.toml` is the only structured configuration. It owns data,
-MinerU, the provider-neutral `[llm]` section, local inference, Cognee,
-ingestion, retrieval, and API settings. `MINERU_API_KEY` and `LLM_API_KEY` are
-environment-only secrets. Relative GGUF paths are resolved from the TOML
-directory rather than the mutable runtime data directory.
-
-Only `configure_cognee(RuntimeSettings)` translates PaperOS settings into the
-environment variables required by Cognee. Cognee does not read a separate
-project configuration source. `LLMClient` receives `LLMSettings` directly and
-reaches the provider only through `cognee.infrastructure.llm.LLMGateway`;
-switching LLM, embedding, vector, or graph providers is configuration-only.
+`config/paperos.toml` owns only data, MinerU, local inference, ingestion,
+retrieval, and API settings. A MinerU key may be stored as a Pydantic
+`SecretStr` in the git-ignored real TOML and is excluded from serialization.
+Cognee exclusively owns and loads `.env`, including LLM, embedding, relational,
+vector, and graph settings. PaperOS never parses, translates, or overwrites
+those values. `CogneeRuntimeConfigReader` exposes a credential-free, read-only
+snapshot for health, doctor, local-runtime activation, and actual metadata.
 
 ## Storage and schema
 
@@ -135,7 +133,7 @@ All runtime data stays under `data.directory`:
 - `raw/`: immutable source PDFs and SourceFile identity;
 - `parsed/`: immutable ParseRun artifacts;
 - `canonical/`: versioned canonical snapshots;
-- `cognee/`: graph, vector, metadata, enrichment, and manifests;
+- `cognee/`: PaperOS-owned Cognee projection artifacts, enrichment, and manifests;
 - `indexes/`: SQLite FTS and index manifests;
 - `jobs/`: registries, queue, and managed-process records;
 - `cache/`, `logs/`, and `tmp/`: rebuildable or managed runtime data.
@@ -160,7 +158,7 @@ MinerU -> Canonical Document / Section / Element / Reference
 ```
 
 PaperOS decides the academic chunking rules; Cognee executes the pipeline and
-provides the tokenizer, token limits, and the final DataPoint write. Chunks are
+provides the injected tokenizer and final DataPoint write. Chunks are
 formally split from the canonical snapshot: canonical artifacts carry
 document/sections/elements/references only, and the derived
 ``ChunkProjection`` is produced by the pipeline and rebuilt on demand. Cognee's
@@ -174,25 +172,25 @@ minimal private registration stays centralized in
 Retrieval calls Cognee's public search/recall surface:
 
 ```text
-truth        -> FTS5 + GRAPH_COMPLETION restricted to ChunkDataPoint
-associative  -> GRAPH_COMPLETION_DECOMPOSITION + Entity / Claim + typed graph
-comprehensive-> FTS5 + GRAPH_COMPLETION + Cognee recall context + fusion
+truth        -> FTS5 + Cognee CHUNKS lexical/chunk search
+associative  -> graph decomposition + context extension + typed traversal
+comprehensive-> FTS5 + Cognee search + provenance-bearing recall + fusion
 ```
 
 Each profile maps to a real Cognee SearchType, hits are constrained by the
 returned node type, and candidates backtrack through canonical IDs / node IDs
 / source references (never by text-prefix matching). Absent vector distances
-score 0.0 explicitly. PaperOS does not generate query embeddings, open vector
+use Cognee result rank as an explicit rank-based score. PaperOS does not generate query embeddings, open vector
 collections, or retain a duplicate embedding BLOB store. Private Cognee API
 calls are centralized in `paperos_core/adapters/cognee/compat.py` and pinned
-to cognee 1.4.0 by contract tests.
+to Cognee 1.4.0 by the real-case acceptance entry and its runtime boundary checks.
 
 ## Prompt ownership
 
 Markdown files under `prompts/` are the only complete prompt source.
 `PromptRepository` validates prompt names and records version and SHA-256.
-Semantic enrichment manifests contain prompt name, prompt version, prompt
-SHA-256, model, and model version.
+Semantic enrichment manifests contain coverage IDs/ratio, prompt name/version/
+SHA-256, and Cognee's actual provider/model.
 
 ## API organization
 

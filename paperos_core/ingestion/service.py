@@ -20,7 +20,7 @@ from paperos_core.ingestion.validation import validate_pdf
 
 if TYPE_CHECKING:
     from paperos_core.adapters.cognee.pipeline import (
-        CogneePipeline,
+        CogneePipelineAdapter,
         KnowledgeIngestionResult,
     )
 
@@ -36,7 +36,7 @@ class IngestionService:
         mineru: MinerUClient,
         canonical_mapper: MinerUCanonicalMapper,
         canonical_repository: CanonicalRepository,
-        knowledge_pipeline: CogneePipeline | None = None,
+        knowledge_pipeline: CogneePipelineAdapter | None = None,
     ) -> None:
         self.config = config
         self.registry = registry
@@ -85,7 +85,7 @@ class IngestionService:
         user_metadata: dict[str, Any] | None = None,
         requested_options: dict[str, Any] | None = None,
     ) -> ParsedIngestionResult:
-        """Run the cumulative Gate 1 -> Gate 2 path from a genuine PDF."""
+        """Run genuine PDF intake through the live parser artifact stage."""
         intake = self.ingest_pdf(
             path,
             dataset=dataset,
@@ -162,11 +162,11 @@ class IngestionService:
         user_metadata: dict[str, Any] | None = None,
         requested_options: dict[str, Any] | None = None,
     ) -> KnowledgeIngestionResult:
-        """Run the cumulative Gate 1 -> Gate 2 -> Gate 3 -> Gate 4 path."""
+        """Run genuine PDF intake through the complete knowledge pipeline."""
         if self.knowledge_pipeline is None:
             from paperos_core.errors import CogneeConfigurationError
 
-            raise CogneeConfigurationError("Gate 4 knowledge pipeline is not configured.")
+            raise CogneeConfigurationError("Knowledge pipeline is not configured.")
         canonical = await self.ingest_pdf_to_canonical(
             path,
             dataset=dataset,
@@ -209,7 +209,7 @@ class IngestionService:
         user_metadata: dict[str, Any] | None = None,
         requested_options: dict[str, Any] | None = None,
     ) -> CanonicalIngestionResult:
-        """Run the cumulative Gate 1 -> Gate 2 -> Gate 3 path."""
+        """Run genuine PDF intake through canonical transformation."""
         parsed = await self.ingest_pdf_to_parser(
             path,
             dataset=dataset,

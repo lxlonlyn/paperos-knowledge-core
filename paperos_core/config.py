@@ -1,10 +1,13 @@
-"""The single structured PaperOS configuration and environment secret boundary."""
+"""PaperOS-owned structured configuration.
+
+Cognee owns ``.env`` and loads it through its own settings classes.  This
+module deliberately does not read process environment variables or mirror
+Cognee provider/database settings into PaperOS models.
+"""
 
 from __future__ import annotations
 
-import os
 import tomllib
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -51,77 +54,34 @@ class MinerUSettings(StrictSettings):
         return self.api_key.get_secret_value() if self.api_key is not None else None
 
 
-class LLMSettings(StrictSettings):
-    """Provider-neutral LLM settings translated into Cognee's environment."""
-
-    provider: str = "custom"
-    endpoint: str = ""
-    model: str = ""
-    api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
-    timeout_seconds: int = Field(default=180, gt=0)
-    max_attempts: int = Field(default=3, ge=1, le=10)
-
-    def api_key_value(self) -> str | None:
-        return self.api_key.get_secret_value() if self.api_key is not None else None
-
-
 class IngestionSettings(StrictSettings):
     max_file_mb: int = Field(default=200, gt=0)
     chunk_target_tokens: int = Field(default=900, gt=0)
     chunk_overlap_tokens: int = Field(default=135, ge=0)
 
 
-class EmbeddingSettings(StrictSettings):
-    """Local GGUF file identity only; provider params live in [cognee.embedding]."""
-
-    model_path: Path = Path("models/embedding/embeddinggemma-300M-Q8_0.gguf")
-    sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
-
-
-class RerankerSettings(StrictSettings):
-    model_path: Path = Path("models/reranker/qwen3-reranker-0.6b-q8_0.gguf")
-    candidate_limit: int = Field(default=40, gt=0)
-    sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
-
-
 class LocalInferenceSettings(StrictSettings):
+    enabled: bool = False
     host: Literal["127.0.0.1", "localhost"] = "127.0.0.1"
     port: int = Field(default=8081, ge=1, le=65535)
-    request_timeout_seconds: int = Field(default=120, gt=0)
-    startup_timeout_seconds: int = Field(default=180, gt=0)
-    embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
-    reranker: RerankerSettings = Field(default_factory=RerankerSettings)
-
-
-class CogneeEmbeddingSettings(StrictSettings):
-    """Provider-neutral embedding settings translated into Cognee's environment."""
-
-    provider: str = "openai_compatible"
-    model: str = "default"
-    endpoint: str = ""
-    api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
-    dimensions: int = Field(default=768, gt=0)
-    max_tokens: int = Field(default=2048, gt=0)
-    batch_size: int = Field(default=5, gt=0)
-    local_runtime: bool = True
-
-    def api_key_value(self) -> str | None:
-        return self.api_key.get_secret_value() if self.api_key is not None else None
-
-
-class CogneeSettings(StrictSettings):
-    system_database: Path = Path("cognee/system/databases")
-    vector_database: Path = Path("cognee/vector")
-    graph_database: Path = Path("cognee/graph")
-    db_provider: str = "sqlite"
-    vector_provider: str = "lancedb"
-    graph_provider: str = "kuzu"
-    embedding: CogneeEmbeddingSettings = Field(
-        default_factory=CogneeEmbeddingSettings
+    embedding_model_path: Path = Path(
+        "../data/models/embedding/embeddinggemma-300M-Q8_0.gguf"
     )
-    local_inference: LocalInferenceSettings = Field(
-        default_factory=LocalInferenceSettings, exclude=True
+    reranker_model_path: Path = Path(
+        "../data/models/reranker/qwen3-reranker-0.6b-q8_0.gguf"
     )
+    cuda_devices: list[int] = Field(default_factory=lambda: [6, 7], min_length=1)
+    startup_timeout: int = Field(default=180, gt=0)
+    request_timeout: int = Field(default=120, gt=0)
+
+    @field_validator("cuda_devices")
+    @classmethod
+    def cuda_devices_must_be_unique(cls, value: list[int]) -> list[int]:
+        if any(device < 0 for device in value):
+            raise ValueError("local_inference.cuda_devices must be non-negative")
+        if len(set(value)) != len(value):
+            raise ValueError("local_inference.cuda_devices must not contain duplicates")
+        return value
 
 
 class RetrievalProfileSettings(StrictSettings):
@@ -152,9 +112,7 @@ class RetrievalSettings(StrictSettings):
 class RuntimeSettings(StrictSettings):
     data: DataSettings = Field(default_factory=DataSettings)
     mineru: MinerUSettings = Field(default_factory=MinerUSettings)
-    llm: LLMSettings = Field(default_factory=LLMSettings)
     local_inference: LocalInferenceSettings = Field(default_factory=LocalInferenceSettings)
-    cognee: CogneeSettings = Field(default_factory=CogneeSettings)
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     api: APISettings = Field(default_factory=APISettings)
@@ -185,12 +143,8 @@ def resolve_local_model_path(settings: RuntimeSettings, configured: Path) -> Pat
 
 def load_settings(
     path: Path | None = None,
-    *,
-    environ: Mapping[str, str] | None = None,
 ) -> RuntimeSettings:
-    """Load TOML, then apply the documented environment-only overrides."""
-
-    env = os.environ if environ is None else environ
+    """Load only PaperOS's TOML configuration."""
     explicit_config = path is not None
     config_path = (path or DEFAULT_CONFIG_PATH).expanduser().resolve(strict=False)
     raw: dict[str, object] = {}
@@ -215,46 +169,8 @@ def load_settings(
     data_raw = raw.setdefault("data", {})
     if not isinstance(data_raw, dict):
         raise ConfigurationError("The [data] section must be a TOML table.")
-    selected_data = env.get("PAPEROS_DATA_DIR", data_raw.get("directory", DEFAULT_DATA_DIR))
-    data_root = _resolve_path(selected_data, base_dir=Path.cwd())
+    data_root = _resolve_path(data_raw.get("directory", DEFAULT_DATA_DIR), base_dir=Path.cwd())
     data_raw["directory"] = data_root
-
-    mineru_raw = raw.setdefault("mineru", {})
-    llm_raw = raw.setdefault("llm", {})
-    if not isinstance(mineru_raw, dict) or not isinstance(llm_raw, dict):
-        raise ConfigurationError("The [mineru] and [llm] sections must be TOML tables.")
-    if "api_key" in mineru_raw or "api_key" in llm_raw:
-        raise ConfigurationError(
-            "API keys are forbidden in paperos.toml; use MINERU_API_KEY and "
-            "LLM_API_KEY environment variables."
-        )
-    mineru_key = env.get("MINERU_API_KEY", "").strip()
-    llm_key = env.get("LLM_API_KEY", "").strip()
-    if mineru_key:
-        mineru_raw["api_key"] = mineru_key
-    if llm_key:
-        llm_raw["api_key"] = llm_key
-
-    cognee_raw = raw.setdefault("cognee", {})
-    if not isinstance(cognee_raw, dict):
-        raise ConfigurationError("The [cognee] section must be a TOML table.")
-    embedding_raw = cognee_raw.setdefault("embedding", {})
-    if not isinstance(embedding_raw, dict):
-        raise ConfigurationError("The [cognee.embedding] section must be a TOML table.")
-    if "api_key" in embedding_raw:
-        raise ConfigurationError(
-            "API keys are forbidden in paperos.toml; use the EMBEDDING_API_KEY "
-            "environment variable."
-        )
-    embedding_key = env.get("EMBEDDING_API_KEY", "").strip()
-    if embedding_key:
-        embedding_raw["api_key"] = embedding_key
-    for key, default in (
-        ("system_database", "cognee/system/databases"),
-        ("vector_database", "cognee/vector"),
-        ("graph_database", "cognee/graph"),
-    ):
-        cognee_raw[key] = _resolve_path(cognee_raw.get(key, default), base_dir=data_root)
 
     try:
         settings = RuntimeSettings.model_validate(raw)
@@ -264,28 +180,12 @@ def load_settings(
         ) from exc
     config_root = config_path.parent
     local = settings.local_inference
-    local = local.model_copy(
-        update={
-            "embedding": local.embedding.model_copy(
-                update={
-                    "model_path": _resolve_path(
-                        local.embedding.model_path, base_dir=config_root
-                    )
-                }
-            ),
-            "reranker": local.reranker.model_copy(
-                update={
-                    "model_path": _resolve_path(
-                        local.reranker.model_path, base_dir=config_root
-                    )
-                }
-            ),
-        }
-    )
-    cognee = settings.cognee.model_copy(update={"local_inference": local})
+    local = local.model_copy(update={
+        "embedding_model_path": _resolve_path(local.embedding_model_path, base_dir=config_root),
+        "reranker_model_path": _resolve_path(local.reranker_model_path, base_dir=config_root),
+    })
     return settings.model_copy(
         update={
-            "cognee": cognee,
             "local_inference": local,
             "config_path": config_path if config_path.exists() else None,
         }

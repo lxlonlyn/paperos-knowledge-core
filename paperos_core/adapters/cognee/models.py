@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from paperos_core.domain.canonical import CanonicalBundle, Chunk
-from paperos_core.domain.datapoints import (
+from paperos_core.adapters.cognee.compat import cognee_uuid
+from paperos_core.adapters.cognee.datapoints import (
     ChunkDataPoint,
     ClaimDataPoint,
     ConceptRelationDataPoint,
@@ -17,27 +17,11 @@ from paperos_core.domain.datapoints import (
     SectionDataPoint,
     SummaryDataPoint,
     TripletDataPoint,
-    cognee_uuid,
 )
+from paperos_core.domain.canonical import CanonicalBundle, Chunk
 from paperos_core.domain.ids import knowledge_triplet_id
 from paperos_core.domain.knowledge import SemanticEnrichment
 from paperos_core.domain.provenance import RelationRecord, RelationType
-
-_DATAPOINT_CLASSES: dict[str, type[PaperOSDataPoint]] = {
-    cls.__name__: cls
-    for cls in (
-        DocumentDataPoint,
-        SectionDataPoint,
-        ChunkDataPoint,
-        ElementDataPoint,
-        ReferenceDataPoint,
-        EntityDataPoint,
-        ClaimDataPoint,
-        ConceptRelationDataPoint,
-        SummaryDataPoint,
-        TripletDataPoint,
-    )
-}
 
 
 @dataclass(slots=True)
@@ -59,25 +43,6 @@ class DataPointGraph:
                 relation.model_dump(mode="json") for relation in self.relations
             ],
         }
-
-    @classmethod
-    def from_json(cls, payload: dict[str, object]) -> DataPointGraph:
-        nodes: list[PaperOSDataPoint] = []
-        for item in payload.get("nodes", []):
-            if not isinstance(item, dict):
-                raise TypeError("DataPointGraph node entry must be an object")
-            node_type = item.get("__type__")
-            datapoint_cls = _DATAPOINT_CLASSES.get(node_type)
-            if datapoint_cls is None:
-                raise ValueError(f"Unknown DataPoint type: {node_type}")
-            nodes.append(datapoint_cls.model_validate(item))
-        relations = [
-            RelationRecord.model_validate(relation)
-            for relation in payload.get("relations", [])
-            if isinstance(relation, dict)
-        ]
-        return cls(nodes=nodes, relations=relations)
-
 
 def canonical_to_datapoints(
     bundle: CanonicalBundle,

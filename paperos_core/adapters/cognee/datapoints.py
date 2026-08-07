@@ -1,16 +1,12 @@
-"""Centralized Cognee DataPoint declarations for all PaperOS graph writes."""
+"""Cognee DataPoint declarations for PaperOS graph writes."""
 
 from __future__ import annotations
 
 from typing import Any
-from uuid import NAMESPACE_URL, UUID, uuid5
 
-from cognee.infrastructure.engine import DataPoint  # type: ignore[import-untyped]
 from pydantic import Field
 
-
-def cognee_uuid(canonical_id: str, *, mapping_version: str = "1") -> UUID:
-    return uuid5(NAMESPACE_URL, f"paperos:cognee:{mapping_version}:{canonical_id}")
+from paperos_core.adapters.cognee.compat import DataPoint
 
 
 class PaperOSDataPoint(DataPoint):  # type: ignore[misc]

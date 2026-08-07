@@ -35,7 +35,7 @@ async def graph_retrieve(
     hits = await search.graph_search(
         query,
         dataset=dataset_name,
-        top_k=limit,
+        top_k=limit * 2,
         search_type=search_type,
     )
     resolved = await compat.resolve_graph_nodes(
@@ -46,6 +46,7 @@ async def graph_retrieve(
             cognee_id=hit.cognee_id,
             canonical_id=hit.canonical_id,
             object_type=hit.object_type,
+            text=hit.text,
             score=hit.score,
             source_chunk_ids=tuple(
                 _string_list(
@@ -78,6 +79,23 @@ async def graph_retrieve(
         edge_types={relation.value for relation in RelationType},
     )
     candidates: dict[str, Candidate] = {}
+    for seed in allowed_seeds:
+        for chunk_id in seed.source_chunk_ids:
+            chunk = corpus.chunks.get(chunk_id)
+            if chunk is None or chunk.document_id not in document_ids:
+                continue
+            candidate = corpus.candidate_for_chunk(
+                chunk_id,
+                channel="graph",
+                score=seed.score,
+                object_id=seed.canonical_id,
+                object_type=seed.object_type.removesuffix("DataPoint").casefold(),
+                knowledge_kind="system_inference",
+                derived_from_ids=[seed.canonical_id, *seed.derived_from_ids],
+            )
+            existing = candidates.get(chunk_id)
+            if existing is None or seed.score > existing.channel_scores["graph"]:
+                candidates[chunk_id] = candidate
     for relation in traversed:
         for chunk_id in relation.source_chunk_ids:
             chunk = corpus.chunks.get(chunk_id)

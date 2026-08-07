@@ -19,19 +19,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter, task
+from paperos_core.adapters.cognee.compat import (
+    CogneeCompatibilityAdapter,
+    cognee_uuid,
+    resolve_cognee_tokenizer,
+    task,
+)
+from paperos_core.adapters.cognee.llm import LLMClient
 from paperos_core.adapters.cognee.models import (
     DataPointGraph,
     canonical_to_datapoints,
 )
 from paperos_core.adapters.cognee.reference_resolution import resolve_citations
-from paperos_core.adapters.llm import LLMClient
 from paperos_core.domain.canonical import CanonicalBundle, ChunkProjection
-from paperos_core.domain.datapoints import cognee_uuid
 from paperos_core.domain.knowledge import SemanticEnrichment
 from paperos_core.errors import CogneeStorageError
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
-from paperos_core.ingestion.chunking import build_chunks, resolve_cognee_tokenizer
+from paperos_core.ingestion.chunking import build_chunks
 
 
 @dataclass(slots=True)
@@ -113,6 +117,7 @@ async def datapoint_mapping_task(
     *,
     repository: CanonicalRepository,
     graph_root: Path,
+    graph_results: list[DataPointGraph] | None = None,
 ) -> list[DataPointGraph]:
     """Map one canonical/enrichment pair to a Cognee DataPoint graph."""
     results: list[DataPointGraph] = []
@@ -130,6 +135,8 @@ async def datapoint_mapping_task(
             )
         )
         _persist_graph(graph_root, enriched.bundle.snapshot.id, graph)
+        if graph_results is not None:
+            graph_results.append(graph)
         results.append(graph)
     return results
 
@@ -151,7 +158,8 @@ async def store_datapoints_task(
         # embed_triplets=True produces Triplet(text, from_node_id, to_node_id)
         # without stable canonical IDs or chunk provenance, so enabling it
         # would store a second, lower-fidelity triplet set. Keep it disabled
-        # until a contract test proves Cognee's Triplet preserves provenance.
+        # until a compatibility experiment proves Cognee's Triplet preserves
+        # provenance.
         await compat.add_data_points(
             graph.nodes,
             custom_edges=custom_edges,
@@ -171,6 +179,7 @@ def configure_pipeline_tasks(
     graph_root: Path,
     chunk_target_tokens: int,
     chunk_overlap_tokens: int,
+    graph_results: list[DataPointGraph],
 ) -> list[Any]:
     """Bind per-run dependencies and return the Cognee Task list."""
     return [
@@ -192,6 +201,7 @@ def configure_pipeline_tasks(
             batch_size=1,
             repository=repository,
             graph_root=graph_root,
+            graph_results=graph_results,
         ).task,
         task(
             store_datapoints_task,

@@ -23,11 +23,11 @@ from paperos_core.adapters.cognee.compat import (
     CogneeDatasetBinding,
     PipelineItem,
 )
+from paperos_core.adapters.cognee.llm import LLMClient
 from paperos_core.adapters.cognee.models import (
     DataPointGraph,
 )
 from paperos_core.adapters.cognee.pipeline_tasks import configure_pipeline_tasks
-from paperos_core.adapters.llm import LLMClient
 from paperos_core.config import IngestionSettings
 from paperos_core.domain.canonical import CanonicalBundle, CanonicalIngestionResult
 from paperos_core.domain.knowledge import SemanticEnrichment
@@ -104,6 +104,7 @@ class CogneePipelineAdapter:
             document_id=bundle.document.id,
             title=bundle.document.title,
         )
+        graph_results: list[DataPointGraph] = []
         tasks = configure_pipeline_tasks(
             repository=self.canonical_repository,
             compat=self.compat,
@@ -112,6 +113,7 @@ class CogneePipelineAdapter:
             graph_root=self.paths.cognee / "graphs",
             chunk_target_tokens=self.ingestion.chunk_target_tokens,
             chunk_overlap_tokens=self.ingestion.chunk_overlap_tokens,
+            graph_results=graph_results,
         )
         item = PipelineItem(
             id=data_id,
@@ -130,7 +132,13 @@ class CogneePipelineAdapter:
         projection = self.canonical_repository.get_chunk_projection(bundle.snapshot.id)
         enrichment = self._load_enrichment(bundle.snapshot.id)
         _validate_semantic_provenance(projection.chunks, enrichment)
-        graph = self._load_graph(bundle.snapshot.id)
+        if len(graph_results) != 1:
+            raise CogneeStorageError(
+                "Cognee pipeline did not return exactly one mapped DataPointGraph.",
+                affected=bundle.snapshot.id,
+                details={"graph_count": len(graph_results)},
+            )
+        graph = graph_results[0]
         binding = await self.compat.provenance_counts(
             dataset_id=UUID(str(dataset.id)),
             data_id=data_id,
@@ -161,19 +169,15 @@ class CogneePipelineAdapter:
         index_manifest, index_manifest_path = await self.index_manager.index_bundle(
             fresh_bundle,
             chunks=projection.chunks,
-            cognee_manifest=cognee_manifest,
-            cognee_object_ids=sorted(graph.id_mapping),
-            cognee_vector_object_ids=cognee_vector_ids,
-            relation_count=len(graph.relations),
-            dataset_binding=binding,
         )
+        runtime_config = self.llm.runtime_config.read()
         report = IndexingReport(
             canonical_snapshot_id=bundle.snapshot.id,
             document_id=bundle.document.id,
             manifest_path=index_manifest_path,
             cognee_manifest_path=cognee_manifest,
             lexical_database=index_manifest.lexical_database,
-            vector_database=index_manifest.vector_database,
+            vector_database=runtime_config.vector_db_url,
             dataset_name=binding.dataset_name,
             cognee_dataset_id=binding.dataset_id,
             cognee_data_id=binding.data_id,
@@ -182,8 +186,8 @@ class CogneePipelineAdapter:
             cognee_object_count=len(graph.nodes),
             relation_count=len(graph.relations),
             lexical_object_count=len(index_manifest.lexical_object_ids),
-            vector_object_count=len(index_manifest.vector_object_ids),
-            embedding_dimensions=index_manifest.embedding_dimensions,
+            vector_object_count=len(cognee_vector_ids),
+            embedding_dimensions=runtime_config.embedding_dimensions,
             semantic_entity_count=len(enrichment.entities),
             semantic_claim_count=len(enrichment.claims),
             semantic_relation_count=len(enrichment.relations),
@@ -203,12 +207,13 @@ class CogneePipelineAdapter:
         import cognee  # type: ignore[import-untyped]
 
         try:
-            return await cognee.run_custom_pipeline(
+            result = await cognee.run_custom_pipeline(
                 tasks=tasks,
                 data=item,
                 dataset=dataset_name,
                 pipeline_name="paperos_knowledge_ingestion",
             )
+            return dict(result)
         except Exception as exc:
             raise CogneeStorageError(
                 f"Cognee custom pipeline failed: {exc}",
@@ -222,23 +227,6 @@ class CogneePipelineAdapter:
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             raise CogneeStorageError(
                 f"Unable to read semantic enrichment artifact: {exc}",
-                affected=path,
-            ) from exc
-
-    def _load_graph(self, snapshot_id: str) -> DataPointGraph:
-        path = self.paths.cognee / "graphs" / f"{snapshot_id}.json"
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise CogneeStorageError(
-                f"Unable to read the DataPoint graph projection: {exc}",
-                affected=path,
-            ) from exc
-        try:
-            return DataPointGraph.from_json(payload)
-        except ValueError as exc:
-            raise CogneeStorageError(
-                f"Invalid DataPoint graph projection: {exc}",
                 affected=path,
             ) from exc
 
@@ -279,7 +267,6 @@ class CogneePipelineAdapter:
             "node_count": len(graph.nodes),
             "relation_count": len(graph.relations),
             "canonical_to_cognee_id": graph.id_mapping,
-            "vector_collections": _vector_collection_manifest(graph),
             "relations": [
                 relation.model_dump(mode="json") for relation in graph.relations
             ],
@@ -299,20 +286,6 @@ def _single_run_info(run_infos: dict[str, Any], dataset_name: str) -> Any:
         if dataset_id is not None:
             return run_infos[dataset_id]
     return run_infos
-
-
-def _vector_collection_manifest(graph: DataPointGraph) -> dict[str, list[str]]:
-    groups: dict[str, list[Any]] = {}
-    for node in graph.nodes:
-        for field_name in node.metadata.get("index_fields", []):
-            value = getattr(node, field_name, None)
-            if value is None or (isinstance(value, str) and not value.strip()):
-                continue
-            groups.setdefault(f"{type(node).__name__}_{field_name}", []).append(node)
-    return {
-        collection: sorted(node.canonical_id for node in nodes)
-        for collection, nodes in sorted(groups.items())
-    }
 
 
 def _validate_semantic_provenance(

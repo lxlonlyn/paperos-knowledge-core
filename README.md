@@ -32,8 +32,9 @@ conda env create -f environment.yml
 conda activate paperos
 
 cp config/paperos.example.toml config/paperos.toml
-export MINERU_API_KEY="..."
-export LLM_API_KEY="..."
+cp .env.example .env
+# Set mineru.api_key in the git-ignored config/paperos.toml.
+# Set Cognee LLM/embedding/database values in .env.
 
 python scripts/setup_runtime.py
 python server.py
@@ -45,9 +46,9 @@ configured paths; relative model paths are resolved from
 `config/paperos.toml`, independently of the runtime data directory. PaperOS
 never installs dependencies or downloads models at runtime.
 
-`config/paperos.toml` is the only structured configuration source. The two API
-keys are environment-only secrets. PaperOS does not load `.env` as a Cognee
-configuration file.
+`config/paperos.toml` contains only PaperOS settings. Cognee exclusively owns
+and loads `.env`; PaperOS never parses or overwrites it. MinerU's key is a
+redacted `SecretStr` in the git-ignored real TOML.
 
 ## HTTP API
 
@@ -65,6 +66,7 @@ POST   /api/v1/feedback
 POST   /api/v1/improve
 POST   /api/v1/rebuild
 GET    /api/v1/health
+GET    /api/v1/visualize
 ```
 
 Ingest, reprocess, improve, and rebuild enqueue work and return HTTP 202 with a
@@ -99,18 +101,28 @@ supplement. Both use the same canonical IDs.
 
 The repository-owned Node runtime is private to PaperOS and listens on a loopback
 implementation port. It starts only when the Cognee embedding configuration
-selects the PaperOS local runtime, and loads the manually supplied EmbeddingGemma
-GGUF plus the optional Qwen3 Reranker GGUF when `retrieval.rerank_enabled` is
-true. With a remote embedding provider, local GGUF files are never checked or
-loaded. Application services receive only a `LocalInferenceClient`; only the
+selects the PaperOS local runtime, and/or local reranking is enabled. It loads
+only the GGUF models actually used. A remote embedding plus local reranker
+therefore starts the child with only the reranker; fully remote retrieval skips
+Node and all GGUF checks. Application services receive only a `LocalInferenceClient`; only the
 Application lifecycle can start or stop the child process.
 
 ## Operational scripts
 
 - `scripts/setup_runtime.py`: initializes schema and verifies Node/build/models.
 - `scripts/doctor.py`: read-only configuration and dependency diagnostics.
+- `scripts/acceptance_real_pipeline.py`: cumulative validation using the genuine
+  four-paper corpus, live MinerU/Cognee providers, all retrieval profiles, and
+  lifecycle cleanup. This is the only project test entry; the project does not
+  use pytest, mocks, fabricated documents, or prerecorded downstream results.
 - `scripts/debug_pipeline.py`: real retained-stage pipeline debugging.
 - `scripts/agent_client.py`: HTTP client example for agents and integrations.
+
+Run the complete acceptance path with:
+
+```bash
+python scripts/acceptance_real_pipeline.py
+```
 
 See [docs/architecture.md](docs/architecture.md),
 [docs/data_model.md](docs/data_model.md), and

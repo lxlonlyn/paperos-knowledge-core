@@ -21,8 +21,6 @@ class DataPaths:
     cache: Path
     exports: Path
     logs: Path
-    test_corpus: Path
-    test_runs: Path
     tmp: Path
 
     @property
@@ -62,8 +60,6 @@ def build_data_paths(root: Path) -> DataPaths:
         cache=resolved / "cache",
         exports=resolved / "exports",
         logs=resolved / "logs",
-        test_corpus=resolved / "test-corpus",
-        test_runs=resolved / "test-runs",
         tmp=resolved / "tmp",
     )
     for child in paths.runtime_directories():

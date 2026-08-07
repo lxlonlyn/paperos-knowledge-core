@@ -4,6 +4,7 @@ import {resolve} from "node:path";
 export interface LocalInferenceConfig {
   host: string;
   port: number;
+  embeddingEnabled: boolean;
   embeddingModelPath: string;
   embeddingModelName: string;
   embeddingDimensions: number;
@@ -12,6 +13,7 @@ export interface LocalInferenceConfig {
   rerankerModelPath: string;
   rerankerModelName: string;
   rerankerMaxTokens: number;
+  cudaVisibleDevices: string;
 }
 
 function positiveInteger(name: string, fallback: number): number {
@@ -24,12 +26,10 @@ function positiveInteger(name: string, fallback: number): number {
 }
 
 export function loadConfig(): LocalInferenceConfig {
-  const modelValue = process.env.PAPEROS_EMBEDDING_MODEL_PATH;
-  if (!modelValue) {
-    throw new Error("PAPEROS_EMBEDDING_MODEL_PATH is required");
-  }
-  const modelPath = resolve(modelValue);
-  validateModel("Embedding", modelPath);
+  const embeddingEnabled = process.env.PAPEROS_EMBEDDING_ENABLED !== "false";
+  const modelPath = embeddingEnabled
+    ? requiredModelPath("PAPEROS_EMBEDDING_MODEL_PATH", "Embedding")
+    : "";
   const rerankerEnabled = process.env.PAPEROS_RERANKER_ENABLED === "true";
   const rerankerModelPath = rerankerEnabled
     ? requiredModelPath("PAPEROS_RERANKER_MODEL_PATH", "Reranker")
@@ -37,6 +37,7 @@ export function loadConfig(): LocalInferenceConfig {
   return {
     host: process.env.PAPEROS_LOCAL_INFERENCE_HOST ?? "127.0.0.1",
     port: positiveInteger("PAPEROS_LOCAL_INFERENCE_PORT", 8081),
+    embeddingEnabled,
     embeddingModelPath: modelPath,
     embeddingModelName: process.env.PAPEROS_EMBEDDING_MODEL_NAME ?? "embeddinggemma-300M",
     embeddingDimensions: positiveInteger("PAPEROS_EMBEDDING_DIMENSIONS", 768),
@@ -45,6 +46,7 @@ export function loadConfig(): LocalInferenceConfig {
     rerankerModelPath,
     rerankerModelName: process.env.PAPEROS_RERANKER_MODEL_NAME ?? "qwen3-reranker-0.6b",
     rerankerMaxTokens: positiveInteger("PAPEROS_RERANKER_MAX_TOKENS", 4096),
+    cudaVisibleDevices: process.env.CUDA_VISIBLE_DEVICES ?? "",
   };
 }
 

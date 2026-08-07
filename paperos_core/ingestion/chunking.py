@@ -3,9 +3,10 @@
 PaperOS owns the academic chunking rules; Cognee's custom pipeline executes
 them (``AcademicChunkTask``) and Cognee provides the tokenizer and token
 limits. Chunks never cross sections, oversized elements are split into
-element-internal spans, tables produce searchable text, formulas carry their
-caption/section context, and every chunk records the exact element spans it
-covers (including any spans re-included as overlap).
+element-internal spans, tables and formulas retain their canonical text, and
+every chunk records the exact element spans it covers (including any spans
+re-included as overlap). Presentation labels and section context belong to
+metadata, not to the element-local coordinate system.
 """
 
 from __future__ import annotations
@@ -13,9 +14,10 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Any, Protocol
 
-from paperos_core.domain.canonical import Chunk, Element, Section
+from paperos_core.domain.canonical import Chunk, ChunkSpan, Element, Section
 from paperos_core.domain.enums import ElementType
 from paperos_core.domain.ids import chunk_id
 
@@ -48,6 +50,10 @@ class ElementSpan:
     span_key: str
     text: str
     tokens: int
+    character_start_in_element: int
+    character_end_in_element: int
+    token_start: int
+    token_end: int
     page: int | None = None
     bounding_box: tuple[float, float, float, float] | None = None
     section_id: str | None = None
@@ -58,11 +64,11 @@ class ElementSpan:
         return f"{self.element_id}:{self.span_key}"
 
 
-def resolve_cognee_tokenizer() -> Any:
-    """Resolve the tokenizer Cognee would use for the configured embedding model."""
-    from paperos_core.adapters.cognee.compat import resolve_cognee_tokenizer as _resolve
-
-    return _resolve()
+@dataclass(frozen=True, slots=True)
+class _TextRange:
+    text: str
+    start: int
+    end: int
 
 
 def build_chunks(
@@ -73,34 +79,22 @@ def build_chunks(
     elements: Iterable[Element],
     target_tokens: int,
     overlap_tokens: int,
-    tokenizer: Tokenizer | None = None,
+    tokenizer: Tokenizer,
 ) -> list[Chunk]:
     """Build section-local, span-identified chunks from canonical elements."""
-    count = tokenizer.count_tokens if tokenizer is not None else resolve_cognee_tokenizer().count_tokens
+    count = tokenizer.count_tokens
     elements = list(elements)
     section_by_id = {section.id: section for section in sections}
-    elements_by_id = {element.id: element for element in elements}
-    captured_captions = {
-        caption_id
-        for element in elements
-        if element.element_type == ElementType.FORMULA
-        for caption_id in element.caption_element_ids
-    }
     eligible = [
         element
         for element in elements
         if element.element_type in _TEXT_TYPES
-        and not (
-            element.element_type == ElementType.CAPTION
-            and element.id in captured_captions
-        )
-        and _element_text(element, elements_by_id, section_by_id.get(element.section_id)).strip()
+        and _element_text(element).strip()
     ]
     grouped: dict[str | None, list[Element]] = {}
     for element in eligible:
         grouped.setdefault(element.section_id, []).append(element)
 
-    separator_tokens = max(1, count("\n\n"))
     section_spans: dict[str | None, list[ElementSpan]] = {
         section_id: [] for section_id in [None, *(section.id for section in sections)]
     }
@@ -112,11 +106,7 @@ def build_chunks(
         )
         for element in rows:
             section = section_by_id.get(section_id) if section_id else None
-            text = _element_text(
-                element,
-                elements_by_id,
-                section.title if section else None,
-            )
+            text = _element_text(element)
             section_spans[section_id].extend(
                 _element_spans(
                     element,
@@ -129,18 +119,15 @@ def build_chunks(
             )
 
     built: list[Chunk] = []
-    character_cursor = 0
     for section_id in section_order:
-        chunks, character_cursor = _pack_section(
+        chunks = _pack_section(
             section_spans[section_id],
             document_id=document_id,
             snapshot_id=snapshot_id,
             target_tokens=target_tokens,
             overlap_tokens=overlap_tokens,
             count=count,
-            separator_tokens=separator_tokens,
             start_order=len(built),
-            character_cursor=character_cursor,
         )
         built.extend(chunks)
     return [
@@ -164,10 +151,8 @@ def _pack_section(
     target_tokens: int,
     overlap_tokens: int,
     count: Any,
-    separator_tokens: int,
     start_order: int,
-    character_cursor: int,
-) -> tuple[list[Chunk], int]:
+) -> list[Chunk]:
     """Pack one section's spans into chunks, never crossing the section."""
     built: list[Chunk] = []
     pending: list[ElementSpan] = []
@@ -175,10 +160,7 @@ def _pack_section(
     pending_overlap_source: list[str] = []
     overlap_candidate: list[ElementSpan] = []
     overlap_source_candidate: list[str] = []
-    cursor = character_cursor
-
     def flush() -> None:
-        nonlocal cursor
         if not pending:
             return
         built.append(
@@ -188,32 +170,35 @@ def _pack_section(
                 order=start_order + len(built),
                 spans=list(pending),
                 count=count,
-                separator_tokens=separator_tokens,
-                character_cursor=cursor,
                 overlap_source_chunk_ids=pending_overlap_source,
                 overlap_spans=pending_overlap_spans,
             )
         )
-        cursor += _text_length(pending) + 2
 
     for span in spans:
-        if pending and _tokens([*pending, span], separator_tokens) > target_tokens:
+        if pending and pending[0].section_id != span.section_id:
+            flush()
+            pending = []
+            pending_overlap_spans = []
+            pending_overlap_source = []
+            overlap_candidate = []
+            overlap_source_candidate = []
+        if pending and _tokens([*pending, span], count) > target_tokens:
             flushed = list(pending)
             flush()
             pending = []
             pending_overlap_spans = []
             pending_overlap_source = []
             overlap_candidate = _overlap_tail(
-                flushed, count, overlap_tokens, separator_tokens
+                flushed, count, overlap_tokens
             )
             overlap_source_candidate = (
                 [built[-1].id] if overlap_candidate else []
             )
         if not pending and overlap_candidate:
-            # Carry overlap only when the incoming span still fits the limit;
-            # otherwise drop it instead of emitting a duplicated chunk or
-            # crossing the token budget.
-            if _tokens([*overlap_candidate, span], separator_tokens) <= target_tokens:
+            while overlap_candidate and _tokens([*overlap_candidate, span], count) > target_tokens:
+                overlap_candidate.pop(0)
+            if overlap_candidate:
                 pending = list(overlap_candidate)
                 pending_overlap_spans = list(overlap_candidate)
                 pending_overlap_source = overlap_source_candidate
@@ -221,54 +206,30 @@ def _pack_section(
             overlap_source_candidate = []
         pending.append(span)
     flush()
-    return built, cursor
+    return built
 
 
-def _tokens(spans: list[ElementSpan], separator_tokens: int) -> int:
-    if not spans:
-        return 0
-    return sum(span.tokens for span in spans) + (
-        separator_tokens * (len(spans) - 1)
-    )
+def _tokens(spans: list[ElementSpan], count: Any) -> int:
+    return _count_tokens(count, _join_span_text(spans))
 
 
-def _element_text(
-    element: Element,
-    elements_by_id: dict[str, Element],
-    section_title: str | None,
-) -> str:
+def _element_text(element: Element) -> str:
+    """Select verbatim canonical text for element-local span coordinates."""
     if element.element_type == ElementType.TABLE:
-        body = (
+        return (
             element.markdown
             or element.text
             or element.html
             or ""
-        ).strip()
-        return f"[Table]\n{body}" if body else ""
+        )
     if element.element_type == ElementType.FORMULA:
-        body = (
+        return (
             element.latex
             or element.text
             or element.markdown
             or ""
-        ).strip()
-        if not body:
-            return ""
-        parts: list[str] = []
-        if section_title:
-            parts.append(f"Section: {section_title}")
-        parts.append(f"[Formula]\n{body}")
-        for caption_id in element.caption_element_ids:
-            caption = elements_by_id.get(caption_id)
-            caption_text = (
-                (caption.text or caption.markdown or "").strip()
-                if caption is not None
-                else ""
-            )
-            if caption_text:
-                parts.append(f"Caption: {caption_text}")
-        return "\n".join(parts)
-    return (element.text or element.markdown or "").strip()
+        )
+    return element.text if element.text is not None else (element.markdown or "")
 
 
 def _element_spans(
@@ -284,15 +245,19 @@ def _element_spans(
     return [
         ElementSpan(
             element_id=element.id,
-            span_key=str(index),
-            text=unit,
-            tokens=count(unit),
+            span_key=f"{unit.start}:{unit.end}",
+            text=unit.text,
+            tokens=_count_tokens(count, unit.text),
+            character_start_in_element=unit.start,
+            character_end_in_element=unit.end,
+            token_start=_count_tokens(count, text[: unit.start]),
+            token_end=_count_tokens(count, text[: unit.end]),
             page=element.page,
             bounding_box=element.bounding_box,
             section_id=section_id,
             section_path=section_path,
         )
-        for index, unit in enumerate(units)
+        for unit in units
     ]
 
 
@@ -300,58 +265,66 @@ def _split_units(
     text: str,
     count: Any,
     target_tokens: int,
-) -> list[str]:
+) -> list[_TextRange]:
     """Recursively split text until every unit fits the token budget."""
-    if count(text) <= target_tokens:
-        return [text]
-    for splitter in (_split_paragraphs, _split_sentences, _split_words, _split_chars):
-        parts = splitter(text)
-        if len(parts) > 1:
-            units: list[str] = []
-            for part in parts:
-                units.extend(_split_units(part, count, target_tokens))
-            return units
-    return [text]
+    return _split_range(text, 0, len(text), count, target_tokens)
 
 
-def _split_paragraphs(text: str) -> list[str]:
-    parts = [part.strip() for part in _PARAGRAPH_SPLIT.split(text) if part.strip()]
-    return parts if len(parts) > 1 else [text]
+def _split_range(
+    source: str,
+    start: int,
+    end: int,
+    count: Any,
+    target_tokens: int,
+) -> list[_TextRange]:
+    value = source[start:end]
+    if _count_tokens(count, value) <= target_tokens:
+        return [_TextRange(text=value, start=start, end=end)]
+    for pattern in (_PARAGRAPH_SPLIT, _SENTENCE_SPLIT, re.compile(r"\s+")):
+        ranges = _partition_ranges(source, start, end, pattern)
+        if len(ranges) > 1:
+            result: list[_TextRange] = []
+            for part_start, part_end in ranges:
+                result.extend(_split_range(source, part_start, part_end, count, target_tokens))
+            return result
+    midpoint = start + max(1, (end - start) // 2)
+    if midpoint >= end:
+        return [_TextRange(text=value, start=start, end=end)]
+    return [
+        *_split_range(source, start, midpoint, count, target_tokens),
+        *_split_range(source, midpoint, end, count, target_tokens),
+    ]
 
 
-def _split_sentences(text: str) -> list[str]:
-    parts = [part.strip() for part in _SENTENCE_SPLIT.split(text) if part.strip()]
-    return parts if len(parts) > 1 else [text]
-
-
-def _split_words(text: str) -> list[str]:
-    parts = [part for part in re.split(r"\s+", text) if part]
-    return parts if len(parts) > 1 else [text]
-
-
-def _split_chars(text: str) -> list[str]:
-    width = max(200, len(text) // 2)
-    parts = [text[index : index + width] for index in range(0, len(text), width)]
-    return parts if len(parts) > 1 else [text]
+def _partition_ranges(
+    source: str, start: int, end: int, pattern: re.Pattern[str]
+) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    cursor = start
+    for match in pattern.finditer(source, start, end):
+        boundary = match.end()
+        if boundary > cursor:
+            ranges.append((cursor, boundary))
+            cursor = boundary
+    if cursor < end:
+        ranges.append((cursor, end))
+    return ranges if len(ranges) > 1 else [(start, end)]
 
 
 def _overlap_tail(
     spans: list[ElementSpan],
     count: Any,
     overlap_tokens: int,
-    separator_tokens: int,
 ) -> list[ElementSpan]:
     """Return whole trailing spans that fit the overlap budget (exact sources)."""
     if overlap_tokens <= 0 or not spans:
         return []
     tail: list[ElementSpan] = []
-    total = 0
     for span in reversed(spans):
-        candidate = total + span.tokens + (separator_tokens if tail else 0)
-        if candidate > overlap_tokens:
+        candidate = [span, *tail]
+        if _tokens(candidate, count) > overlap_tokens:
             break
         tail.insert(0, span)
-        total = candidate
     return tail
 
 
@@ -362,12 +335,10 @@ def _make_chunk(
     order: int,
     spans: list[ElementSpan],
     count: Any,
-    separator_tokens: int,
-    character_cursor: int,
     overlap_source_chunk_ids: list[str],
     overlap_spans: list[ElementSpan],
 ) -> Chunk:
-    text = "\n\n".join(span.text for span in spans)
+    text = _join_span_text(spans)
     pages = [span.page for span in spans if span.page is not None]
     sections = [span.section_id for span in spans if span.section_id is not None]
     section_paths = [
@@ -384,6 +355,18 @@ def _make_chunk(
         order=order,
         element_ids=element_ids,
         element_span_ids=span_ids,
+        spans=[
+            ChunkSpan(
+                id=span.span_id,
+                element_id=span.element_id,
+                text=span.text,
+                character_start_in_element=span.character_start_in_element,
+                character_end_in_element=span.character_end_in_element,
+                token_start=span.token_start,
+                token_end=span.token_end,
+            )
+            for span in spans
+        ],
         section_id=sections[0] if sections else None,
         section_path=section_paths[0] if section_paths else None,
         page_start=min(pages) if pages else None,
@@ -391,9 +374,7 @@ def _make_chunk(
         bounding_box=_merge_boxes(
             [span.bounding_box for span in spans if span.bounding_box is not None]
         ),
-        token_count=count(text),
-        character_start=character_cursor,
-        character_end=character_cursor + len(text),
+        token_count=_count_tokens(count, text),
         overlap_source_chunk_ids=overlap_source_chunk_ids,
         overlap_element_span_ids=[span.span_id for span in overlap_spans],
     )
@@ -412,5 +393,20 @@ def _merge_boxes(
     )
 
 
-def _text_length(spans: list[ElementSpan]) -> int:
-    return sum(len(span.text) for span in spans) + (2 * max(0, len(spans) - 1))
+def _join_span_text(spans: list[ElementSpan]) -> str:
+    if not spans:
+        return ""
+    parts = [spans[0].text]
+    for previous, current in pairwise(spans):
+        contiguous = (
+            previous.element_id == current.element_id
+            and previous.character_end_in_element == current.character_start_in_element
+        )
+        if not contiguous:
+            parts.append("\n\n")
+        parts.append(current.text)
+    return "".join(parts)
+
+
+def _count_tokens(count: Any, text: str) -> int:
+    return count(text) if text else 0

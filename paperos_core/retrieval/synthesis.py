@@ -2,7 +2,7 @@
 
 import re
 
-from paperos_core.adapters.llm import LLMClient
+from paperos_core.adapters.cognee.llm import LLMClient
 from paperos_core.retrieval.candidates import Evidence, RetrievalProfile
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
-from paperos_core.adapters.llm import LLMClient
+from paperos_core.adapters.cognee.llm import LLMClient
 from paperos_core.adapters.mineru.client import MinerUClient
 from paperos_core.indexes.manager import IndexManager
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
@@ -85,13 +85,14 @@ class HealthService:
             # Constructing Cognee's vector engine can initialize its embedding
             # provider. Health must remain a read-only check, so an empty store
             # is validated from PaperOS-owned state without creating that engine.
+            cognee_config = self.llm.runtime_config.read()
             components["vector"] = {
                 "status": "healthy",
                 "backend": "cognee",
-                "path": str(self.paths.cognee / "vector"),
+                "path": cognee_config.vector_db_url,
                 "collection_count": 0,
                 "record_count": 0,
-                "dimensions": self.indexes.embedding_dimensions,
+                "dimensions": cognee_config.embedding_dimensions,
             }
         else:
             try:

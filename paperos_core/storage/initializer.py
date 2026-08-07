@@ -45,6 +45,7 @@ class StorageInitializer:
             with sqlite3.connect(self.paths.registry_db, timeout=30) as connection:
                 connection.execute("PRAGMA foreign_keys = ON")
                 connection.executescript(_REGISTRY_SCHEMA)
+                _migrate_canonical_snapshot_projection_split(connection)
             self.initialize_lexical()
         except sqlite3.Error as exc:
             raise ConfigurationError(
@@ -141,7 +142,7 @@ CREATE TABLE IF NOT EXISTS canonical_snapshots (
     document_id TEXT NOT NULL, manifest_path TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL,
     schema_version TEXT NOT NULL, id_version TEXT NOT NULL, pipeline_version TEXT NOT NULL,
     cleaning_version TEXT NOT NULL, classification_version TEXT NOT NULL,
-    chunking_version TEXT NOT NULL, reference_processing_version TEXT NOT NULL,
+    reference_processing_version TEXT NOT NULL,
     UNIQUE(parse_run_id, schema_version, pipeline_version),
     FOREIGN KEY (source_file_id) REFERENCES source_files(id),
     FOREIGN KEY (parse_run_id) REFERENCES parse_runs(id)
@@ -201,3 +202,17 @@ CREATE TRIGGER IF NOT EXISTS lexical_records_au AFTER UPDATE ON lexical_records 
 END;
 CREATE INDEX IF NOT EXISTS lexical_document_idx ON lexical_records(document_id);
 """
+
+
+def _migrate_canonical_snapshot_projection_split(
+    connection: sqlite3.Connection,
+) -> None:
+    """Remove the legacy chunking column without touching canonical rows."""
+    columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(canonical_snapshots)")
+    }
+    if "chunking_version" in columns:
+        connection.execute(
+            "ALTER TABLE canonical_snapshots DROP COLUMN chunking_version"
+        )

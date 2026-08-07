@@ -16,8 +16,8 @@ from paperos_core.ingestion.service import IngestionService
 from paperos_core.paths import DataPaths, build_data_paths
 
 if TYPE_CHECKING:
+    from paperos_core.adapters.cognee.llm import LLMClient
     from paperos_core.adapters.cognee.pipeline import CogneePipelineAdapter
-    from paperos_core.adapters.llm import LLMClient
     from paperos_core.documents import DocumentService
     from paperos_core.feedback.service import FeedbackService
     from paperos_core.health import HealthService
@@ -125,22 +125,13 @@ def create_application(settings: RuntimeSettings) -> Application:
     parser_artifacts = ParserArtifactRepository(paths)
     canonical_repository = CanonicalRepository(paths)
     canonical_mapper = MinerUCanonicalMapper()
-    if settings.config_path is None:
-        from paperos_core.errors import CogneeConfigurationError
-
-        raise CogneeConfigurationError(
-            "Project configuration is required to configure Cognee."
-        )
-    from paperos_core.adapters.cognee.config import configure_cognee
-
-    configure_cognee(settings)
     from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
+    from paperos_core.adapters.cognee.runtime_config import CogneeRuntimeConfigReader
 
     compat = CogneeCompatibilityAdapter(paths)
-    CogneeCompatibilityAdapter.reset_configuration_caches()
+    from paperos_core.adapters.cognee.llm import LLMClient
     from paperos_core.adapters.cognee.pipeline import CogneePipelineAdapter
     from paperos_core.adapters.cognee.search import CogneeSearchAdapter
-    from paperos_core.adapters.llm import LLMClient
     from paperos_core.documents import DocumentService
     from paperos_core.feedback.service import FeedbackService
     from paperos_core.health import HealthService
@@ -156,18 +147,15 @@ def create_application(settings: RuntimeSettings) -> Application:
     local = settings.local_inference
     local_inference_client = LocalInferenceClient(
         f"http://{local.host}:{local.port}",
-        local.request_timeout_seconds,
+        local.request_timeout,
     )
+    cognee_config = CogneeRuntimeConfigReader()
     local_inference_runtime = LocalInferenceRuntime(
-        settings, paths, local_inference_client
+        settings, paths, local_inference_client, cognee_config
     )
-    llm = LLMClient(settings.llm, PromptRepository())
+    llm = LLMClient(PromptRepository(), cognee_config)
     search = CogneeSearchAdapter(paths, compat)
-    index_manager = IndexManager(
-        paths,
-        embedding_model=settings.cognee.embedding.model,
-        embedding_dimensions=settings.cognee.embedding.dimensions,
-    )
+    index_manager = IndexManager(paths)
     knowledge_pipeline = CogneePipelineAdapter(
         paths,
         canonical_repository,

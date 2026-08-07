@@ -56,8 +56,10 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
             bundle = application.canonical_repository.get_bundle(args.snapshot_id)
             report, _ = await application.knowledge_pipeline.ingest_bundle(bundle)
             return report.model_dump(mode="json")
-        result = await application.services.ingestion.ingest_pdf_to_knowledge(args.pdf)
-        return result.public_dict()
+        knowledge_result = (
+            await application.services.ingestion.ingest_pdf_to_knowledge(args.pdf)
+        )
+        return knowledge_result.public_dict()
     finally:
         if started:
             await application.aclose()

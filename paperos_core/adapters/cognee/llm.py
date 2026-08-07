@@ -24,7 +24,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from paperos_core.config import LLMSettings
+from paperos_core.adapters.cognee.runtime_config import CogneeRuntimeConfigReader
 from paperos_core.domain.canonical import CanonicalBundle, Chunk, Section
 from paperos_core.domain.ids import semantic_object_id
 from paperos_core.domain.knowledge import (
@@ -39,8 +39,6 @@ from paperos_core.errors import SemanticEnrichmentError
 from paperos_core.prompt_repository import PromptDescriptor, PromptRepository
 
 _BATCH_CHARACTER_BUDGET = 20_000
-_CHUNK_TEXT_LIMIT = 4_000
-_SUMMARY_CHARACTER_BUDGET = 16_000
 
 
 class _StrictModel(BaseModel):
@@ -88,6 +86,7 @@ class AnswerOutput(_StrictModel):
     """Explicit Pydantic schema for evidence-bound answer synthesis."""
 
     answer: str
+    cited_chunk_ids: list[str]
 
 
 _T = TypeVar("_T", bound=BaseModel)
@@ -125,37 +124,36 @@ class LLMClient:
 
     def __init__(
         self,
-        config: LLMSettings,
         prompts: PromptRepository,
+        runtime_config: CogneeRuntimeConfigReader,
     ) -> None:
-        self.config = config
         self.prompts = prompts
+        self.runtime_config = runtime_config
+
+    @property
+    def provider(self) -> str:
+        return self.runtime_config.read().llm_provider
+
+    @property
+    def model(self) -> str:
+        return self.runtime_config.read().llm_model
 
     async def health_check(self) -> dict[str, Any]:
-        if not self.config.model:
-            raise SemanticEnrichmentError(
-                "LLM requires model configuration; the provider validates keys.",
-                affected="llm.model",
-                retryable=False,
-            )
-        from cognee.infrastructure.llm.utils import (  # type: ignore[import-untyped]
-            test_llm_connection,
-        )
-
+        config = self.runtime_config.read()
         try:
             await asyncio.wait_for(
-                test_llm_connection(),
-                timeout=min(self.config.timeout_seconds, 15),
+                self.runtime_config.test_llm_connection(),
+                timeout=15,
             )
         except Exception as exc:
             raise SemanticEnrichmentError(
                 f"LLM health check failed: {exc}",
-                affected=self.config.endpoint,
+                affected=config.llm_endpoint,
             ) from exc
         return {
             "status": "healthy",
-            "provider": self.config.provider,
-            "model": self.config.model,
+            "provider": config.llm_provider,
+            "model": config.llm_model,
         }
 
     async def enrich(
@@ -172,8 +170,9 @@ class LLMClient:
                     bundle, prompt, section_id=section_id, chunks=batch
                 )
                 raw_sections.append((section_id, batch, extraction))
+        config = self.runtime_config.read()
         entities, claims, relations = _merge_section_extractions(
-            bundle, raw_sections, model=self.config.model
+            bundle, raw_sections, model=config.llm_model
         )
         summary = await self._summarize_document(bundle, chunks, prompt)
         covered_ids = list(dict.fromkeys(covered))
@@ -187,8 +186,9 @@ class LLMClient:
             claims=claims,
             relations=relations,
             summaries=[summary],
-            model=self.config.model,
-            model_version=self.config.model,
+            model=config.llm_model,
+            provider=config.llm_provider,
+            model_version=config.llm_model,
             prompt_name=prompt.name,
             prompt_version=prompt.version,
             prompt_sha256=prompt.sha256,
@@ -258,34 +258,55 @@ class LLMClient:
         chunks: list[Chunk],
         prompt: PromptDescriptor,
     ) -> Summary:
-        summary_evidence = _chunk_evidence(
-            _summary_evidence_chunks(chunks)
-        )
-        if not summary_evidence:
+        grouped = _chunks_by_section(chunks, bundle.sections)
+        if not grouped:
             raise SemanticEnrichmentError(
                 "Canonical snapshot contains no non-empty chunks for a summary.",
                 affected=bundle.snapshot.id,
             )
-        extraction = await self._generate_structured(
-            system=prompt.text,
-            user=json.dumps(
+        section_summaries: list[dict[str, Any]] = []
+        for section_id, section_chunks in grouped:
+            batches = [
+                await self._summarize_evidence(
+                    bundle,
+                    prompt,
+                    task=f"summarize section {section_id or '(front matter)'} batch",
+                    evidence=_chunk_evidence(batch),
+                )
+                for batch in _chunk_batches(section_chunks)
+            ]
+            source_ids = list(
+                dict.fromkeys(
+                    chunk_id for item in batches for chunk_id in item.source_chunk_ids
+                )
+            )
+            if len(batches) == 1:
+                section_text = batches[0].text
+            else:
+                merged = await self._summarize_evidence(
+                    bundle,
+                    prompt,
+                    task=f"merge section {section_id or '(front matter)'} summaries",
+                    evidence=[
+                        {"text": item.text, "source_chunk_ids": item.source_chunk_ids}
+                        for item in batches
+                    ],
+                )
+                section_text = merged.text
+            section_summaries.append(
                 {
-                    "schema": {
-                        "text": "string",
-                        "source_chunk_ids": ["chunk id"],
-                    },
-                    "document": {
-                        "title": bundle.document.title,
-                        "abstract": bundle.document.abstract,
-                    },
-                    "task": "produce one four-sentence document summary",
-                    "evidence": summary_evidence,
-                },
-                ensure_ascii=False,
-            ),
-            response_model=_SummaryExtraction,
+                    "section_id": section_id,
+                    "text": section_text,
+                    "source_chunk_ids": source_ids,
+                }
+            )
+        extraction = await self._summarize_evidence(
+            bundle,
+            prompt,
+            task="merge all section summaries into one four-sentence document summary",
+            evidence=section_summaries,
         )
-        valid_chunks = {item["chunk_id"] for item in summary_evidence}
+        valid_chunks = {chunk.id for chunk in chunks}
         source_ids = _validate_chunk_ids(
             extraction.source_chunk_ids,
             valid_chunks,
@@ -306,8 +327,33 @@ class LLMClient:
             status=KnowledgeStatus.INFERRED,
             source_chunk_ids=source_ids,
             derived_from_ids=source_ids,
-            model=self.config.model,
-            model_version=self.config.model,
+            model=self.model,
+            model_version=self.model,
+        )
+
+    async def _summarize_evidence(
+        self,
+        bundle: CanonicalBundle,
+        prompt: PromptDescriptor,
+        *,
+        task: str,
+        evidence: list[dict[str, Any]],
+    ) -> _SummaryExtraction:
+        return await self._generate_structured(
+            system=prompt.text,
+            user=json.dumps(
+                {
+                    "schema": {"text": "string", "source_chunk_ids": ["chunk id"]},
+                    "document": {
+                        "title": bundle.document.title,
+                        "abstract": bundle.document.abstract,
+                    },
+                    "task": task,
+                    "evidence": evidence,
+                },
+                ensure_ascii=False,
+            ),
+            response_model=_SummaryExtraction,
         )
 
     async def _generate_structured(
@@ -320,7 +366,7 @@ class LLMClient:
         from cognee.infrastructure.llm import LLMGateway  # type: ignore[import-untyped]
 
         failures: list[str] = []
-        for attempt in range(1, self.config.max_attempts + 1):
+        for attempt in range(1, 4):
             try:
                 result = await LLMGateway.acreate_structured_output(
                     text_input=user,
@@ -334,11 +380,11 @@ class LLMClient:
                 return result
             except (ValidationError, TypeError, ValueError) as exc:
                 failures.append(f"attempt {attempt}: {type(exc).__name__}: {exc}")
-                if attempt < self.config.max_attempts:
+                if attempt < 3:
                     await asyncio.sleep(min(2 ** (attempt - 1), 4))
         raise SemanticEnrichmentError(
             "LLM structured output failed after finite retries.",
-            affected=self.config.endpoint,
+            affected=self.runtime_config.read().llm_endpoint,
             details={"attempts": failures},
         )
 
@@ -351,7 +397,7 @@ class LLMClient:
         recall_context: list[str] | None = None,
     ) -> str:
         """Synthesize one evidence-bound answer with an explicit Pydantic schema."""
-        from cognee.infrastructure.llm import LLMGateway  # type: ignore[import-untyped]
+        from cognee.infrastructure.llm import LLMGateway
 
         compact_evidence: list[dict[str, Any]] = []
         for item in evidence:
@@ -361,7 +407,31 @@ class LLMClient:
                 compact["text"] = text[:3_000]
             compact_evidence.append(compact)
         failures: list[str] = []
-        for attempt in range(1, self.config.max_attempts + 1):
+        valid_chunk_ids = {
+            str(item["chunk_id"])
+            for item in compact_evidence
+            if item.get("chunk_id")
+        }
+        evidence_to_chunk = {
+            str(item["evidence_id"]): str(item["chunk_id"])
+            for item in compact_evidence
+            if item.get("evidence_id") and item.get("chunk_id")
+        }
+
+        def resolve_cited_chunk_id(raw_id: str) -> str | None:
+            selected = raw_id.strip().strip("[]［］【】")
+            if selected in valid_chunk_ids:
+                return selected
+            if selected in evidence_to_chunk:
+                return evidence_to_chunk[selected]
+            candidates = [
+                chunk_id
+                for chunk_id in valid_chunk_ids
+                if chunk_id.startswith(selected)
+            ]
+            return candidates[0] if len(candidates) == 1 else None
+
+        for attempt in range(1, 4):
             try:
                 content = await LLMGateway.acreate_structured_output(
                     text_input=json.dumps(
@@ -380,14 +450,44 @@ class LLMClient:
                 )
                 if not isinstance(content, AnswerOutput) or not content.answer.strip():
                     raise TypeError("completion content is empty or not an AnswerOutput")
-                return content.answer.strip()
+                normalized_citations = [
+                    resolve_cited_chunk_id(chunk_id)
+                    for chunk_id in content.cited_chunk_ids
+                ]
+                if not normalized_citations or any(
+                    chunk_id is None for chunk_id in normalized_citations
+                ):
+                    raise ValueError(
+                        "answer cites chunks outside the supplied evidence: "
+                        f"returned={content.cited_chunk_ids!r}"
+                    )
+                cited_chunk_ids = [
+                    chunk_id
+                    for chunk_id in normalized_citations
+                    if chunk_id is not None
+                ]
+                answer = content.answer.strip()
+                # ``cited_chunk_ids`` is the structured source of truth.  Some
+                # providers satisfy the schema but omit inline markers from the
+                # prose, so materialize those genuine model-selected citations
+                # deterministically for the public evidence-bound answer.
+                missing_citations = [
+                    chunk_id
+                    for chunk_id in dict.fromkeys(cited_chunk_ids)
+                    if chunk_id not in answer
+                ]
+                if missing_citations:
+                    answer = f"{answer} " + " ".join(
+                        f"[{chunk_id}]" for chunk_id in missing_citations
+                    )
+                return answer
             except (TypeError, ValueError) as exc:
                 failures.append(f"attempt {attempt}: {type(exc).__name__}: {exc}")
-                if attempt < self.config.max_attempts:
+                if attempt < 3:
                     await asyncio.sleep(min(2 ** (attempt - 1), 4))
         raise SemanticEnrichmentError(
             "LLM answer synthesis failed after finite retries.",
-            affected=self.config.endpoint,
+            affected=self.runtime_config.read().llm_endpoint,
             details={"attempts": failures},
         )
 
@@ -416,7 +516,7 @@ def _chunk_batches(
     current: list[Chunk] = []
     budget = 0
     for chunk in chunks:
-        size = min(len(chunk.text), _CHUNK_TEXT_LIMIT) + 80
+        size = len(chunk.text) + 80
         if current and budget + size > character_budget:
             batches.append(current)
             current = []
@@ -428,26 +528,12 @@ def _chunk_batches(
     return batches
 
 
-def _summary_evidence_chunks(chunks: list[Chunk]) -> list[Chunk]:
-    selected: list[Chunk] = []
-    budget = _SUMMARY_CHARACTER_BUDGET
-    for chunk in chunks:
-        if budget <= 0:
-            break
-        text = chunk.text[: min(len(chunk.text), _CHUNK_TEXT_LIMIT, budget)]
-        if not text.strip():
-            continue
-        selected.append(chunk)
-        budget -= len(text)
-    return selected
-
-
 def _chunk_evidence(chunks: list[Chunk]) -> list[dict[str, str]]:
     return [
         {
             "chunk_id": chunk.id,
             "section_path": chunk.section_path or "",
-            "text": chunk.text[:_CHUNK_TEXT_LIMIT],
+            "text": chunk.text,
         }
         for chunk in chunks
         if chunk.text.strip()
@@ -499,56 +585,57 @@ def _merge_section_extractions(
 
     for batch_index, (_section_id, chunks, extraction) in enumerate(raw_sections):
         batch_valid = {chunk.id for chunk in chunks}
-        for item in extraction.entities:
+        for entity_item in extraction.entities:
             source_ids = _validate_chunk_ids(
-                item.source_chunk_ids,
+                entity_item.source_chunk_ids,
                 batch_valid,
-                object_key=item.key,
+                object_key=entity_item.key,
                 snapshot_id=snapshot_id,
             )
-            key = (item.entity_type.casefold(), item.name.casefold())
-            merged = entity_by_key.get(key)
-            if merged is None:
-                merged = _MergedEntity(
-                    entity_type=item.entity_type,
-                    name=item.name,
-                    description=item.description,
-                    confidence=item.confidence,
+            key = (entity_item.entity_type.casefold(), entity_item.name.casefold())
+            entity_merged = entity_by_key.get(key)
+            if entity_merged is None:
+                entity_merged = _MergedEntity(
+                    entity_type=entity_item.entity_type,
+                    name=entity_item.name,
+                    description=entity_item.description,
+                    confidence=entity_item.confidence,
                     source_chunk_ids=[],
                 )
-                entity_by_key[key] = merged
-            merged.source_chunk_ids = list(
-                dict.fromkeys([*merged.source_chunk_ids, *source_ids])
+                entity_by_key[key] = entity_merged
+            entity_merged.source_chunk_ids = list(
+                dict.fromkeys([*entity_merged.source_chunk_ids, *source_ids])
             )
-            if merged.description is None and item.description:
-                merged.description = item.description
-            if item.confidence is not None and (
-                merged.confidence is None or item.confidence > merged.confidence
+            if entity_merged.description is None and entity_item.description:
+                entity_merged.description = entity_item.description
+            if entity_item.confidence is not None and (
+                entity_merged.confidence is None
+                or entity_item.confidence > entity_merged.confidence
             ):
-                merged.confidence = item.confidence
-            local_entity_keys[(batch_index, item.key)] = key
+                entity_merged.confidence = entity_item.confidence
+            local_entity_keys[(batch_index, entity_item.key)] = key
 
     entity_id_by_key: dict[tuple[str, str], str] = {}
     entities: list[Entity] = []
-    for key, merged in entity_by_key.items():
+    for key, entity_merged in entity_by_key.items():
         entity_id = semantic_object_id(
             "entity",
             snapshot_id,
-            f"{merged.entity_type}:{merged.name}",
-            merged.source_chunk_ids,
+            f"{entity_merged.entity_type}:{entity_merged.name}",
+            entity_merged.source_chunk_ids,
         )
         entity_id_by_key[key] = entity_id
         entities.append(
             Entity(
                 id=entity_id,
                 canonical_snapshot_id=snapshot_id,
-                entity_type=merged.entity_type,
-                name=merged.name,
-                description=merged.description,
+                entity_type=entity_merged.entity_type,
+                name=entity_merged.name,
+                description=entity_merged.description,
                 status=KnowledgeStatus.EXTRACTED,
-                source_chunk_ids=merged.source_chunk_ids,
-                derived_from_ids=list(merged.source_chunk_ids),
-                confidence=merged.confidence,
+                source_chunk_ids=entity_merged.source_chunk_ids,
+                derived_from_ids=list(entity_merged.source_chunk_ids),
+                confidence=entity_merged.confidence,
                 model=model,
                 model_version=model,
             )
@@ -557,46 +644,47 @@ def _merge_section_extractions(
     claim_by_key: dict[str, _MergedClaim] = {}
     for batch_index, (_section_id, chunks, extraction) in enumerate(raw_sections):
         batch_valid = {chunk.id for chunk in chunks}
-        for item in extraction.claims:
+        for claim_item in extraction.claims:
             source_ids = _validate_chunk_ids(
-                item.source_chunk_ids,
+                claim_item.source_chunk_ids,
                 batch_valid,
-                object_key=item.key,
+                object_key=claim_item.key,
                 snapshot_id=snapshot_id,
             )
-            key = item.text.casefold()
-            merged = claim_by_key.get(key)
-            if merged is None:
-                merged = _MergedClaim(
-                    text=item.text,
-                    claim_type=item.claim_type,
-                    confidence=item.confidence,
+            claim_key = claim_item.text.casefold()
+            claim_merged = claim_by_key.get(claim_key)
+            if claim_merged is None:
+                claim_merged = _MergedClaim(
+                    text=claim_item.text,
+                    claim_type=claim_item.claim_type,
+                    confidence=claim_item.confidence,
                     source_chunk_ids=[],
                 )
-                claim_by_key[key] = merged
-            merged.source_chunk_ids = list(
-                dict.fromkeys([*merged.source_chunk_ids, *source_ids])
+                claim_by_key[claim_key] = claim_merged
+            claim_merged.source_chunk_ids = list(
+                dict.fromkeys([*claim_merged.source_chunk_ids, *source_ids])
             )
-            if item.confidence is not None and (
-                merged.confidence is None or item.confidence > merged.confidence
+            if claim_item.confidence is not None and (
+                claim_merged.confidence is None
+                or claim_item.confidence > claim_merged.confidence
             ):
-                merged.confidence = item.confidence
+                claim_merged.confidence = claim_item.confidence
 
     claims: list[Claim] = []
-    for merged in claim_by_key.values():
+    for claim_merged in claim_by_key.values():
         claim_id = semantic_object_id(
-            "claim", snapshot_id, merged.text, merged.source_chunk_ids
+            "claim", snapshot_id, claim_merged.text, claim_merged.source_chunk_ids
         )
         claims.append(
             Claim(
                 id=claim_id,
                 canonical_snapshot_id=snapshot_id,
-                text=merged.text,
-                claim_type=merged.claim_type,
+                text=claim_merged.text,
+                claim_type=claim_merged.claim_type,
                 status=KnowledgeStatus.EXTRACTED,
-                source_chunk_ids=merged.source_chunk_ids,
-                derived_from_ids=list(merged.source_chunk_ids),
-                confidence=merged.confidence,
+                source_chunk_ids=claim_merged.source_chunk_ids,
+                derived_from_ids=list(claim_merged.source_chunk_ids),
+                confidence=claim_merged.confidence,
                 model=model,
                 model_version=model,
             )
@@ -607,65 +695,66 @@ def _merge_section_extractions(
     ] = {}
     for batch_index, (_section_id, chunks, extraction) in enumerate(raw_sections):
         batch_valid = {chunk.id for chunk in chunks}
-        for item in extraction.relations:
-            source_key = local_entity_keys.get((batch_index, item.source_key))
-            target_key = local_entity_keys.get((batch_index, item.target_key))
+        for relation_item in extraction.relations:
+            source_key = local_entity_keys.get((batch_index, relation_item.source_key))
+            target_key = local_entity_keys.get((batch_index, relation_item.target_key))
             if source_key is None or target_key is None:
                 raise SemanticEnrichmentError(
                     "LLM relation references an unknown entity key.",
-                    affected=f"{item.source_key}->{item.target_key}",
+                    affected=f"{relation_item.source_key}->{relation_item.target_key}",
                 )
             source_ids = _validate_chunk_ids(
-                item.source_chunk_ids,
+                relation_item.source_chunk_ids,
                 batch_valid,
-                object_key=f"{item.source_key}->{item.target_key}",
+                object_key=f"{relation_item.source_key}->{relation_item.target_key}",
                 snapshot_id=snapshot_id,
             )
             source_object_id = entity_id_by_key[source_key]
             target_object_id = entity_id_by_key[target_key]
-            relation_type = item.relation_type.upper().replace(" ", "_")
+            relation_type = relation_item.relation_type.upper().replace(" ", "_")
             relation_key = (source_object_id, relation_type, target_object_id)
-            merged = relation_by_key.get(relation_key)
-            if merged is None:
-                merged = _MergedRelation(
+            relation_merged = relation_by_key.get(relation_key)
+            if relation_merged is None:
+                relation_merged = _MergedRelation(
                     source_object_id=source_object_id,
                     target_object_id=target_object_id,
                     relation_type=relation_type,
-                    description=item.description,
-                    confidence=item.confidence,
+                    description=relation_item.description,
+                    confidence=relation_item.confidence,
                     source_chunk_ids=[],
                 )
-                relation_by_key[relation_key] = merged
-            merged.source_chunk_ids = list(
-                dict.fromkeys([*merged.source_chunk_ids, *source_ids])
+                relation_by_key[relation_key] = relation_merged
+            relation_merged.source_chunk_ids = list(
+                dict.fromkeys([*relation_merged.source_chunk_ids, *source_ids])
             )
-            if merged.description is None and item.description:
-                merged.description = item.description
-            if item.confidence is not None and (
-                merged.confidence is None or item.confidence > merged.confidence
+            if relation_merged.description is None and relation_item.description:
+                relation_merged.description = relation_item.description
+            if relation_item.confidence is not None and (
+                relation_merged.confidence is None
+                or relation_item.confidence > relation_merged.confidence
             ):
-                merged.confidence = item.confidence
+                relation_merged.confidence = relation_item.confidence
 
     relations: list[ConceptRelation] = []
-    for merged in relation_by_key.values():
+    for relation_merged in relation_by_key.values():
         relation_id = semantic_object_id(
             "relation",
             snapshot_id,
-            f"{merged.source_object_id}:{merged.relation_type}:{merged.target_object_id}",
-            merged.source_chunk_ids,
+            f"{relation_merged.source_object_id}:{relation_merged.relation_type}:{relation_merged.target_object_id}",
+            relation_merged.source_chunk_ids,
         )
         relations.append(
             ConceptRelation(
                 id=relation_id,
                 canonical_snapshot_id=snapshot_id,
-                relation_type=merged.relation_type,
-                source_object_id=merged.source_object_id,
-                target_object_id=merged.target_object_id,
-                description=merged.description,
+                relation_type=relation_merged.relation_type,
+                source_object_id=relation_merged.source_object_id,
+                target_object_id=relation_merged.target_object_id,
+                description=relation_merged.description,
                 status=KnowledgeStatus.INFERRED,
-                source_chunk_ids=merged.source_chunk_ids,
-                derived_from_ids=list(merged.source_chunk_ids),
-                confidence=merged.confidence,
+                source_chunk_ids=relation_merged.source_chunk_ids,
+                derived_from_ids=list(relation_merged.source_chunk_ids),
+                confidence=relation_merged.confidence,
                 model=model,
                 model_version=model,
             )

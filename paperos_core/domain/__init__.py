@@ -3,6 +3,7 @@
 from paperos_core.domain.canonical import (
     CanonicalBundle,
     CanonicalIngestionResult,
+    CanonicalKnowledgeBundle,
     CanonicalSnapshot,
     Chunk,
     Document,
@@ -19,6 +20,7 @@ from paperos_core.domain.parsing import ParsedIngestionResult, ParserArtifact, P
 __all__ = [
     "CanonicalBundle",
     "CanonicalIngestionResult",
+    "CanonicalKnowledgeBundle",
     "CanonicalSnapshot",
     "Chunk",
     "Document",

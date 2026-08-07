@@ -16,17 +16,28 @@ import httpx
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from paperos_core.adapters.cognee.runtime_config import CogneeRuntimeConfigReader
 from paperos_core.adapters.mineru.providers import DEFAULT_MINERU_CLOUD_ENDPOINT
 from paperos_core.config import load_settings, resolve_local_model_path
+from paperos_core.runtime.local_inference.runtime import local_runtime_usage
+
+
+class _RuntimeNotRequired(Exception):
+    pass
 
 
 async def diagnose() -> dict[str, object]:
     settings = load_settings()
+    cognee_reader = CogneeRuntimeConfigReader()
+    cognee = cognee_reader.read()
+    usage = local_runtime_usage(settings, cognee_reader)
     checks: dict[str, object] = {
         "python": {"version": platform.python_version(), "compatible": sys.version_info[:2] in {(3, 11), (3, 12)}},
         "configuration": {"valid": True, "path": str(settings.config_path)},
     }
     try:
+        if not usage.required:
+            raise _RuntimeNotRequired
         process = await asyncio.create_subprocess_exec(
             "node",
             "--version",
@@ -41,21 +52,32 @@ async def diagnose() -> dict[str, object]:
             "version": node,
             "compatible": int(node[1:].split(".")[0]) >= 22,
         }
+    except _RuntimeNotRequired:
+        checks["node"] = {"required": False, "skipped": True}
     except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
         checks["node"] = {"compatible": False, "error": str(exc)}
 
     models: dict[str, object] = {}
-    model_checks = [("embedding", settings.local_inference.embedding.model_path)]
-    if settings.retrieval.rerank_enabled:
-        model_checks.append(("reranker", settings.local_inference.reranker.model_path))
+    model_checks: list[tuple[str, Path]] = []
+    if usage.embedding:
+        model_checks.append(("embedding", settings.local_inference.embedding_model_path))
+    if usage.reranker:
+        model_checks.append(("reranker", settings.local_inference.reranker_model_path))
     for name, configured in model_checks:
         path = resolve_local_model_path(settings, configured)
         models[name] = {"exists": path.is_file(), "path": str(path.resolve(strict=False))}
     checks["models"] = models
     checks["local_runtime"] = {
-        "required": settings.cognee.embedding.local_runtime,
-        "embedding_provider": settings.cognee.embedding.provider,
-        "embedding_model": settings.cognee.embedding.model,
+        "enabled": settings.local_inference.enabled,
+        "required": usage.required,
+        "embedding_used": usage.embedding,
+        "reranker_used": usage.reranker,
+        "embedding_endpoint_matches": cognee.embedding_targets(
+            settings.local_inference.host, settings.local_inference.port
+        ),
+        "embedding_provider": cognee.embedding_provider,
+        "embedding_model": cognee.embedding_model,
+        "cuda_devices": settings.local_inference.cuda_devices,
     }
 
     mineru_endpoint = (settings.mineru.endpoint or DEFAULT_MINERU_CLOUD_ENDPOINT).rstrip("/")
@@ -70,10 +92,9 @@ async def diagnose() -> dict[str, object]:
     except httpx.HTTPError as exc:
         checks["mineru"] = {"reachable": False, "error": str(exc)}
     checks["llm"] = {
-        "provider": settings.llm.provider,
-        "endpoint": settings.llm.endpoint,
-        "model": settings.llm.model,
-        "api_key_configured": bool(settings.llm.api_key_value()),
+        "provider": cognee.llm_provider,
+        "endpoint": cognee.llm_endpoint,
+        "model": cognee.llm_model,
     }
     checks["data_directory"] = {
         "path": str(settings.data_dir),
@@ -82,9 +103,12 @@ async def diagnose() -> dict[str, object]:
         "writable": os.access(settings.data_dir, os.W_OK),
     }
     checks["cognee"] = {
-        "system": settings.cognee.system_database.exists(),
-        "vector": settings.cognee.vector_database.exists(),
-        "graph": settings.cognee.graph_database.exists(),
+        "db_provider": cognee.db_provider,
+        "db_path": cognee.db_path,
+        "vector_provider": cognee.vector_db_provider,
+        "vector_url": cognee.vector_db_url,
+        "graph_provider": cognee.graph_database_provider,
+        "graph_path": cognee.graph_file_path,
     }
     checks["ports"] = {
         "api": {

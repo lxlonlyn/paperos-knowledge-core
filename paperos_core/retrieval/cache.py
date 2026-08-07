@@ -12,7 +12,11 @@ from paperos_core.paths import DataPaths
 from paperos_core.retrieval.candidates import QueryRequest, QueryResponse
 from paperos_core.retrieval.corpus import CorpusView
 
-QUERY_CACHE_VERSION = "5"
+QUERY_CACHE_VERSIONS = {
+    "truth": "10",
+    "associative": "16",
+    "comprehensive": "16",
+}
 
 
 class QueryCache:
@@ -32,7 +36,7 @@ class QueryCache:
             request.model_dump_json(),
             *snapshot_ids,
             *improvement_ids,
-            id_version=QUERY_CACHE_VERSION,
+            id_version=QUERY_CACHE_VERSIONS[request.profile.value],
         )
 
     def get(self, key: str) -> QueryResponse | None:

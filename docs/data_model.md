@@ -225,7 +225,6 @@ Required fields:
 * `pipeline_version`
 * `cleaning_version`
 * `classification_version`
-* `chunking_version`
 * `reference_processing_version`
 * `manifest_path`
 * `created_at`
@@ -433,8 +432,8 @@ Optional fields:
 * `page_start`
 * `page_end`
 * `token_count`
-* `character_start`
-* `character_end`
+* exact element-local spans with `character_start_in_element`,
+  `character_end_in_element`, `token_start`, and `token_end`
 * `previous_chunk_id`
 * `next_chunk_id`
 * `overlap_source_chunk_ids`

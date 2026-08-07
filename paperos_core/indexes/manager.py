@@ -1,4 +1,4 @@
-"""Coordinate FTS with Cognee-owned graph and vector projections."""
+"""Manage PaperOS FTS and its consistency with the chunk projection."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import os
 import tempfile
 from pathlib import Path
 
-from paperos_core.adapters.cognee.compat import CogneeDatasetBinding
 from paperos_core.domain.canonical import CanonicalBundle, Chunk
 from paperos_core.errors import IndexStorageError
 from paperos_core.indexes.lexical_store import LexicalStore
@@ -19,44 +18,23 @@ class IndexManager:
     def __init__(
         self,
         paths: DataPaths,
-        *,
-        embedding_model: str,
-        embedding_dimensions: int,
     ) -> None:
         self.paths = paths
         self.lexical = LexicalStore(paths.indexes / "lexical.sqlite3")
-        self.embedding_model = embedding_model
-        self.embedding_dimensions = embedding_dimensions
 
     async def index_bundle(
         self,
         bundle: CanonicalBundle,
         *,
         chunks: list[Chunk],
-        cognee_manifest: Path,
-        cognee_object_ids: list[str],
-        cognee_vector_object_ids: list[str],
-        relation_count: int,
-        dataset_binding: CogneeDatasetBinding,
     ) -> tuple[IndexManifest, Path]:
         lexical_ids = self.lexical.upsert_bundle(bundle, chunks=chunks)
         manifest = IndexManifest(
             canonical_snapshot_id=bundle.snapshot.id,
             document_id=bundle.document.id,
-            dataset_name=dataset_binding.dataset_name,
-            cognee_dataset_id=dataset_binding.dataset_id,
-            cognee_data_id=dataset_binding.data_id,
-            cognee_pipeline_run_id=dataset_binding.pipeline_run_id,
-            cognee_provenance_backend=dataset_binding.provenance_backend,
-            embedding_model=self.embedding_model,
-            embedding_dimensions=self.embedding_dimensions,
             lexical_database=self.lexical.path,
-            vector_database=self.paths.cognee / "vector",
-            cognee_manifest=cognee_manifest,
             lexical_object_ids=lexical_ids,
-            vector_object_ids=cognee_vector_object_ids,
-            cognee_object_ids=cognee_object_ids,
-            relation_count=relation_count,
+            chunk_projection_ids=[chunk.id for chunk in chunks],
         )
         path = self.paths.indexes / "manifests" / f"{bundle.snapshot.id}.json"
         _atomic_json(path, manifest.model_dump(mode="json"))
@@ -72,19 +50,15 @@ class IndexManager:
     ) -> None:
         chunk_ids = {chunk.id for chunk in chunks}
         lexical_ids = set(self.lexical.object_ids(bundle.document.id))
-        vector_ids = set(manifest.vector_object_ids)
-        cognee_ids = set(manifest.cognee_object_ids)
         failures: dict[str, object] = {}
         if not chunk_ids.issubset(lexical_ids):
             failures["lexical_missing_chunks"] = sorted(chunk_ids - lexical_ids)
-        if not chunk_ids.issubset(vector_ids):
-            failures["vector_chunk_mismatch"] = {
-                "missing": sorted(chunk_ids - vector_ids),
+        projected_ids = set(manifest.chunk_projection_ids)
+        if projected_ids != chunk_ids:
+            failures["chunk_projection_mismatch"] = {
+                "missing": sorted(chunk_ids - projected_ids),
+                "unexpected": sorted(projected_ids - chunk_ids),
             }
-        if not chunk_ids.issubset(cognee_ids):
-            failures["cognee_missing_chunks"] = sorted(chunk_ids - cognee_ids)
-        if not vector_ids.issubset(cognee_ids):
-            failures["vector_not_in_cognee"] = sorted(vector_ids - cognee_ids)
         if failures:
             raise IndexStorageError(
                 "Canonical ID consistency validation failed across derived stores.",

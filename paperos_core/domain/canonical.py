@@ -6,7 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import ConfigDict, Field
+from pydantic import Field
 
 from paperos_core.domain.documents import DomainModel, utc_now
 from paperos_core.domain.enums import ElementType, ReferenceResolutionStatus
@@ -113,6 +113,18 @@ class Element(DomainModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ChunkSpan(DomainModel):
+    """Exact coordinates of one chunk fragment in its canonical element."""
+
+    id: str
+    element_id: str
+    text: str
+    character_start_in_element: int = Field(ge=0)
+    character_end_in_element: int = Field(ge=0)
+    token_start: int = Field(ge=0)
+    token_end: int = Field(ge=0)
+
+
 class Chunk(DomainModel):
     id: str
     document_id: str
@@ -124,14 +136,13 @@ class Chunk(DomainModel):
     chunking_version: str = CHUNKING_VERSION
     element_ids: list[str] = Field(min_length=1)
     element_span_ids: list[str] = Field(default_factory=list)
+    spans: list[ChunkSpan] = Field(default_factory=list)
     section_id: str | None = None
     section_path: str | None = None
     page_start: int | None = Field(default=None, ge=1)
     page_end: int | None = Field(default=None, ge=1)
     bounding_box: tuple[float, float, float, float] | None = None
     token_count: int | None = Field(default=None, ge=1)
-    character_start: int | None = Field(default=None, ge=0)
-    character_end: int | None = Field(default=None, ge=0)
     previous_chunk_id: str | None = None
     next_chunk_id: str | None = None
     overlap_source_chunk_ids: list[str] = Field(default_factory=list)
@@ -166,10 +177,6 @@ class ReferenceEntry(DomainModel):
 
 
 class CanonicalSnapshot(DomainModel):
-    # Legacy snapshots persisted a chunking_version before the chunk projection
-    # split; tolerate it on load while never writing it again.
-    model_config = ConfigDict(extra="allow")
-
     id: str
     source_file_id: str
     parse_run_id: str
@@ -214,6 +221,13 @@ class CanonicalBundle(DomainModel):
             "element_types": sorted({element.element_type.value for element in self.elements}),
             "warnings": self.warnings,
         }
+
+
+class CanonicalKnowledgeBundle(DomainModel):
+    """Explicit composite view when canonical and derived chunks are both needed."""
+
+    canonical: CanonicalBundle
+    projection: ChunkProjection
 
 
 class CanonicalIngestionResult(DomainModel):

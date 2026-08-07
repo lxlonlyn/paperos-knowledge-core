@@ -72,8 +72,8 @@ class MinerUCloudProvider:
     def _require_key(self) -> str:
         if not self.api_key:
             raise MinerUConfigurationError(
-                "MinerU Cloud requires the MINERU_API_KEY environment variable.",
-                affected="MINERU_API_KEY",
+                "MinerU Cloud requires mineru.api_key in paperos.toml.",
+                affected="mineru.api_key",
             )
         return self.api_key
 
@@ -95,7 +95,7 @@ class MinerUCloudProvider:
             )
             if response.status_code in {401, 403}:
                 raise MinerUAuthenticationError(
-                    "MinerU rejected MINERU_API_KEY during health check.",
+                    "MinerU rejected the configured mineru.api_key during health check.",
                     affected=self.endpoint,
                 )
             if response.status_code >= 500:

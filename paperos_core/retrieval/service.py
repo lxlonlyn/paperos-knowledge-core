@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
+
 from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
+from paperos_core.adapters.cognee.llm import LLMClient
 from paperos_core.adapters.cognee.search import CogneeSearchAdapter
-from paperos_core.adapters.llm import LLMClient
 from paperos_core.config import RuntimeSettings
 from paperos_core.feedback.service import FeedbackService
 from paperos_core.indexes.manager import IndexManager
@@ -81,6 +83,17 @@ class RetrievalService:
         pool = plan.candidate_pool_size
         query = request.query
         stages = ["profile_mapping"]
+        explicit_document_ids = corpus.explicitly_mentioned_document_ids(query)
+        comparative_query = (
+            request.profile is not RetrievalProfile.TRUTH
+            and _has_multi_document_cue(query)
+        )
+        apply_explicit_scope = bool(explicit_document_ids) and not (
+            len(explicit_document_ids) == 1 and comparative_query
+        )
+        if request.document_ids is None and apply_explicit_scope:
+            document_ids.intersection_update(explicit_document_ids)
+            stages.append("explicit_document_scope")
         channels: dict[str, list[Candidate]] = {}
 
         if "lexical" in plan.channels:
@@ -99,7 +112,7 @@ class RetrievalService:
                 corpus,
                 query,
                 dataset_name=dataset_name,
-                search_type=plan.search_type,
+                search_type=plan.search_types["semantic"],
                 limit=pool,
                 document_ids=document_ids,
                 chunk_only=request.profile is RetrievalProfile.TRUTH,
@@ -112,7 +125,7 @@ class RetrievalService:
                 corpus,
                 query,
                 dataset_name=dataset_name,
-                search_type=plan.search_type,
+                search_type=plan.search_types["entity_claim"],
                 limit=pool,
                 document_ids=document_ids,
             )
@@ -124,7 +137,7 @@ class RetrievalService:
                 corpus,
                 query,
                 dataset_name=dataset_name,
-                search_type=plan.search_type,
+                search_type=plan.search_types["graph"],
                 limit=pool,
                 depth=plan.graph_depth,
                 document_ids=document_ids,
@@ -137,7 +150,7 @@ class RetrievalService:
                 corpus,
                 query,
                 dataset_name=dataset_name,
-                search_type=plan.search_type,
+                search_type=plan.search_types["global_context"],
                 limit=pool,
                 document_ids=document_ids,
             )
@@ -165,14 +178,18 @@ class RetrievalService:
         else:
             reranked = fused
         truth_profile = request.profile is RetrievalProfile.TRUTH
+        if truth_profile:
+            max_per_document = plan.top_k
+        elif apply_explicit_scope:
+            max_per_document = math.ceil(
+                plan.top_k / max(len(explicit_document_ids), 1)
+            )
+        else:
+            max_per_document = self.config.retrieval.max_chunks_per_document
         selected = diversify(
             reranked,
-            limit=min(plan.top_k, 6) if truth_profile else plan.top_k,
-            max_per_document=(
-                plan.top_k
-                if truth_profile
-                else self.config.retrieval.max_chunks_per_document
-            ),
+            limit=plan.top_k,
+            max_per_document=max_per_document,
             max_per_section=self.config.retrieval.max_chunks_per_section,
             seed_each_document=not truth_profile,
             aspect_queries=[query],
@@ -181,11 +198,13 @@ class RetrievalService:
         evidence = format_evidence(selected, corpus.bundles)
         recall_context: list[str] | None = None
         if request.profile is RetrievalProfile.COMPREHENSIVE:
-            recall_context = await self.search.recall_context(
+            recall_hits = await self.search.recall_context(
                 query,
                 dataset=dataset_name,
                 top_k=pool,
+                search_type=plan.search_types["recall"],
             )
+            recall_context = [hit.text for hit in recall_hits]
             stages.append("cognee_recall")
         answer = await synthesize_answer(
             self.llm,
@@ -201,7 +220,7 @@ class RetrievalService:
             profile=request.profile,
             dataset=dataset_name,
             answer=answer,
-            answer_model=self.llm.config.model,
+            answer_model=self.llm.model,
             stages=stages,
             channels_used=list(channels),
             evidence=evidence,
@@ -217,3 +236,20 @@ class RetrievalService:
         )
         self.cache.put(response)
         return response
+
+
+def _has_multi_document_cue(query: str) -> bool:
+    normalized = query.casefold()
+    return any(
+        cue in normalized
+        for cue in (
+            "分别",
+            "比较",
+            "连续谱",
+            "这四篇",
+            "三篇",
+            "compare",
+            "versus",
+            " vs ",
+        )
+    )

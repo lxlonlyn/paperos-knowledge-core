@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from paperos_core.adapters.cognee.runtime_config import CogneeRuntimeConfigReader
 from paperos_core.config import RuntimeSettings, resolve_local_model_path
 from paperos_core.errors import (
     LocalInferenceConfigurationError,
@@ -22,16 +23,41 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SERVICES_ROOT = PROJECT_ROOT / "services"
 
 
+@dataclass(frozen=True, slots=True)
+class LocalRuntimeUsage:
+    embedding: bool
+    reranker: bool
+
+    @property
+    def required(self) -> bool:
+        return self.embedding or self.reranker
+
+
+def local_runtime_usage(
+    settings: RuntimeSettings, cognee_config: CogneeRuntimeConfigReader
+) -> LocalRuntimeUsage:
+    local = settings.local_inference
+    if not local.enabled:
+        return LocalRuntimeUsage(embedding=False, reranker=False)
+    resolved = cognee_config.read()
+    return LocalRuntimeUsage(
+        embedding=resolved.embedding_targets(local.host, local.port),
+        reranker=settings.retrieval.rerank_enabled,
+    )
+
+
 class LocalInferenceRuntime:
     def __init__(
         self,
         settings: RuntimeSettings,
         paths: DataPaths,
         client: LocalInferenceClient,
+        cognee_config: CogneeRuntimeConfigReader,
     ) -> None:
         self.settings = settings
         self.paths = paths
         self.client = client
+        self.cognee_config = cognee_config
         self.process: asyncio.subprocess.Process | None = None
         self._log_stream: BinaryIO | None = None
         self._owned = False
@@ -52,28 +78,15 @@ class LocalInferenceRuntime:
     @property
     def required(self) -> bool:
         """Start the child when local embedding or the local reranker is enabled."""
-        return (
-            self.settings.cognee.embedding.local_runtime
-            or self.settings.retrieval.rerank_enabled
-        )
+        return local_runtime_usage(self.settings, self.cognee_config).required
 
-    def _model_path(
-        self, configured: Path, *, label: str, expected_sha256: str | None
-    ) -> Path:
+    def _model_path(self, configured: Path, *, label: str) -> Path:
         result = resolve_local_model_path(self.settings, configured)
         if not result.is_file():
             raise LocalInferenceConfigurationError(
                 f"Configured local {label} model file does not exist.",
                 affected=result,
             )
-        if expected_sha256 is not None:
-            digest = _sha256(result)
-            if digest != expected_sha256.casefold():
-                raise LocalInferenceConfigurationError(
-                    f"Configured local {label} model checksum does not match.",
-                    affected=result,
-                    details={"expected_sha256": expected_sha256, "actual_sha256": digest},
-                )
         return result
 
     def _service_root(self) -> Path:
@@ -91,21 +104,21 @@ class LocalInferenceRuntime:
         if self.running and self._owned:
             return await self.client.health()
         local = self.settings.local_inference
+        if not self.required:
+            return {"status": "disabled"}
         await self._assert_port_available(local.host, local.port)
         service_root = self._service_root()
-        model_path = self._model_path(
-            local.embedding.model_path,
-            label="embedding",
-            expected_sha256=local.embedding.sha256,
+        cognee = self.cognee_config.read()
+        usage = local_runtime_usage(self.settings, self.cognee_config)
+        embedding_enabled = usage.embedding
+        model_path = (
+            self._model_path(local.embedding_model_path, label="embedding")
+            if embedding_enabled
+            else None
         )
-        embedding = self.settings.cognee.embedding
-        reranker_enabled = self.settings.retrieval.rerank_enabled
+        reranker_enabled = usage.reranker
         reranker_path = (
-            self._model_path(
-                local.reranker.model_path,
-                label="reranker",
-                expected_sha256=local.reranker.sha256,
-            )
+            self._model_path(local.reranker_model_path, label="reranker")
             if reranker_enabled
             else None
         )
@@ -115,14 +128,22 @@ class LocalInferenceRuntime:
         environment = dict(os.environ)
         environment.update(
             {
+                "CUDA_VISIBLE_DEVICES": ",".join(
+                    str(device) for device in local.cuda_devices
+                ),
                 "NODE_LLAMA_CPP_SKIP_DOWNLOAD": "true",
                 "PAPEROS_LOCAL_INFERENCE_HOST": local.host,
                 "PAPEROS_LOCAL_INFERENCE_PORT": str(local.port),
-                "PAPEROS_EMBEDDING_MODEL_PATH": str(model_path),
-                "PAPEROS_EMBEDDING_MODEL_NAME": embedding.model,
-                "PAPEROS_EMBEDDING_DIMENSIONS": str(embedding.dimensions),
-                "PAPEROS_EMBEDDING_MAX_TOKENS": str(embedding.max_tokens),
+                "PAPEROS_EMBEDDING_ENABLED": "true" if embedding_enabled else "false",
+                "PAPEROS_EMBEDDING_MODEL_NAME": cognee.embedding_model,
+                "PAPEROS_EMBEDDING_DIMENSIONS": str(cognee.embedding_dimensions),
+                "PAPEROS_EMBEDDING_MAX_TOKENS": str(cognee.embedding_max_tokens),
                 "PAPEROS_RERANKER_ENABLED": "true" if reranker_enabled else "false",
+                **(
+                    {"PAPEROS_EMBEDDING_MODEL_PATH": str(model_path)}
+                    if model_path is not None
+                    else {}
+                ),
                 **(
                     {"PAPEROS_RERANKER_MODEL_PATH": str(reranker_path)}
                     if reranker_path is not None
@@ -154,10 +175,11 @@ class LocalInferenceRuntime:
                 "started_at": datetime.now(UTC).isoformat(),
                 "log_path": str(log_path),
                 "endpoint": self.endpoint,
+                "cuda_devices": local.cuda_devices,
             },
         )
         last_error: Exception | None = None
-        for _ in range(local.startup_timeout_seconds):
+        for _ in range(local.startup_timeout):
             if self.process.returncode is not None:
                 break
             try:
@@ -174,7 +196,7 @@ class LocalInferenceRuntime:
         exit_code = self.process.returncode
         raise LocalInferenceUnavailableError(
             "Local inference did not become healthy within "
-            f"{local.startup_timeout_seconds} seconds.",
+            f"{local.startup_timeout} seconds.",
             affected=log_path,
             details={
                 "last_error": str(last_error) if last_error else None,
@@ -236,11 +258,3 @@ class LocalInferenceRuntime:
             json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2),
             encoding="utf-8",
         )
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()

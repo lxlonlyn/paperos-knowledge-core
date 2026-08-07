@@ -39,7 +39,7 @@ class QueryPlan(BaseModel):
 
     profile: RetrievalProfile
     channels: list[str]
-    search_type: str
+    search_types: dict[str, str]
     top_k: int
     candidate_pool_size: int
     graph_depth: int

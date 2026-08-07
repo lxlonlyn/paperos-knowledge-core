@@ -74,8 +74,8 @@ The MinerU adapter owns submission, task polling, finite timeout/retry handling,
 result retrieval, and provider-specific response parsing. No MinerU field passes
 the canonical boundary.
 
-`LLMClient` uses `LLMSettings` and provides semantic enrichment, retrieval
-planning, and evidence-bound answer synthesis exclusively through Cognee's
+`LLMClient` reads credential-free provider/model metadata through
+`CogneeRuntimeConfigReader` and provides semantic enrichment and evidence-bound answer synthesis exclusively through Cognee's
 `LLMGateway`. It never starts the provider and never knows the LLM vendor.
 
 ## Private local inference protocol

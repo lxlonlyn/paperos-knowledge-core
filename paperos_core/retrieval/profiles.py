@@ -30,15 +30,28 @@ def build_query_plan(request: QueryRequest, config: RuntimeSettings) -> QueryPla
             "confirmed_knowledge",
         ],
     }[request.profile]
-    search_type = {
-        RetrievalProfile.TRUTH: "GRAPH_COMPLETION",
-        RetrievalProfile.ASSOCIATIVE: "GRAPH_COMPLETION_DECOMPOSITION",
-        RetrievalProfile.COMPREHENSIVE: "GRAPH_COMPLETION",
+    search_types = {
+        RetrievalProfile.TRUTH: {
+            "semantic": "PAPEROS_CHUNKS",
+        },
+        RetrievalProfile.ASSOCIATIVE: {
+            "semantic": "PAPEROS_ASSOCIATIVE_SEEDS",
+            "entity_claim": "PAPEROS_ENTITY_CLAIM",
+            "graph": "PAPEROS_GRAPH_SEEDS",
+            "global_context": "PAPEROS_SUMMARIES",
+        },
+        RetrievalProfile.COMPREHENSIVE: {
+            "semantic": "PAPEROS_CHUNKS",
+            "entity_claim": "PAPEROS_ENTITY_CLAIM",
+            "graph": "PAPEROS_GRAPH_SEEDS",
+            "global_context": "PAPEROS_SUMMARIES",
+            "recall": "PAPEROS_GRAPH_SEEDS",
+        },
     }[request.profile]
     return QueryPlan(
         profile=request.profile,
         channels=channels,
-        search_type=search_type,
+        search_types=search_types,
         top_k=request.top_k or config.retrieval.top_k,
         candidate_pool_size=config.retrieval.candidate_pool_size,
         graph_depth=config.retrieval.graph_depth,

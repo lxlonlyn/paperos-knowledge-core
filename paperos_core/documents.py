@@ -149,7 +149,7 @@ class DocumentService:
             for bundle in reversed(self.canonical_repository.list_bundles())
             if bundle.document.id == document_id
         )
-        vector_count = await self.cognee.delete_document_vectors(bundle.snapshot.id)
+        vector_count = await self.cognee.delete_document_data(bundle.snapshot.id)
         with self._connect() as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO document_tombstones(document_id) VALUES (?)",

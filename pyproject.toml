@@ -1,8 +1,3 @@
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-pythonpath = ["."]
-
 [tool.ruff]
 line-length = 100
 target-version = "py311"
@@ -11,11 +6,3 @@ target-version = "py311"
 python_version = "3.11"
 strict = true
 packages = ["paperos_core"]
-
-[tool.coverage.run]
-branch = true
-source = ["paperos_core"]
-
-[tool.coverage.report]
-show_missing = true
-skip_covered = true

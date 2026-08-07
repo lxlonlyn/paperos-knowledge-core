@@ -145,9 +145,9 @@ class CanonicalRepository:
                     INSERT OR IGNORE INTO canonical_snapshots (
                         id, source_file_id, parse_run_id, document_id, manifest_path,
                         created_at, schema_version, id_version, pipeline_version,
-                        cleaning_version, classification_version, chunking_version,
+                        cleaning_version, classification_version,
                         reference_processing_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         snapshot.id,
@@ -161,7 +161,6 @@ class CanonicalRepository:
                         snapshot.pipeline_version,
                         snapshot.cleaning_version,
                         snapshot.classification_version,
-                        CHUNKING_VERSION,
                         snapshot.reference_processing_version,
                     ),
                 )

@@ -14,6 +14,7 @@ from paperos_core.api.health import router as health_router
 from paperos_core.api.ingestion import router as ingestion_router
 from paperos_core.api.jobs import router as jobs_router
 from paperos_core.api.query import router as query_router
+from paperos_core.api.visualize import router as visualize_router
 from paperos_core.application import Application, create_application
 from paperos_core.config import RuntimeSettings
 from paperos_core.errors import PaperOSError
@@ -29,9 +30,6 @@ def create_app(settings: RuntimeSettings) -> FastAPI:
             raise RuntimeError("PaperOS Application was already constructed for this server.")
         application = create_application(settings)
         app.state.paperos = application
-        from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
-
-        CogneeCompatibilityAdapter.include_cognee_routers(app)
         try:
             await application.start()
             yield
@@ -54,6 +52,7 @@ def create_app(settings: RuntimeSettings) -> FastAPI:
         jobs_router,
         feedback_router,
         health_router,
+        visualize_router,
     ):
         api.include_router(router)
     return api

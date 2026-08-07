@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import Literal
@@ -134,3 +135,53 @@ class CorpusView:
         if requested_document_ids is None:
             return dataset_documents
         return dataset_documents.intersection(requested_document_ids)
+
+    def explicitly_mentioned_document_ids(self, query: str) -> set[str]:
+        """Resolve unambiguous title/identifier mentions without an LLM planner."""
+        normalized_query = _normalized_title_text(query)
+        title_tokens = {
+            document_id: _normalized_title_text(bundle.document.title).split()
+            for document_id, bundle in self.bundles.items()
+        }
+        prefixes = {
+            document_id: {
+                " ".join(tokens[:length])
+                for length in range(2, len(tokens) + 1)
+                if len(" ".join(tokens[:length])) >= 7
+            }
+            for document_id, tokens in title_tokens.items()
+        }
+        matched: set[str] = set()
+        for document_id, bundle in self.bundles.items():
+            title = " ".join(title_tokens[document_id])
+            identifiers = {
+                _normalized_title_text(token)
+                for token in re.findall(
+                    r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+", bundle.document.title
+                )
+                if len(token) >= 5
+            }
+            unique_prefixes = {
+                prefix
+                for prefix in prefixes[document_id]
+                if not any(
+                    prefix in other_prefixes
+                    for other_id, other_prefixes in prefixes.items()
+                    if other_id != document_id
+                )
+            }
+            mentions = {title, *identifiers, *unique_prefixes}
+            if any(
+                _contains_title_phrase(normalized_query, mention)
+                for mention in mentions
+            ):
+                matched.add(document_id)
+        return matched
+
+
+def _normalized_title_text(value: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def _contains_title_phrase(normalized_query: str, phrase: str) -> bool:
+    return f" {phrase} " in f" {normalized_query} "

@@ -1,4 +1,4 @@
-"""Versioned manifests for rebuildable Gate 4 projections."""
+"""PaperOS-owned FTS and chunk-projection manifests."""
 
 from __future__ import annotations
 
@@ -11,8 +11,6 @@ from paperos_core.domain.documents import utc_now
 
 INDEX_SCHEMA_VERSION = "1.0"
 LEXICAL_INDEX_VERSION = "1"
-VECTOR_INDEX_VERSION = "2"
-COGNEE_MAPPING_VERSION = "3"
 
 
 class IndexManifest(BaseModel):
@@ -20,25 +18,11 @@ class IndexManifest(BaseModel):
 
     canonical_snapshot_id: str
     document_id: str
-    dataset_name: str
-    cognee_dataset_id: str
-    cognee_data_id: str
-    cognee_pipeline_run_id: str
-    cognee_provenance_backend: str
     schema_version: str = INDEX_SCHEMA_VERSION
     lexical_index_version: str = LEXICAL_INDEX_VERSION
-    vector_index_version: str = VECTOR_INDEX_VERSION
-    cognee_mapping_version: str = COGNEE_MAPPING_VERSION
-    embedding_model: str
-    embedding_dimensions: int = Field(gt=0)
-    vector_backend: str = "cognee"
     lexical_database: Path
-    vector_database: Path
-    cognee_manifest: Path
     lexical_object_ids: list[str]
-    vector_object_ids: list[str]
-    cognee_object_ids: list[str]
-    relation_count: int = Field(ge=0)
+    chunk_projection_ids: list[str]
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -55,7 +39,7 @@ class IndexingReport(BaseModel):
     manifest_path: Path
     cognee_manifest_path: Path
     lexical_database: Path
-    vector_database: Path
+    vector_database: str
     vector_backend: str = "cognee"
     cognee_object_count: int = Field(ge=0)
     relation_count: int = Field(ge=0)

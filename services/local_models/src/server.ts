@@ -18,9 +18,11 @@ interface RerankRequest {
 }
 
 const config = loadConfig();
-const embeddings = new EmbeddingService(config);
+const embeddings = config.embeddingEnabled ? new EmbeddingService(config) : null;
 const reranker = new RerankerService(config);
-await embeddings.initialize();
+if (embeddings) {
+  await embeddings.initialize();
+}
 if (config.rerankerEnabled) {
   await reranker.initialize();
 }
@@ -68,9 +70,11 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/health") {
       send(response, 200, {
         status: "healthy",
+        cuda_visible_devices: config.cudaVisibleDevices,
         embedding: {
           model: config.embeddingModelName,
           dimensions: config.embeddingDimensions,
+          loaded: config.embeddingEnabled,
         },
         reranker: {
           model: config.rerankerModelName,
@@ -104,6 +108,9 @@ const server = createServer(async (request, response) => {
       return;
     }
     if (request.method === "POST" && url.pathname === "/v1/embeddings") {
+      if (!embeddings) {
+        throw new RequestError("Embedding is disabled for this runtime", 404, "embedding_disabled");
+      }
       const body = (await readJson(request)) as Partial<EmbeddingRequest>;
       const inputs = embeddingInput(body.input);
       const vectors = await embeddings.embed(inputs);
@@ -189,6 +196,7 @@ server.listen(config.port, config.host, () => {
       reranker_model: config.rerankerEnabled
         ? config.rerankerModelName
         : "disabled",
+      cuda_visible_devices: config.cudaVisibleDevices,
     }) + "\n",
   );
 });
@@ -200,7 +208,9 @@ async function shutdown(signal: string): Promise<void> {
   process.stdout.write(JSON.stringify({event: "shutdown", signal}) + "\n");
   server.close();
   await reranker.dispose();
-  await embeddings.dispose();
+  if (embeddings) {
+    await embeddings.dispose();
+  }
   process.exit(0);
 }
 

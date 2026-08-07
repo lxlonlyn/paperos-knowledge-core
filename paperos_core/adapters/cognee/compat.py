@@ -2,7 +2,7 @@
 
 PaperOS business code never imports Cognee internals. Everything that touches
 Cognee's infrastructure, ORM models, pipeline tasks, or storage engines lives
-here and is covered by ``tests/contract/test_cognee_compat.py``. The public
+here and is checked by the real-case acceptance entry. The public
 surface used elsewhere is limited to ``cognee.run_custom_pipeline``,
 ``cognee.search``/``cognee.recall``, and the ``LLMGateway``.
 
@@ -24,19 +24,30 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-from uuid import UUID
+from typing import TYPE_CHECKING, Any
+from uuid import NAMESPACE_URL, UUID, uuid5
+
+from cognee.infrastructure.engine import (  # type: ignore[import-untyped]
+    DataPoint as DataPoint,  # noqa: PLC0414
+)
 
 # The public ``cognee.run_custom_pipeline`` accepts Task objects built with the
 # ``task`` decorator. The decorator lives in Cognee's pipeline internals, so it
 # is re-exported here to keep every Cognee-internal import inside this module.
-from cognee.modules.pipelines.tasks.task import task  # noqa: F401  # type: ignore[import-untyped]
+from cognee.modules.pipelines.tasks.task import (  # type: ignore[import-untyped]
+    task as task,  # noqa: PLC0414
+)
 
-from paperos_core.adapters.cognee.models import DataPointGraph
-from paperos_core.domain.datapoints import cognee_uuid
 from paperos_core.domain.documents import SourceFile
 from paperos_core.errors import CogneeStorageError
 from paperos_core.paths import DataPaths
+
+if TYPE_CHECKING:
+    from paperos_core.adapters.cognee.models import DataPointGraph
+
+
+def cognee_uuid(canonical_id: str, *, mapping_version: str = "1") -> UUID:
+    return uuid5(NAMESPACE_URL, f"paperos:cognee:{mapping_version}:{canonical_id}")
 
 
 def resolve_cognee_tokenizer() -> Any:
@@ -62,6 +73,7 @@ class CogneeVectorHit:
     cognee_id: str
     canonical_id: str
     object_type: str
+    text: str
     score: float
     source_chunk_ids: tuple[str, ...]
     derived_from_ids: tuple[str, ...]
@@ -116,7 +128,7 @@ class CogneeCompatibilityAdapter:
 
     @staticmethod
     def reset_configuration_caches() -> None:
-        """Make Cognee observe the environment installed by ``configure_cognee``."""
+        """Clear Cognee-owned settings caches (mainly for isolated tests)."""
         from cognee.base_config import get_base_config  # type: ignore[import-untyped]
         from cognee.infrastructure.databases.graph.config import (  # type: ignore[import-untyped]
             get_graph_config,
@@ -127,7 +139,7 @@ class CogneeCompatibilityAdapter:
         from cognee.infrastructure.databases.vector.config import (  # type: ignore[import-untyped]
             get_vectordb_config,
         )
-        from cognee.infrastructure.databases.vector.embeddings.config import (  # type: ignore[import-untyped]
+        from cognee.infrastructure.databases.vector.embeddings.config import (
             get_embedding_config,
         )
         from cognee.infrastructure.llm.config import (  # type: ignore[import-untyped]
@@ -136,14 +148,60 @@ class CogneeCompatibilityAdapter:
 
         get_base_config.cache_clear()
         get_graph_config.cache_clear()
-        # Cognee caches the first LLMConfig() forever; without clearing it,
-        # PaperOS's configure_cognee environment changes are ignored after the
-        # first LLM call in the process (health checks would keep using the
-        # originally cached provider/model).
         get_llm_config.cache_clear()
         get_relational_config.cache_clear()
         get_vectordb_config.cache_clear()
         get_embedding_config.cache_clear()
+
+    @staticmethod
+    def runtime_config_snapshot() -> dict[str, Any]:
+        """Read Cognee's resolved settings without returning any credentials."""
+        from cognee.infrastructure.databases.graph.config import (
+            get_graph_config,
+        )
+        from cognee.infrastructure.databases.relational.config import (
+            get_relational_config,
+        )
+        from cognee.infrastructure.databases.vector.config import (
+            get_vectordb_config,
+        )
+        from cognee.infrastructure.databases.vector.embeddings.config import (
+            get_embedding_config,
+        )
+        from cognee.infrastructure.llm.config import (
+            get_llm_config,
+        )
+
+        llm = get_llm_config()
+        embedding = get_embedding_config()
+        relational = get_relational_config()
+        vector = get_vectordb_config()
+        graph = get_graph_config()
+        return {
+            "llm_provider": llm.llm_provider,
+            "llm_model": llm.llm_model,
+            "llm_endpoint": llm.llm_endpoint,
+            "embedding_provider": embedding.embedding_provider,
+            "embedding_model": embedding.embedding_model,
+            "embedding_endpoint": embedding.embedding_endpoint,
+            "embedding_dimensions": embedding.embedding_dimensions,
+            "embedding_max_tokens": embedding.embedding_max_completion_tokens,
+            "db_provider": relational.db_provider,
+            "db_path": relational.db_path,
+            "vector_db_provider": vector.vector_db_provider,
+            "vector_db_url": vector.vector_db_url,
+            "graph_database_provider": graph.graph_database_provider,
+            "graph_file_path": graph.graph_file_path,
+        }
+
+    @staticmethod
+    async def test_llm_connection() -> None:
+        """Delegate provider-specific validation to Cognee."""
+        from cognee.infrastructure.llm.utils import (  # type: ignore[import-untyped]
+            test_llm_connection,
+        )
+
+        await test_llm_connection()
 
     async def aclose(self) -> None:
         """Close Cognee's process-local database engines without deleting data."""
@@ -196,6 +254,18 @@ class CogneeCompatibilityAdapter:
         for session in subprocess_sessions:
             _close_subprocess_queues(session)
         subprocess_sessions.clear()
+        # Cognee telemetry owns a process-wide aiohttp session but exposes no
+        # public shutdown hook in 1.4.0. Closing it here prevents connector
+        # leaks when PaperOS exits after either a successful run or a failed
+        # real-case assertion. This private lifecycle access is intentionally
+        # kept inside the compatibility boundary.
+        from cognee.shared import utils as cognee_utils  # type: ignore[import-untyped]
+
+        telemetry_session = getattr(cognee_utils, "_telemetry_session", None)
+        if telemetry_session is not None and not telemetry_session.closed:
+            await telemetry_session.close()
+        cognee_utils._telemetry_session = None
+        cognee_utils._telemetry_session_loop = None
         gc.collect()
 
     async def ensure_dataset(self, dataset_name: str) -> Any:
@@ -248,7 +318,7 @@ class CogneeCompatibilityAdapter:
             Data,
             DatasetData,
         )
-        from cognee.modules.users.methods import (  # type: ignore[import-untyped]
+        from cognee.modules.users.methods import (
             get_default_user,
         )
 
@@ -280,7 +350,7 @@ class CogneeCompatibilityAdapter:
             "data_size": source.size_bytes,
             "importance_weight": 0.5,
         }
-        from cognee.modules.data.methods import (  # type: ignore[import-untyped]
+        from cognee.modules.data.methods import (
             get_unique_data_id,
         )
 
@@ -309,7 +379,7 @@ class CogneeCompatibilityAdapter:
                 f"Cognee failed to register the PaperOS Data item: {exc}",
                 affected=source.id,
             ) from exc
-        return data_id
+        return UUID(str(data_id))
 
     async def add_data_points(
         self,
@@ -324,12 +394,13 @@ class CogneeCompatibilityAdapter:
         )
 
         try:
-            return await add_data_points(
+            result = await add_data_points(
                 data_points,
                 custom_edges=custom_edges,
                 embed_triplets=embed_triplets,
                 ctx=ctx,
             )
+            return list(result)
         except Exception as exc:
             raise CogneeStorageError(
                 f"Cognee failed to write structured DataPoints: {exc}",
@@ -351,7 +422,7 @@ class CogneeCompatibilityAdapter:
             )
 
     async def get_datapoint(self, canonical_id: str) -> dict[str, Any]:
-        from cognee.infrastructure.databases.graph.get_graph_engine import (  # type: ignore[import-untyped]
+        from cognee.infrastructure.databases.graph.get_graph_engine import (
             get_graph_engine,
         )
 
@@ -397,7 +468,7 @@ class CogneeCompatibilityAdapter:
         return sorted({node.canonical_id for nodes in groups.values() for node in nodes})
 
     async def vector_status(self) -> dict[str, object]:
-        from cognee.infrastructure.databases.vector import (  # type: ignore[import-untyped]
+        from cognee.infrastructure.databases.vector import (
             get_vector_engine_async,
         )
 
@@ -423,43 +494,137 @@ class CogneeCompatibilityAdapter:
             "dimensions": engine.embedding_engine.get_vector_size(),
         }
 
-    async def delete_document_vectors(self, snapshot_id: str) -> int:
-        """Delete one document's rebuildable vector projection from Cognee."""
-        from cognee.infrastructure.databases.vector import (  # type: ignore[import-untyped]
+    async def search_datapoint_vectors(
+        self,
+        query: str,
+        *,
+        dataset_name: str,
+        collections: tuple[tuple[str, str, str], ...],
+        canonical_ids: dict[str, str],
+        top_k: int,
+    ) -> list[CogneeVectorHit]:
+        """Search PaperOS DataPoint collections in one Cognee dataset.
+
+        Cognee 1.4's public ``CHUNKS`` retriever is bound to its built-in
+        ``DocumentChunk_text`` collection.  A custom pipeline correctly creates
+        collections such as ``ChunkDataPoint_text`` instead, but the public
+        search API cannot name them.  Keep this version-specific vector-engine
+        access here and return only normalized, provenance-bearing hits.
+
+        Each collection tuple contains ``(collection_name, text_field,
+        object_type)``.  ``ScoredResult.score`` is a cosine distance, so the
+        normalized score is monotonic with lower distance being better.
+        """
+        if top_k <= 0:
+            return []
+        from cognee.context_global_variables import (  # type: ignore[import-untyped]
+            set_database_global_context_variables,
+        )
+        from cognee.infrastructure.databases.vector import (
             get_vector_engine_async,
         )
+        from cognee.modules.data.methods import (
+            get_authorized_existing_datasets,
+        )
+        from cognee.modules.engine.operations.setup import (
+            setup,
+        )
+        from cognee.modules.users.methods import (
+            get_default_user,
+        )
 
-        manifest = self.read_manifest(snapshot_id)
-        mapping = manifest.get("canonical_to_cognee_id")
-        collections = manifest.get("vector_collections")
-        if not isinstance(mapping, dict) or not isinstance(collections, dict):
-            raise CogneeStorageError(
-                "Cognee manifest lacks vector ownership metadata; rebuild derived data first.",
-                affected=snapshot_id,
-            )
-        engine = await get_vector_engine_async()
-        deleted_ids: set[str] = set()
         try:
-            for collection, canonical_ids in collections.items():
-                if not isinstance(collection, str) or not isinstance(canonical_ids, list):
-                    continue
-                ids = [
-                    UUID(str(mapping[canonical_id]))
-                    for canonical_id in canonical_ids
-                    if canonical_id in mapping
-                ]
-                await engine.delete_data_points(collection, ids)
-                deleted_ids.update(
-                    canonical_id
-                    for canonical_id in canonical_ids
-                    if canonical_id in mapping
+            await setup()
+            user = await get_default_user()
+            datasets = await get_authorized_existing_datasets(
+                [dataset_name], "read", user
+            )
+            if len(datasets) != 1:
+                raise CogneeStorageError(
+                    "Cognee dataset does not resolve uniquely for vector search.",
+                    affected=dataset_name,
                 )
+            dataset = datasets[0]
+            best: dict[str, CogneeVectorHit] = {}
+            async with set_database_global_context_variables(
+                dataset.id, dataset.owner_id
+            ):
+                engine = await get_vector_engine_async()
+                for collection, text_field, object_type in collections:
+                    if not await engine.has_collection(collection):
+                        continue
+                    results = await engine.search(
+                        collection,
+                        query_text=query,
+                        query_vector=None,
+                        limit=top_k,
+                        include_payload=True,
+                    )
+                    for result in results:
+                        cognee_id = str(result.id)
+                        canonical_id = canonical_ids.get(cognee_id)
+                        payload = result.payload
+                        if not canonical_id or not isinstance(payload, dict):
+                            continue
+                        text = payload.get(text_field)
+                        if not isinstance(text, str) or not text.strip():
+                            continue
+                        distance = max(float(result.score), 0.0)
+                        hit = CogneeVectorHit(
+                            cognee_id=cognee_id,
+                            canonical_id=canonical_id,
+                            object_type=object_type,
+                            text=text,
+                            score=1.0 / (1.0 + distance),
+                            source_chunk_ids=tuple(
+                                _string_list(payload.get("source_chunk_ids"))
+                            ),
+                            derived_from_ids=tuple(
+                                _string_list(payload.get("derived_from_ids"))
+                            ),
+                            canonical_snapshot_id=(
+                                str(payload["canonical_snapshot_id"])
+                                if payload.get("canonical_snapshot_id")
+                                else None
+                            ),
+                        )
+                        previous = best.get(cognee_id)
+                        if previous is None or hit.score > previous.score:
+                            best[cognee_id] = hit
+            return sorted(
+                best.values(), key=lambda item: (-item.score, item.canonical_id)
+            )[:top_k]
+        except CogneeStorageError:
+            raise
         except Exception as exc:
             raise CogneeStorageError(
-                f"Cognee failed to delete document vectors: {exc}",
+                f"Cognee DataPoint vector search failed: {exc}",
+                affected=dataset_name,
+            ) from exc
+
+    async def delete_document_data(self, snapshot_id: str) -> int:
+        """Delete one registered document through Cognee's public dataset API."""
+        from cognee import datasets  # type: ignore[import-untyped]
+
+        manifest = self.read_manifest(snapshot_id)
+        dataset = manifest.get("dataset")
+        data_item = manifest.get("data_item")
+        if not isinstance(dataset, dict) or not isinstance(data_item, dict):
+            raise CogneeStorageError(
+                "Cognee manifest lacks dataset/data-item provenance.",
+                affected=snapshot_id,
+            )
+        try:
+            dataset_id = UUID(str(dataset["id"]))
+            data_id = UUID(str(data_item["id"]))
+            await datasets.delete_data(dataset_id=dataset_id, data_id=data_id)
+        except Exception as exc:
+            raise CogneeStorageError(
+                f"Cognee document deletion failed: {exc}",
                 affected=snapshot_id,
             ) from exc
-        return len(deleted_ids)
+        node_count = manifest.get("node_count", 0)
+        return int(node_count) if isinstance(node_count, int) else 0
 
     async def provenance_counts(
         self,
@@ -483,13 +648,13 @@ class CogneeCompatibilityAdapter:
                 provenance_node_count=0,
                 provenance_edge_count=0,
             )
-        from cognee.infrastructure.databases.graph.get_graph_engine import (  # type: ignore[import-untyped]
+        from cognee.infrastructure.databases.graph.get_graph_engine import (
             get_graph_engine,
         )
         from cognee.infrastructure.databases.provenance import (  # type: ignore[import-untyped]
             make_source_ref_key,
         )
-        from cognee.infrastructure.databases.relational import (  # type: ignore[import-untyped]
+        from cognee.infrastructure.databases.relational import (
             get_relational_engine,
         )
         from cognee.modules.graph.models import Edge, Node  # type: ignore[import-untyped]
@@ -550,7 +715,7 @@ class CogneeCompatibilityAdapter:
         """Read typed node properties for search-hit provenance backtracking."""
         if not cognee_ids:
             return {}
-        from cognee.infrastructure.databases.graph.get_graph_engine import (  # type: ignore[import-untyped]
+        from cognee.infrastructure.databases.graph.get_graph_engine import (
             get_graph_engine,
         )
 
@@ -580,7 +745,7 @@ class CogneeCompatibilityAdapter:
         """Narrow, finite-depth, typed-edge graph traversal with chunk provenance."""
         if not seeds or depth <= 0:
             return []
-        from cognee.infrastructure.databases.graph.get_graph_engine import (  # type: ignore[import-untyped]
+        from cognee.infrastructure.databases.graph.get_graph_engine import (
             get_graph_engine,
         )
 
@@ -603,7 +768,26 @@ class CogneeCompatibilityAdapter:
             str(node_id): _flatten_node(dict(properties))
             for node_id, properties in nodes
         }
-        base_score = max(seed.score for seed in seeds)
+        adjacency: dict[str, set[str]] = {}
+        for source_id, target_id, _relation_type, _properties in edges:
+            source_key = str(source_id)
+            target_key = str(target_id)
+            adjacency.setdefault(source_key, set()).add(target_key)
+            adjacency.setdefault(target_key, set()).add(source_key)
+        node_scores = {seed.cognee_id: seed.score for seed in seeds}
+        frontier = dict(node_scores)
+        for _hop in range(depth):
+            next_frontier: dict[str, float] = {}
+            for node_id, score in frontier.items():
+                propagated = score * 0.85
+                for neighbor_id in adjacency.get(node_id, set()):
+                    if propagated <= node_scores.get(neighbor_id, 0.0):
+                        continue
+                    node_scores[neighbor_id] = propagated
+                    next_frontier[neighbor_id] = propagated
+            frontier = next_frontier
+            if not frontier:
+                break
         evidence: list[CogneeTraversalEvidence] = []
         for source_id, target_id, relation_type, raw_properties in edges:
             relation = str(relation_type)
@@ -618,8 +802,8 @@ class CogneeCompatibilityAdapter:
                 dict.fromkeys(
                     [
                         *_string_list(properties.get("source_chunk_ids")),
-                        *_string_list(source.get("source_chunk_ids")),
-                        *_string_list(target.get("source_chunk_ids")),
+                        *_node_source_chunk_ids(source),
+                        *_node_source_chunk_ids(target),
                     ]
                 )
             )
@@ -650,7 +834,10 @@ class CogneeCompatibilityAdapter:
                             ]
                         )
                     ),
-                    score=base_score,
+                    score=max(
+                        node_scores.get(str(source_id), 0.0),
+                        node_scores.get(str(target_id), 0.0),
+                    ),
                 )
             )
         return evidence
@@ -666,29 +853,6 @@ class CogneeCompatibilityAdapter:
         if not isinstance(payload, dict):
             raise CogneeStorageError("Invalid Cognee manifest.", affected=path)
         return payload
-
-    @staticmethod
-    def include_cognee_routers(app: Any) -> None:
-        """Attach Cognee's dataset/visualize routers with the default user."""
-        from cognee.api.v1.datasets.routers import (  # type: ignore[import-untyped]
-            get_datasets_router,
-        )
-        from cognee.api.v1.users.routers import (  # type: ignore[import-untyped]
-            get_visualize_router,
-        )
-        from cognee.modules.users.methods import (  # type: ignore[import-untyped]
-            get_authenticated_user,
-            get_default_user,
-        )
-
-        app.dependency_overrides[get_authenticated_user] = get_default_user
-        app.include_router(
-            get_datasets_router(), prefix="/api/v1/datasets", tags=["cognee-datasets"]
-        )
-        app.include_router(
-            get_visualize_router(), prefix="/api/v1/visualize", tags=["cognee-visualize"]
-        )
-        app.state.cognee_routes_attached = True
 
     @staticmethod
     async def prune_derived_data() -> None:
@@ -726,13 +890,6 @@ def _vector_groups(graph: DataPointGraph) -> dict[str, list[Any]]:
     return groups
 
 
-def _vector_collection_manifest(graph: DataPointGraph) -> dict[str, list[str]]:
-    return {
-        collection: sorted(node.canonical_id for node in nodes)
-        for collection, nodes in sorted(_vector_groups(graph).items())
-    }
-
-
 def _flatten_node(node: dict[str, Any]) -> dict[str, Any]:
     properties = node.get("properties")
     if isinstance(properties, dict):
@@ -742,6 +899,14 @@ def _flatten_node(node: dict[str, Any]) -> dict[str, Any]:
 
 def _string_list(value: Any) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def _node_source_chunk_ids(node: dict[str, Any]) -> list[str]:
+    """Exclude document-wide summary coverage from typed-edge provenance."""
+    object_type = str(node.get("type") or node.get("object_type") or "")
+    if object_type == "SummaryDataPoint":
+        return []
+    return _string_list(node.get("source_chunk_ids"))
 
 
 def _atomic_json(path: Path, payload: dict[str, object]) -> None:
