@@ -27,6 +27,7 @@ from paperos_core.domain.ids import CHUNKING_VERSION, canonical_snapshot_id
 from paperos_core.errors import CanonicalStorageError, CanonicalValidationError
 from paperos_core.ingestion.validation import calculate_sha256
 from paperos_core.paths import DataPaths
+from paperos_core.storage.immutable import ImmutableConflictError, write_immutable_bytes
 
 _Model = TypeVar("_Model", bound=BaseModel)
 
@@ -309,34 +310,18 @@ class CanonicalRepository:
 
     def _write_immutable(self, path: Path, content: bytes) -> None:
         self.paths.assert_within_root(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        expected = hashlib.sha256(content).hexdigest()
-        if path.exists():
-            if path.stat().st_size != len(content) or calculate_sha256(path) != expected:
-                raise CanonicalStorageError(
-                    "Immutable canonical artifact already exists with different content.",
-                    affected=path,
-                )
-            return
-        temporary_name: str | None = None
         try:
-            with tempfile.NamedTemporaryFile(
-                mode="wb", prefix=".canonical-", dir=path.parent, delete=False
-            ) as temporary:
-                temporary_name = temporary.name
-                temporary.write(content)
-                temporary.flush()
-                os.fsync(temporary.fileno())
-            os.chmod(temporary_name, 0o444)
-            os.link(temporary_name, path)
+            write_immutable_bytes(path, content)
+        except ImmutableConflictError as exc:
+            raise CanonicalStorageError(
+                "Immutable canonical artifact already exists with different content.",
+                affected=path,
+            ) from exc
         except OSError as exc:
             raise CanonicalStorageError(
                 f"Unable to persist immutable canonical artifact: {exc}",
                 affected=path,
             ) from exc
-        finally:
-            if temporary_name:
-                Path(temporary_name).unlink(missing_ok=True)
 
     @staticmethod
     def _json_bytes(model: BaseModel) -> bytes:

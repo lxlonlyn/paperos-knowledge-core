@@ -12,6 +12,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from paperos_core.adapters.cognee.runtime_config import CogneeRuntimeConfigReader
 from paperos_core.config import load_settings, resolve_local_model_path
+from paperos_core.locations import SERVICES_ROOT
 from paperos_core.paths import build_data_paths
 from paperos_core.runtime.local_inference.runtime import local_runtime_usage
 from paperos_core.storage import StorageInitializer
@@ -41,9 +42,30 @@ def main() -> None:
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         checks.append({"name": "node", "ok": False, "error": str(exc)})
 
-    node_entry = REPOSITORY_ROOT / "services" / "local_models" / "dist" / "server.js"
-    if usage.required:
-        checks.append({"name": "node_entry", "ok": node_entry.is_file(), "path": str(node_entry)})
+    service_root = SERVICES_ROOT / "local_models"
+    node_modules = service_root / "node_modules"
+    node_entry = service_root / "dist" / "server.js"
+    remediation = ["cd services/local_models", "npm ci", "npm run build"]
+    checks.append(
+        {
+            "name": "node_modules",
+            "ok": node_modules.is_dir() or not usage.required,
+            "present": node_modules.is_dir(),
+            "required": usage.required,
+            "path": str(node_modules),
+            "remediation": remediation,
+        }
+    )
+    checks.append(
+        {
+            "name": "node_entry",
+            "ok": node_entry.is_file() or not usage.required,
+            "present": node_entry.is_file(),
+            "required": usage.required,
+            "path": str(node_entry),
+            "remediation": remediation,
+        }
+    )
     model_checks: list[tuple[str, Path]] = []
     if usage.embedding:
         model_checks.append(("embedding_model", settings.local_inference.embedding_model_path))

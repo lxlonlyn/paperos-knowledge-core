@@ -45,6 +45,21 @@ class LocalInferenceClient:
             )
         return payload
 
+    async def shutdown(self, token: str) -> None:
+        """Ask the parent-owned child to shut down through its private protocol."""
+
+        try:
+            response = await self.client.post(
+                "/internal/shutdown",
+                headers={"x-paperos-shutdown-token": token},
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise LocalInferenceUnavailableError(
+                f"Local inference shutdown request failed: {exc}",
+                affected=f"{self.endpoint}/internal/shutdown",
+            ) from exc
+
     async def embed(
         self, texts: list[str], *, expected_dimensions: int
     ) -> list[list[float]]:

@@ -18,7 +18,9 @@ inference child process when the Cognee embedding configuration selects the
 PaperOS local runtime (embedding model, optional reranker), starts one
 background Worker, and then accepts HTTP requests. With a remote embedding
 provider, local GGUF files are never checked or loaded. Shutdown stops the
-Worker, terminates the child process, and closes Cognee and HTTP clients.
+Worker, asks the child to exit through its authenticated private HTTP protocol,
+and closes Cognee and HTTP clients. OS process signals are used only as a
+timeout/error fallback.
 
 MinerU and the LLM provider selected by Cognee configuration are external
 dependencies. PaperOS checks and calls them but never starts them, and its code
@@ -31,10 +33,14 @@ libraries or stores rather than separately deployed PaperOS services.
 conda env create -f environment.yml
 conda activate paperos
 
-cp config/paperos.example.toml config/paperos.toml
-cp .env.example .env
+python scripts/init_config.py
 # Set mineru.api_key in the git-ignored config/paperos.toml.
 # Set Cognee LLM/embedding/database values in .env.
+
+cd services/local_models
+npm ci
+npm run build
+cd ../..
 
 python scripts/setup_runtime.py
 python server.py
@@ -43,8 +49,9 @@ python server.py
 MinerU and the configured LLM provider must already be reachable. Users
 manually place the local embedding (and optional reranker) GGUF files at the
 configured paths; relative model paths are resolved from
-`config/paperos.toml`, independently of the runtime data directory. PaperOS
-never installs dependencies or downloads models at runtime.
+`config/paperos.toml`, independently of the shell working directory and runtime
+data directory. All relative filesystem paths in the TOML use that same base.
+PaperOS never installs dependencies or downloads models at runtime.
 
 `config/paperos.toml` contains only PaperOS settings. Cognee exclusively owns
 and loads `.env`; PaperOS never parses or overwrites it. MinerU's key is a

@@ -3,11 +3,14 @@
 - Verify enabled local files before binding the port.
 - Never download models.
 - Missing files return actionable errors.
-- Endpoints: `/health`, `/v1/models`, `/v1/embeddings`, `/v1/rerank`.
+- Business endpoints: `/health`, `/v1/models`, `/v1/embeddings`, `/v1/rerank`.
+- `POST /internal/shutdown` is reserved for the Python parent and requires the
+  random token supplied in `PAPEROS_SHUTDOWN_TOKEN` at child creation.
 
 - The PaperOS `Application` lifecycle is the sole owner of this private child
-  process. It captures logs, waits for readiness, and terminates the process
-  during server shutdown.
+  process. It captures logs, waits for readiness, and uses the authenticated
+  shutdown endpoint during normal server shutdown. Process termination and
+  killing are timeout/error fallbacks only.
 - Startup readiness is verified internally through `GET /health` before the
   PaperOS API begins accepting requests.
 - A bound port is an actionable startup error; PaperOS never attaches to or

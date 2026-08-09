@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from paperos_core.errors import ConfigurationError
+from paperos_core.locations import PROMPTS_ROOT
 
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _VERSION = re.compile(r"<!--\s*prompt-version:\s*([^\s]+)\s*-->")
@@ -26,7 +27,7 @@ class PromptRepository:
         self.root = (
             root
             if root is not None
-            else Path(__file__).resolve().parent.parent / "prompts"
+            else PROMPTS_ROOT
         ).resolve(strict=False)
 
     def load(self, name: str) -> str:

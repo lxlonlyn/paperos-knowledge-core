@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import mimetypes
-import os
 import sqlite3
 import stat
-import tempfile
 import zipfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -23,8 +20,15 @@ from paperos_core.domain.parsing import ParserArtifact, ParseRun
 from paperos_core.errors import ParserArtifactValidationError, SourceRegistryError
 from paperos_core.ingestion.validation import calculate_sha256
 from paperos_core.paths import DataPaths
+from paperos_core.storage.immutable import ImmutableConflictError, write_immutable_bytes
 
 _MAX_UNCOMPRESSED_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
+_WINDOWS_ILLEGAL_FILENAME_CHARACTERS = frozenset('<>:"|?*')
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{number}" for number in range(1, 10)}
+    | {f"lpt{number}" for number in range(1, 10)}
+)
 
 
 class ParserArtifactRepository:
@@ -191,33 +195,17 @@ class ParserArtifactRepository:
 
     def _write_immutable(self, path: Path, content: bytes) -> None:
         self.paths.assert_within_root(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        expected = hashlib.sha256(content).hexdigest()
-        if path.exists():
-            if path.stat().st_size != len(content) or calculate_sha256(path) != expected:
-                raise ParserArtifactValidationError(
-                    "Immutable parser artifact already exists with different content.",
-                    affected=path,
-                )
-            return
-        temp_name: str | None = None
         try:
-            with tempfile.NamedTemporaryFile(
-                mode="wb", prefix=".artifact-", dir=path.parent, delete=False
-            ) as temporary:
-                temp_name = temporary.name
-                temporary.write(content)
-                temporary.flush()
-                os.fsync(temporary.fileno())
-            os.chmod(temp_name, 0o444)
-            os.link(temp_name, path)
+            write_immutable_bytes(path, content)
+        except ImmutableConflictError as exc:
+            raise ParserArtifactValidationError(
+                "Immutable parser artifact already exists with different content.",
+                affected=path,
+            ) from exc
         except OSError as exc:
             raise ParserArtifactValidationError(
                 f"Unable to persist immutable parser artifact: {exc}", affected=path
             ) from exc
-        finally:
-            if temp_name:
-                Path(temp_name).unlink(missing_ok=True)
 
     @staticmethod
     def _artifact_type(relative_path: str) -> ParserArtifactType:
@@ -287,18 +275,52 @@ class ParserArtifactRepository:
 
     @staticmethod
     def _safe_member(info: zipfile.ZipInfo) -> PurePosixPath:
-        relative = PurePosixPath(info.filename)
+        # ZipInfo normalizes OS-native separators in ``filename`` on Windows;
+        # ``orig_filename`` retains the archive's portable namespace spelling.
+        filename = info.orig_filename
+        raw_parts = filename.split("/")
+        relative = PurePosixPath(filename)
         mode = info.external_attr >> 16
         if (
-            relative.is_absolute()
-            or ".." in relative.parts
+            "\\" in filename
+            or relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in raw_parts)
             or stat.S_ISLNK(mode)
-            or not info.filename
+            or not filename
         ):
             raise ParserArtifactValidationError(
-                "MinerU archive contains an unsafe path.", affected=info.filename
+                "MinerU archive contains an unsafe path.", affected=filename
             )
+        for part in raw_parts:
+            if (
+                any(character in _WINDOWS_ILLEGAL_FILENAME_CHARACTERS for character in part)
+                or any(ord(character) < 32 or ord(character) == 127 for character in part)
+                or part.endswith((".", " "))
+                or part.split(".", 1)[0].casefold() in _WINDOWS_RESERVED_NAMES
+            ):
+                raise ParserArtifactValidationError(
+                    "MinerU archive path is not in the portable Windows/Linux namespace.",
+                    affected=filename,
+                )
         return relative
+
+    @classmethod
+    def _safe_members(
+        cls, infos: list[zipfile.ZipInfo]
+    ) -> list[tuple[zipfile.ZipInfo, PurePosixPath]]:
+        members = [(info, cls._safe_member(info)) for info in infos]
+        folded_paths: dict[str, str] = {}
+        for _info, relative in members:
+            portable_path = relative.as_posix()
+            folded = portable_path.casefold()
+            previous = folded_paths.get(folded)
+            if previous is not None:
+                raise ParserArtifactValidationError(
+                    "MinerU archive contains a case-fold path collision.",
+                    affected=f"{previous} / {portable_path}",
+                )
+            folded_paths[folded] = portable_path
+        return members
 
     def persist_result(
         self, parse_run: ParseRun, result: MinerUParseResult
@@ -354,9 +376,9 @@ class ParserArtifactRepository:
                 "MinerU result archive exceeds the safe uncompressed size limit.",
                 affected=parse_run.id,
             )
+        members = self._safe_members(infos)
         with archive:
-            for info in infos:
-                relative = self._safe_member(info)
+            for info, relative in members:
                 content = archive.read(info)
                 target = root / "artifacts" / Path(*relative.parts)
                 self._write_immutable(target, content)

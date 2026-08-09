@@ -14,9 +14,10 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
 from paperos_core.errors import ConfigurationError
+from paperos_core.locations import CONFIG_ROOT
 
 DEFAULT_DATA_DIR = Path("~/paperos-knowledge-core/data")
-DEFAULT_CONFIG_PATH = Path("config/paperos.toml")
+DEFAULT_CONFIG_PATH = CONFIG_ROOT / "paperos.toml"
 
 
 class StrictSettings(BaseModel):
@@ -137,7 +138,7 @@ def _resolve_path(value: str | Path, *, base_dir: Path) -> Path:
 def resolve_local_model_path(settings: RuntimeSettings, configured: Path) -> Path:
     """Resolve a user-owned model path relative to the single TOML file."""
 
-    base_dir = settings.config_path.parent if settings.config_path else Path.cwd()
+    base_dir = settings.config_path.parent if settings.config_path else CONFIG_ROOT
     return _resolve_path(configured, base_dir=base_dir)
 
 
@@ -169,7 +170,8 @@ def load_settings(
     data_raw = raw.setdefault("data", {})
     if not isinstance(data_raw, dict):
         raise ConfigurationError("The [data] section must be a TOML table.")
-    data_root = _resolve_path(data_raw.get("directory", DEFAULT_DATA_DIR), base_dir=Path.cwd())
+    config_root = config_path.parent
+    data_root = _resolve_path(data_raw.get("directory", DEFAULT_DATA_DIR), base_dir=config_root)
     data_raw["directory"] = data_root
 
     try:
@@ -178,7 +180,6 @@ def load_settings(
         raise ConfigurationError(
             f"Invalid PaperOS configuration: {exc}", affected=config_path
         ) from exc
-    config_root = config_path.parent
     local = settings.local_inference
     local = local.model_copy(update={
         "embedding_model_path": _resolve_path(local.embedding_model_path, base_dir=config_root),
@@ -187,6 +188,6 @@ def load_settings(
     return settings.model_copy(
         update={
             "local_inference": local,
-            "config_path": config_path if config_path.exists() else None,
+            "config_path": config_path,
         }
     )

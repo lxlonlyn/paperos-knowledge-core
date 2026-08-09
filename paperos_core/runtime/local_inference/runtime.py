@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,11 +17,9 @@ from paperos_core.errors import (
     LocalInferenceConfigurationError,
     LocalInferenceUnavailableError,
 )
+from paperos_core.locations import SERVICES_ROOT
 from paperos_core.paths import DataPaths
 from paperos_core.runtime.local_inference.client import LocalInferenceClient
-
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-SERVICES_ROOT = PROJECT_ROOT / "services"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +60,7 @@ class LocalInferenceRuntime:
         self.process: asyncio.subprocess.Process | None = None
         self._log_stream: BinaryIO | None = None
         self._owned = False
+        self._shutdown_token: str | None = None
 
     @property
     def endpoint(self) -> str:
@@ -94,8 +94,8 @@ class LocalInferenceRuntime:
         server = root / "dist" / "server.js"
         if not server.is_file():
             raise LocalInferenceConfigurationError(
-                "Compiled local inference entry is missing; run `npm run build` "
-                "in services/local_models without installing dependencies.",
+                "Compiled local inference entry is missing; in services/local_models "
+                "run `npm ci` and then `npm run build`.",
                 affected=server,
             )
         return root
@@ -125,6 +125,7 @@ class LocalInferenceRuntime:
         log_path = self.paths.logs / "local-inference.log"
         process_path = self.paths.jobs / "local-inference-process.json"
         self._log_stream = log_path.open("ab", buffering=0)
+        self._shutdown_token = secrets.token_urlsafe(32)
         environment = dict(os.environ)
         environment.update(
             {
@@ -150,6 +151,7 @@ class LocalInferenceRuntime:
                     else {}
                 ),
                 "PAPEROS_RERANKER_MAX_TOKENS": "4096",
+                "PAPEROS_SHUTDOWN_TOKEN": self._shutdown_token,
             }
         )
         try:
@@ -162,6 +164,7 @@ class LocalInferenceRuntime:
                 stderr=asyncio.subprocess.STDOUT,
             )
         except OSError as exc:
+            self._shutdown_token = None
             self._close_log()
             raise LocalInferenceUnavailableError(
                 f"Unable to start local inference: {exc}", affected=service_root
@@ -223,16 +226,30 @@ class LocalInferenceRuntime:
         if not self._owned:
             return
         if self.process is not None and self.process.returncode is None:
-            self.process.terminate()
             try:
+                if self._shutdown_token is None:
+                    raise LocalInferenceUnavailableError(
+                        "Local inference shutdown token is unavailable.",
+                        affected=self.endpoint,
+                    )
+                await self.client.shutdown(self._shutdown_token)
                 await asyncio.wait_for(self.process.wait(), timeout=20)
-            except TimeoutError:
-                self.process.kill()
-                await self.process.wait()
+            except (LocalInferenceUnavailableError, TimeoutError):
+                if self.process.returncode is None:
+                    try:
+                        self.process.terminate()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await asyncio.wait_for(self.process.wait(), timeout=20)
+                    except TimeoutError:
+                        self.process.kill()
+                        await self.process.wait()
         process_path = self.paths.jobs / "local-inference-process.json"
         self._mark_stopped(process_path)
         self._close_log()
         self._owned = False
+        self._shutdown_token = None
 
     def _close_log(self) -> None:
         if self._log_stream is not None:

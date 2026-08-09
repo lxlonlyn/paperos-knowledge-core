@@ -1,3 +1,4 @@
+import {timingSafeEqual} from "node:crypto";
 import {createServer, type IncomingMessage, type ServerResponse} from "node:http";
 
 import {loadConfig} from "./config.js";
@@ -30,6 +31,13 @@ if (config.rerankerEnabled) {
 function send(response: ServerResponse, status: number, payload: object): void {
   response.writeHead(status, {"content-type": "application/json; charset=utf-8"});
   response.end(JSON.stringify(payload));
+}
+
+function validShutdownToken(value: string | string[] | undefined): boolean {
+  if (typeof value !== "string") return false;
+  const supplied = Buffer.from(value);
+  const expected = Buffer.from(config.shutdownToken);
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
@@ -67,6 +75,14 @@ function embeddingInput(value: unknown): string[] {
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url ?? "/", `http://${config.host}:${config.port}`);
+    if (request.method === "POST" && url.pathname === "/internal/shutdown") {
+      if (!validShutdownToken(request.headers["x-paperos-shutdown-token"])) {
+        throw new RequestError("Invalid shutdown token", 403, "forbidden");
+      }
+      send(response, 202, {status: "shutting_down"});
+      setImmediate(() => void shutdown("parent"));
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/health") {
       send(response, 200, {
         status: "healthy",
@@ -206,7 +222,7 @@ async function shutdown(signal: string): Promise<void> {
   if (closing) return;
   closing = true;
   process.stdout.write(JSON.stringify({event: "shutdown", signal}) + "\n");
-  server.close();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
   await reranker.dispose();
   if (embeddings) {
     await embeddings.dispose();

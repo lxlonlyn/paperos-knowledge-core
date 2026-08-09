@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 import sqlite3
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -24,8 +21,11 @@ from paperos_core.errors import (
 from paperos_core.ingestion.validation import ValidatedPDF, calculate_sha256
 from paperos_core.jobs.state import validate_transition
 from paperos_core.paths import DataPaths
-
-_COPY_CHUNK_SIZE = 1024 * 1024
+from paperos_core.storage.immutable import (
+    ImmutableConflictError,
+    ImmutableSourceChangedError,
+    copy_immutable_file,
+)
 
 
 class SourceRegistry:
@@ -128,62 +128,27 @@ class SourceRegistry:
     def _persist_immutable_pdf(self, validated: ValidatedPDF, target: Path) -> None:
         self.paths.assert_within_root(target)
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            if not target.is_file() or target.stat().st_size != validated.size_bytes:
-                raise StorageIntegrityError(
-                    "Immutable source target already exists with different content.",
-                    affected=target,
-                )
-            if calculate_sha256(target) != validated.sha256:
-                raise StorageIntegrityError(
-                    "Immutable source target already exists with a different checksum.",
-                    affected=target,
-                )
-            return
-
-        temp_name: str | None = None
         try:
-            digest = hashlib.sha256()
-            copied = 0
-            with (
-                validated.path.open("rb") as source,
-                tempfile.NamedTemporaryFile(
-                    mode="wb", prefix=".source-", suffix=".tmp", dir=target.parent, delete=False
-                ) as temporary,
-            ):
-                temp_name = temporary.name
-                for block in iter(lambda: source.read(_COPY_CHUNK_SIZE), b""):
-                    temporary.write(block)
-                    digest.update(block)
-                    copied += len(block)
-                temporary.flush()
-                os.fsync(temporary.fileno())
-            if copied != validated.size_bytes or digest.hexdigest() != validated.sha256:
-                raise SourceChangedError(
-                    "Source PDF changed while it was being copied; no raw PDF was registered.",
-                    affected=validated.path,
-                )
-            os.chmod(temp_name, 0o444)
-            try:
-                os.link(temp_name, target)
-            except FileExistsError:
-                if (
-                    target.stat().st_size != validated.size_bytes
-                    or calculate_sha256(target) != validated.sha256
-                ):
-                    raise StorageIntegrityError(
-                        "Concurrent immutable source registration produced conflicting content.",
-                        affected=target,
-                    )
+            copy_immutable_file(
+                validated.path,
+                target,
+                expected_size=validated.size_bytes,
+                expected_sha256=validated.sha256,
+            )
+        except ImmutableSourceChangedError as exc:
+            raise SourceChangedError(
+                "Source PDF changed while it was being copied; no raw PDF was registered.",
+                affected=validated.path,
+            ) from exc
+        except ImmutableConflictError as exc:
+            raise StorageIntegrityError(
+                "Immutable source target already exists with different content.",
+                affected=target,
+            ) from exc
         except OSError as exc:
-            if isinstance(exc, (SourceChangedError, StorageIntegrityError)):
-                raise
             raise SourceRegistryError(
                 f"Unable to preserve immutable source PDF: {exc}", affected=target
             ) from exc
-        finally:
-            if temp_name is not None:
-                Path(temp_name).unlink(missing_ok=True)
 
     def register_source(
         self,

@@ -156,9 +156,7 @@ class LLMClient:
             "model": config.llm_model,
         }
 
-    async def enrich(
-        self, bundle: CanonicalBundle, chunks: list[Chunk]
-    ) -> SemanticEnrichment:
+    async def enrich(self, bundle: CanonicalBundle, chunks: list[Chunk]) -> SemanticEnrichment:
         """Section-grouped, batch-local semantic enrichment with coverage."""
         prompt = self.prompts.describe("semantic_enrichment")
         raw_sections: list[tuple[str | None, list[Chunk], _SectionExtraction]] = []
@@ -177,9 +175,7 @@ class LLMClient:
         summary = await self._summarize_document(bundle, chunks, prompt)
         covered_ids = list(dict.fromkeys(covered))
         covered_set = set(covered_ids)
-        uncovered_ids = [
-            chunk.id for chunk in chunks if chunk.id not in covered_set
-        ]
+        uncovered_ids = [chunk.id for chunk in chunks if chunk.id not in covered_set]
         total = len(chunks)
         return SemanticEnrichment(
             entities=entities,
@@ -205,51 +201,79 @@ class LLMClient:
         section_id: str | None,
         chunks: list[Chunk],
     ) -> _SectionExtraction:
-        return await self._generate_structured(
-            system=prompt.text,
-            user=json.dumps(
-                {
-                    "schema": {
-                        "entities": [
-                            {
-                                "key": "unique local key",
-                                "name": "string",
-                                "entity_type": "string",
-                                "description": "optional string",
-                                "source_chunk_ids": ["chunk id"],
-                                "confidence": "optional number 0..1",
-                            }
-                        ],
-                        "claims": [
-                            {
-                                "key": "unique local key",
-                                "text": "string",
-                                "claim_type": "optional string",
-                                "source_chunk_ids": ["chunk id"],
-                                "confidence": "optional number 0..1",
-                            }
-                        ],
-                        "relations": [
-                            {
-                                "source_key": "entity key",
-                                "target_key": "entity key",
-                                "relation_type": "string",
-                                "description": "optional string",
-                                "source_chunk_ids": ["chunk id"],
-                                "confidence": "optional number 0..1",
-                            }
-                        ],
-                    },
-                    "document": {
-                        "title": bundle.document.title,
-                        "abstract": bundle.document.abstract,
-                    },
-                    "section": section_id or "(front matter)",
-                    "evidence": _chunk_evidence(chunks),
-                },
-                ensure_ascii=False,
-            ),
-            response_model=_SectionExtraction,
+        request = {
+            "schema": {
+                "entities": [
+                    {
+                        "key": "unique local key",
+                        "name": "string",
+                        "entity_type": "string",
+                        "description": "optional string",
+                        "source_chunk_ids": ["chunk id"],
+                        "confidence": "optional number 0..1",
+                    }
+                ],
+                "claims": [
+                    {
+                        "key": "unique local key",
+                        "text": "string",
+                        "claim_type": "optional string",
+                        "source_chunk_ids": ["chunk id"],
+                        "confidence": "optional number 0..1",
+                    }
+                ],
+                "relations": [
+                    {
+                        "source_key": "entity key",
+                        "target_key": "entity key",
+                        "relation_type": "string",
+                        "description": "optional string",
+                        "source_chunk_ids": ["chunk id"],
+                        "confidence": "optional number 0..1",
+                    }
+                ],
+            },
+            "document": {
+                "title": bundle.document.title,
+                "abstract": bundle.document.abstract,
+            },
+            "section": section_id or "(front matter)",
+            "evidence": _chunk_evidence(chunks),
+        }
+        failures: list[dict[str, Any]] = []
+        for attempt in range(1, 4):
+            extraction = await self._generate_structured(
+                system=prompt.text,
+                user=json.dumps(request, ensure_ascii=False),
+                response_model=_SectionExtraction,
+            )
+            try:
+                return _normalize_section_extraction(
+                    extraction,
+                    valid_chunks={chunk.id for chunk in chunks},
+                    snapshot_id=bundle.snapshot.id,
+                )
+            except SemanticEnrichmentError as exc:
+                failures.append(
+                    {
+                        "attempt": attempt,
+                        "affected": exc.affected,
+                        **exc.details,
+                    }
+                )
+                if attempt < 3:
+                    request["validation_feedback"] = {
+                        "instruction": (
+                            "Regenerate the complete response. Every source_chunk_ids value "
+                            "must exactly equal a chunk_id present in evidence; relation keys "
+                            "must reference entities in this response."
+                        ),
+                        "previous_error": exc.details,
+                    }
+        raise SemanticEnrichmentError(
+            "LLM semantic provenance remained invalid after finite retries.",
+            affected=section_id or "(front matter)",
+            details={"snapshot_id": bundle.snapshot.id, "attempts": failures},
         )
 
     async def _summarize_document(
@@ -276,9 +300,7 @@ class LLMClient:
                 for batch in _chunk_batches(section_chunks)
             ]
             source_ids = list(
-                dict.fromkeys(
-                    chunk_id for item in batches for chunk_id in item.source_chunk_ids
-                )
+                dict.fromkeys(chunk_id for item in batches for chunk_id in item.source_chunk_ids)
             )
             if len(batches) == 1:
                 section_text = batches[0].text
@@ -408,9 +430,7 @@ class LLMClient:
             compact_evidence.append(compact)
         failures: list[str] = []
         valid_chunk_ids = {
-            str(item["chunk_id"])
-            for item in compact_evidence
-            if item.get("chunk_id")
+            str(item["chunk_id"]) for item in compact_evidence if item.get("chunk_id")
         }
         evidence_to_chunk = {
             str(item["evidence_id"]): str(item["chunk_id"])
@@ -424,11 +444,7 @@ class LLMClient:
                 return selected
             if selected in evidence_to_chunk:
                 return evidence_to_chunk[selected]
-            candidates = [
-                chunk_id
-                for chunk_id in valid_chunk_ids
-                if chunk_id.startswith(selected)
-            ]
+            candidates = [chunk_id for chunk_id in valid_chunk_ids if chunk_id.startswith(selected)]
             return candidates[0] if len(candidates) == 1 else None
 
         for attempt in range(1, 4):
@@ -451,8 +467,7 @@ class LLMClient:
                 if not isinstance(content, AnswerOutput) or not content.answer.strip():
                     raise TypeError("completion content is empty or not an AnswerOutput")
                 normalized_citations = [
-                    resolve_cited_chunk_id(chunk_id)
-                    for chunk_id in content.cited_chunk_ids
+                    resolve_cited_chunk_id(chunk_id) for chunk_id in content.cited_chunk_ids
                 ]
                 if not normalized_citations or any(
                     chunk_id is None for chunk_id in normalized_citations
@@ -462,9 +477,7 @@ class LLMClient:
                         f"returned={content.cited_chunk_ids!r}"
                     )
                 cited_chunk_ids = [
-                    chunk_id
-                    for chunk_id in normalized_citations
-                    if chunk_id is not None
+                    chunk_id for chunk_id in normalized_citations if chunk_id is not None
                 ]
                 answer = content.answer.strip()
                 # ``cited_chunk_ids`` is the structured source of truth.  Some
@@ -550,13 +563,14 @@ def _validate_chunk_ids(
     resolved: list[str] = []
     invalid: list[str] = []
     for value in dict.fromkeys(ids):
-        if value in valid_chunks:
-            resolved.append(value)
+        candidate = value.strip().strip("`'\"[](){}<>").strip()
+        if candidate in valid_chunks:
+            resolved.append(candidate)
             continue
         prefix_matches = sorted(
-            chunk_id for chunk_id in valid_chunks if chunk_id.startswith(value)
+            chunk_id for chunk_id in valid_chunks if chunk_id.startswith(candidate)
         )
-        if value.startswith("chunk_") and len(prefix_matches) == 1:
+        if candidate.startswith("chunk_") and len(prefix_matches) == 1:
             resolved.append(prefix_matches[0])
         else:
             invalid.append(value)
@@ -570,6 +584,69 @@ def _validate_chunk_ids(
             },
         )
     return list(dict.fromkeys(resolved))
+
+
+def _normalize_section_extraction(
+    extraction: _SectionExtraction,
+    *,
+    valid_chunks: set[str],
+    snapshot_id: str,
+) -> _SectionExtraction:
+    """Validate one response while it can still be retried, then canonicalize IDs."""
+    entities = [
+        item.model_copy(
+            update={
+                "source_chunk_ids": _validate_chunk_ids(
+                    item.source_chunk_ids,
+                    valid_chunks,
+                    object_key=item.key,
+                    snapshot_id=snapshot_id,
+                )
+            }
+        )
+        for item in extraction.entities
+    ]
+    claims = [
+        item.model_copy(
+            update={
+                "source_chunk_ids": _validate_chunk_ids(
+                    item.source_chunk_ids,
+                    valid_chunks,
+                    object_key=item.key,
+                    snapshot_id=snapshot_id,
+                )
+            }
+        )
+        for item in extraction.claims
+    ]
+    entity_keys = {item.key for item in entities}
+    relations: list[_RelationExtraction] = []
+    for item in extraction.relations:
+        unknown_keys = sorted({item.source_key, item.target_key} - entity_keys)
+        if unknown_keys:
+            raise SemanticEnrichmentError(
+                "LLM relation references an unknown entity key.",
+                affected=f"{item.source_key}->{item.target_key}",
+                details={
+                    "snapshot_id": snapshot_id,
+                    "unknown_entity_keys": unknown_keys,
+                },
+            )
+        relations.append(
+            item.model_copy(
+                update={
+                    "source_chunk_ids": _validate_chunk_ids(
+                        item.source_chunk_ids,
+                        valid_chunks,
+                        object_key=f"{item.source_key}->{item.target_key}",
+                        snapshot_id=snapshot_id,
+                    )
+                }
+            )
+        )
+    return extraction.model_copy(
+        update={"entities": entities, "claims": claims, "relations": relations}
+    )
 
 
 def _merge_section_extractions(
@@ -665,8 +742,7 @@ def _merge_section_extractions(
                 dict.fromkeys([*claim_merged.source_chunk_ids, *source_ids])
             )
             if claim_item.confidence is not None and (
-                claim_merged.confidence is None
-                or claim_item.confidence > claim_merged.confidence
+                claim_merged.confidence is None or claim_item.confidence > claim_merged.confidence
             ):
                 claim_merged.confidence = claim_item.confidence
 
@@ -690,9 +766,7 @@ def _merge_section_extractions(
             )
         )
 
-    relation_by_key: dict[
-        tuple[str, str, str], _MergedRelation
-    ] = {}
+    relation_by_key: dict[tuple[str, str, str], _MergedRelation] = {}
     for batch_index, (_section_id, chunks, extraction) in enumerate(raw_sections):
         batch_valid = {chunk.id for chunk in chunks}
         for relation_item in extraction.relations:

@@ -14,6 +14,7 @@ export interface LocalInferenceConfig {
   rerankerModelName: string;
   rerankerMaxTokens: number;
   cudaVisibleDevices: string;
+  shutdownToken: string;
 }
 
 function positiveInteger(name: string, fallback: number): number {
@@ -34,6 +35,10 @@ export function loadConfig(): LocalInferenceConfig {
   const rerankerModelPath = rerankerEnabled
     ? requiredModelPath("PAPEROS_RERANKER_MODEL_PATH", "Reranker")
     : "";
+  const shutdownToken = process.env.PAPEROS_SHUTDOWN_TOKEN;
+  if (!shutdownToken) {
+    throw new Error("PAPEROS_SHUTDOWN_TOKEN is required");
+  }
   return {
     host: process.env.PAPEROS_LOCAL_INFERENCE_HOST ?? "127.0.0.1",
     port: positiveInteger("PAPEROS_LOCAL_INFERENCE_PORT", 8081),
@@ -47,6 +52,7 @@ export function loadConfig(): LocalInferenceConfig {
     rerankerModelName: process.env.PAPEROS_RERANKER_MODEL_NAME ?? "qwen3-reranker-0.6b",
     rerankerMaxTokens: positiveInteger("PAPEROS_RERANKER_MAX_TOKENS", 4096),
     cudaVisibleDevices: process.env.CUDA_VISIBLE_DEVICES ?? "",
+    shutdownToken,
   };
 }
 
