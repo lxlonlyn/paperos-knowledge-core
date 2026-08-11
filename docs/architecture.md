@@ -37,7 +37,7 @@ The Node embedding and optional-reranking runtime is a private child process.
 It starts only when `[local_inference].enabled=true` and the Cognee embedding
 endpoint selects its loopback port or the local reranker is enabled; with a fully remote
 configuration, PaperOS never checks or loads local GGUF files. Embedding
-provider/model/dimensions/token limits live in Cognee's ``.env``, while
+provider/model/dimensions/token limits live in ``[cognee.embedding]``, while
 ``[local_inference]`` owns enablement, GGUF paths, timeouts, the loopback port,
 and the CUDA device allowlist. PaperOS passes that allowlist to its Node child
 through ``CUDA_VISIBLE_DEVICES``; the child cannot allocate on other GPUs.
@@ -114,13 +114,16 @@ rebuild, reprocess, and improve jobs. It never holds the Application.
 
 ## Configuration ownership
 
-`config/paperos.toml` owns only data, MinerU, local inference, ingestion,
-retrieval, and API settings. A MinerU key may be stored as a Pydantic
-`SecretStr` in the git-ignored real TOML and is excluded from serialization.
-Cognee exclusively owns and loads `.env`, including LLM, embedding, relational,
-vector, and graph settings. PaperOS never parses, translates, or overwrites
-those values. `CogneeRuntimeConfigReader` exposes a credential-free, read-only
-snapshot for health, doctor, local-runtime activation, and actual metadata.
+`config/paperos.toml` is the only persistent configuration. It owns PaperOS and
+Cognee runtime settings; `.env` and `.env.example` do not exist. Provider keys
+are Pydantic `SecretStr` values excluded from serialization. Three optional
+`PAPEROS_*_API_KEY` variables override only secret fields, not general settings.
+
+`CogneeConfigurator` applies LLM, embedding, relational, vector, and graph
+settings through Cognee's public runtime API before any Cognee engine, gateway,
+or pipeline is created. It never persists Cognee configuration. The
+credential-free `CogneeRuntimeConfigReader` reads the applied state for health,
+doctor, local-runtime activation, and provider/model metadata.
 
 ## Storage and schema
 
@@ -133,10 +136,23 @@ All runtime data stays under `data.directory`:
 - `raw/`: immutable source PDFs and SourceFile identity;
 - `parsed/`: immutable ParseRun artifacts;
 - `canonical/`: versioned canonical snapshots;
-- `cognee/`: PaperOS-owned Cognee projection artifacts, enrichment, and manifests;
+- `cognee/system`, `cognee/data`, `cognee/vector`, and `cognee/graph`: Cognee
+  runtime stores derived from the data root rather than user-supplied paths;
+- `cognee/enrichment` and `cognee/manifests`: PaperOS projection metadata;
 - `indexes/`: SQLite FTS and index manifests;
 - `jobs/`: registries, queue, and managed-process records;
 - `cache/`, `logs/`, and `tmp/`: rebuildable or managed runtime data.
+
+The default data root is `<repository_root>/data`. Relative TOML paths resolve
+from the TOML directory. `DataPathCodec` is the sole persistent-path boundary:
+SQLite and long-lived JSON store data-root-relative POSIX references, while
+repositories decode those references to runtime absolute `Path` objects. Domain
+models may therefore use absolute runtime paths without making artifacts
+machine-specific. Public API responses and health omit filesystem paths.
+
+PID/process records are machine-local operational state, not portable data.
+Application startup removes stale local-inference and Worker records and the
+runtime recreates them as needed; records never establish retained identity.
 
 Derived stores can be destructively rebuilt from retained real artifacts.
 Original PDFs, raw MinerU results, and source chunks are never overwritten by
@@ -180,10 +196,18 @@ comprehensive-> FTS5 + Cognee search + provenance-bearing recall + fusion
 Each profile maps to a real Cognee SearchType, hits are constrained by the
 returned node type, and candidates backtrack through canonical IDs / node IDs
 / source references (never by text-prefix matching). Absent vector distances
-use Cognee result rank as an explicit rank-based score. PaperOS does not generate query embeddings, open vector
-collections, or retain a duplicate embedding BLOB store. Private Cognee API
-calls are centralized in `paperos_core/adapters/cognee/compat.py` and pinned
-to Cognee 1.4.0 by the real-case acceptance entry and its runtime boundary checks.
+use Cognee result rank as an explicit rank-based score. PaperOS retrieval code
+does not generate query embeddings, open vector collections, or retain a
+duplicate embedding BLOB store.
+
+Cognee 1.4.0's public `CHUNKS` retriever is bound to Cognee's built-in `Chunk`
+type and cannot search PaperOS `ChunkDataPoint`. The minimum typed-vector
+fallback remains in `paperos_core/adapters/cognee/compat.py`; it owns all query
+embedding and LanceDB details and documents this limitation. Retrieval modules
+only consume adapter results. The permanent static/live contract in
+`tests/contract/test_cognee_retrieval_boundary.py` detects both private-boundary
+regressions and whether a future Cognee public search/recall implementation can
+replace the fallback without losing dataset scope or canonical provenance.
 
 ## Prompt ownership
 

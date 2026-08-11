@@ -34,8 +34,8 @@ conda env create -f environment.yml
 conda activate paperos
 
 python scripts/init_config.py
-# Set mineru.api_key in the git-ignored config/paperos.toml.
-# Set Cognee LLM/embedding/database values in .env.
+# Set MinerU, Cognee LLM, embedding, and storage values in the
+# git-ignored config/paperos.toml.
 
 cd services/local_models
 npm ci
@@ -53,9 +53,10 @@ configured paths; relative model paths are resolved from
 data directory. All relative filesystem paths in the TOML use that same base.
 PaperOS never installs dependencies or downloads models at runtime.
 
-`config/paperos.toml` contains only PaperOS settings. Cognee exclusively owns
-and loads `.env`; PaperOS never parses or overwrites it. MinerU's key is a
-redacted `SecretStr` in the git-ignored real TOML.
+`config/paperos.toml` is the only persistent configuration file. PaperOS applies
+its Cognee tables through Cognee's public runtime configuration API before any
+engine or gateway is created; no `.env` is loaded or written. Provider keys are
+redacted `SecretStr` values and are excluded from status, health, and logs.
 
 ## HTTP API
 
@@ -96,6 +97,12 @@ logs/       application and local-inference logs
 tmp/        managed upload staging
 ```
 
+The default root is the repository's `data/` directory. A relative
+`data.directory` is resolved from the TOML directory, not the current working
+directory. SQLite and long-lived JSON store only data-root-relative POSIX
+references; repositories decode them to absolute `Path` objects at runtime.
+Copying the project or `data/` therefore does not rewrite retained artifacts.
+
 Original PDFs and raw MinerU responses are immutable. Canonical snapshots are
 versioned. Cognee and FTS projections, enrichment, summaries, caches, and exports
 are rebuildable. Every derived object and graph relation retains canonical chunk
@@ -118,12 +125,19 @@ Application lifecycle can start or stop the child process.
 
 - `scripts/setup_runtime.py`: initializes schema and verifies Node/build/models.
 - `scripts/doctor.py`: read-only configuration and dependency diagnostics.
-- `scripts/acceptance_real_pipeline.py`: cumulative validation using the genuine
-  four-paper corpus, live MinerU/Cognee providers, all retrieval profiles, and
-  lifecycle cleanup. This is the only project test entry; the project does not
-  use pytest, mocks, fabricated documents, or prerecorded downstream results.
+- `scripts/migrate_portable_paths.py`: dry-run/transactional migration of legacy
+  absolute SQLite and JSON references.
+- `scripts/acceptance_real_pipeline.py`: cumulative real-PDF validation using
+  live MinerU/Cognee providers, all retrieval profiles, and lifecycle cleanup.
+- `tests/contract/test_portable_data_paths.py`: permanent portable-path and real
+  retained-data relocation contract, run directly without pytest.
+- `tests/contract/test_cognee_retrieval_boundary.py`: permanent static/live
+  Cognee search, dataset-scope, and provenance boundary contract.
 - `scripts/debug_pipeline.py`: real retained-stage pipeline debugging.
 - `scripts/agent_client.py`: HTTP client example for agents and integrations.
+
+PaperOS does not use pytest, mocks, fabricated papers, or prerecorded downstream
+results. Acceptance exercises behavior; permanent contracts protect boundaries.
 
 Run the complete acceptance path with:
 

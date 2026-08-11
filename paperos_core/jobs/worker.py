@@ -38,6 +38,10 @@ class BackgroundWorker:
     @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
+    def cleanup_stale_record(self) -> None:
+        """Discard machine-local PID state before each application start."""
+        self.record_path.unlink(missing_ok=True)
+
 
     async def start(self) -> None:
         if self.running:
@@ -79,9 +83,8 @@ class BackgroundWorker:
             elif job.job_type == "improve":
                 payload = self.feedback.improve().model_dump(mode="json")
             elif job.job_type == "rebuild":
-                payload = (
-                    await self.rebuilder.rebuild(job.payload.get("snapshot_id"))
-                ).model_dump(mode="json")
+                report = await self.rebuilder.rebuild(job.payload.get("snapshot_id"))
+                payload = report.public_dict()
             elif job.job_type == "reprocess":
                 payload = await self.documents.reprocess(
                     str(job.payload["document_id"])
@@ -109,7 +112,6 @@ class BackgroundWorker:
             "pid": os.getpid(),
             "status": status,
             "job_id": job_id,
-            "path": str(Path(__file__).resolve()),
         }
         self.record_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"

@@ -73,6 +73,8 @@ class Application:
         if self._started:
             return
         self.storage.initialize()
+        self.runtime.local_inference.cleanup_stale_record()
+        self.runtime.worker.cleanup_stale_record()
         status = self.storage.validate()
         if not status.valid:
             raise RuntimeError(
@@ -118,6 +120,9 @@ def create_application(settings: RuntimeSettings) -> Application:
     """Assemble the object graph without starting a process or background task."""
 
     paths = build_data_paths(settings.data_dir)
+    from paperos_core.adapters.cognee.configurator import CogneeConfigurator
+
+    CogneeConfigurator().apply(settings, paths)
     from paperos_core.storage.initializer import StorageInitializer
 
     storage = StorageInitializer(paths)

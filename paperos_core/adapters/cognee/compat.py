@@ -487,7 +487,6 @@ class CogneeCompatibilityAdapter:
             ) from exc
         return {
             "backend": "cognee",
-            "path": str(self.paths.cognee / "vector"),
             "collection_count": len(collections),
             "record_count": sum(counts.values()),
             "collections": counts,

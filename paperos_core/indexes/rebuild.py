@@ -20,6 +20,11 @@ class RebuildReport(BaseModel):
     rebuilt_snapshot_ids: list[str]
     deleted_paths: list[Path]
     reports: list[IndexingReport]
+    def public_dict(self) -> dict[str, object]:
+        return {
+            "rebuilt_snapshot_ids": self.rebuilt_snapshot_ids,
+            "reports": [report.public_dict() for report in self.reports],
+        }
 
 
 class DerivedDataRebuilder:

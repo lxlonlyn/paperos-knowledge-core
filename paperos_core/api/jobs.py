@@ -9,7 +9,8 @@ router = APIRouter(prefix="/api/v1", tags=["jobs"])
 
 @router.get("/jobs/{job_id}")
 async def job_status(job_id: str, application: ApplicationDep) -> dict[str, object]:
-    return application.queue.get(job_id).model_dump(mode="json")
+    job = application.queue.get(job_id)
+    return application.queue.public_dict(job)
 
 
 @router.post("/rebuild", status_code=status.HTTP_202_ACCEPTED)

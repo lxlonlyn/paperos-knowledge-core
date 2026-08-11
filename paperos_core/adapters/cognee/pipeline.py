@@ -48,8 +48,7 @@ class KnowledgeIngestionResult(BaseModel):
 
     def public_dict(self) -> dict[str, object]:
         payload = self.canonical_result.public_dict()
-        payload["knowledge"] = self.indexing.model_dump(mode="json")
-        payload["knowledge"]["enrichment_path"] = str(self.enrichment_path)
+        payload["knowledge"] = self.indexing.public_dict()
         return payload
 
 

@@ -211,7 +211,9 @@ class CanonicalBundle(DomainModel):
     def public_dict(self) -> dict[str, Any]:
         return {
             "status": "completed",
-            "canonical_snapshot": self.snapshot.model_dump(mode="json"),
+            "canonical_snapshot": self.snapshot.model_dump(
+                mode="json", exclude={"manifest_path"}
+            ),
             "document": self.document.model_dump(mode="json"),
             "counts": {
                 "sections": len(self.sections),

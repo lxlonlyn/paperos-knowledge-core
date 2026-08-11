@@ -34,6 +34,8 @@ class DataPaths:
         self.root.mkdir(parents=True, exist_ok=True)
         for path in self.runtime_directories():
             path.mkdir(parents=True, exist_ok=True)
+        for name in ("system", "data", "vector", "graph"):
+            (self.cognee / name).mkdir(parents=True, exist_ok=True)
 
     def assert_within_root(self, path: Path) -> None:
         try:

@@ -65,8 +65,10 @@ chunks.
 ### Health
 
 `GET /api/v1/health` reports application and dependency health. MinerU or
-LLM provider failure degrades health. Health is read-only and cannot start a process,
-download a model, or initialize an external service.
+LLM provider failure degrades health. Health is read-only and cannot start a
+process, download a model, or initialize an external service. Public health,
+status, document, parse, and indexing payloads expose neither credentials nor
+resolved filesystem paths.
 
 ## External provider interfaces
 
@@ -74,9 +76,11 @@ The MinerU adapter owns submission, task polling, finite timeout/retry handling,
 result retrieval, and provider-specific response parsing. No MinerU field passes
 the canonical boundary.
 
-`LLMClient` reads credential-free provider/model metadata through
-`CogneeRuntimeConfigReader` and provides semantic enrichment and evidence-bound answer synthesis exclusively through Cognee's
-`LLMGateway`. It never starts the provider and never knows the LLM vendor.
+`CogneeConfigurator` applies the single TOML's Cognee settings before any
+engine or gateway is created. `LLMClient` then reads credential-free
+provider/model metadata through `CogneeRuntimeConfigReader` and provides
+semantic enrichment and evidence-bound answer synthesis exclusively through
+Cognee's `LLMGateway`. It never starts the provider and never knows the vendor.
 
 ## Private local inference protocol
 
@@ -97,6 +101,7 @@ and readiness timeout are startup errors.
 ## Repository contracts
 
 - repositories accept paths or connections and never initialize global schema;
+- `DataPathCodec` alone maps retained relative POSIX references to runtime paths;
 - `StorageInitializer` owns SQLite/FTS creation and validation;
 - canonical models are the only downstream document contract;
 - Cognee DataPoint and relation types are centralized;

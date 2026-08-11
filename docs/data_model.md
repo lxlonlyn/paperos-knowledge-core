@@ -233,6 +233,16 @@ A ParseRun may produce multiple CanonicalSnapshots when processing rules change.
 
 Canonical snapshots may be destructively rebuilt during pre-stable development. The associated SourceFile and ParserArtifacts must remain preserved.
 
+## Persistent path semantics
+
+`SourceFile.storage_path`, `ParseRun.artifact_manifest_path`,
+`ParserArtifact.storage_path`, and `CanonicalSnapshot.manifest_path` are runtime
+`Path` values in domain models. Their SQLite representation is a data-root-
+relative POSIX reference encoded and decoded only by `DataPathCodec`. Canonical
+JSON `asset_path` and index-manifest `lexical_database` use the same reference
+system. Absolute paths, Windows drive prefixes, backslashes, and `..` are never
+valid persistent values. The public API omits these implementation fields.
+
 ## Document
 
 Represents the normalized document as a whole.

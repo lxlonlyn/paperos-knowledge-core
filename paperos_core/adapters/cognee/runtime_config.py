@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
-
 
 @dataclass(frozen=True, slots=True)
 class CogneeRuntimeConfig:
@@ -41,6 +39,8 @@ class CogneeRuntimeConfigReader:
     """Expose a credential-free snapshot of Cognee's current settings."""
 
     def read(self) -> CogneeRuntimeConfig:
+        from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
+
         values = CogneeCompatibilityAdapter.runtime_config_snapshot()
         return CogneeRuntimeConfig(
             llm_provider=str(values["llm_provider"] or ""),
@@ -60,4 +60,6 @@ class CogneeRuntimeConfigReader:
         )
 
     async def test_llm_connection(self) -> None:
+        from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
+
         await CogneeCompatibilityAdapter.test_llm_connection()

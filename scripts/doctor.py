@@ -16,9 +16,11 @@ import httpx
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from paperos_core.adapters.cognee.configurator import CogneeConfigurator
 from paperos_core.adapters.cognee.runtime_config import CogneeRuntimeConfigReader
 from paperos_core.adapters.mineru.providers import DEFAULT_MINERU_CLOUD_ENDPOINT
 from paperos_core.config import load_settings, resolve_local_model_path
+from paperos_core.paths import build_data_paths
 from paperos_core.runtime.local_inference.runtime import local_runtime_usage
 
 
@@ -28,6 +30,8 @@ class _RuntimeNotRequired(Exception):
 
 async def diagnose() -> dict[str, object]:
     settings = load_settings()
+    paths = build_data_paths(settings.data_dir)
+    CogneeConfigurator().apply(settings, paths)
     cognee_reader = CogneeRuntimeConfigReader()
     cognee = cognee_reader.read()
     usage = local_runtime_usage(settings, cognee_reader)

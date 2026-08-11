@@ -59,6 +59,16 @@ class SourceFile(DomainModel):
         if not value.strip():
             raise ValueError("source-file text fields must not be empty")
         return value
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "source_file_id": self.id,
+            "original_filename": self.original_filename,
+            "sha256": self.sha256,
+            "size": self.size_bytes,
+            "status": "registered",
+        }
+
+
 
 
 class IngestionJob(DomainModel):
@@ -108,6 +118,6 @@ class IngestionResult(DomainModel):
             "source_file_id": self.source_file.id,
             "status": self.job.status.value,
             "duplicate": self.duplicate,
-            "source_file": self.source_file.model_dump(mode="json"),
+            "source_file": self.source_file.public_dict(),
             "job": self.job.model_dump(mode="json"),
         }

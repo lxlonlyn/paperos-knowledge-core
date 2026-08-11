@@ -1,4 +1,4 @@
-"""Create machine-local PaperOS and Cognee configuration without overwriting."""
+"""Create the single machine-local PaperOS TOML without overwriting it."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from paperos_core.locations import CONFIG_ROOT, PROJECT_ROOT
+from paperos_core.locations import CONFIG_ROOT
 
 
 def _copy_if_missing(source: Path, target: Path) -> str:
@@ -23,10 +23,7 @@ def _copy_if_missing(source: Path, target: Path) -> str:
 
 
 def main() -> None:
-    copies = (
-        (CONFIG_ROOT / "paperos.example.toml", CONFIG_ROOT / "paperos.toml"),
-        (PROJECT_ROOT / ".env.example", PROJECT_ROOT / ".env"),
-    )
+    copies = ((CONFIG_ROOT / "paperos.example.toml", CONFIG_ROOT / "paperos.toml"),)
     for source, target in copies:
         if not source.is_file():
             raise SystemExit(f"Required example file is missing: {source}")

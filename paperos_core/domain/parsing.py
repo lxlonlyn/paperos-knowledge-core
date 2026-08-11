@@ -70,6 +70,11 @@ class ParsedIngestionResult(DomainModel):
             "job_id": self.ingestion_job_id,
             "duplicate": self.duplicate_source,
             "status": self.parse_run.status.value,
-            "parse_run": self.parse_run.model_dump(mode="json"),
-            "artifacts": [artifact.model_dump(mode="json") for artifact in self.artifacts],
+            "parse_run": self.parse_run.model_dump(
+                mode="json", exclude={"artifact_manifest_path"}
+            ),
+            "artifacts": [
+                artifact.model_dump(mode="json", exclude={"storage_path"})
+                for artifact in self.artifacts
+            ],
         }

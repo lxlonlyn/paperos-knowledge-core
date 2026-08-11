@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
 from paperos_core.errors import DocumentNotFoundError
@@ -34,7 +34,7 @@ class DocumentDetail(DocumentSummary):
     snapshot_ids: list[str]
     reference_count: int
     element_count: int
-    raw_pdf_path: Path
+    raw_pdf_path: Path = Field(exclude=True)
 
 
 class DocumentDeletionReport(BaseModel):

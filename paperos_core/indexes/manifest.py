@@ -53,3 +53,13 @@ class IndexingReport(BaseModel):
     consistency_valid: bool
     rebuilt: bool = False
     warnings: list[str] = Field(default_factory=list)
+    def public_dict(self) -> dict[str, object]:
+        return self.model_dump(
+            mode="json",
+            exclude={
+                "manifest_path",
+                "cognee_manifest_path",
+                "lexical_database",
+                "vector_database",
+            },
+        )

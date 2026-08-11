@@ -1,15 +1,40 @@
 [data]
-directory = "~/paperos-knowledge-core/data"
+directory = "../data"
 dataset = "papers"
 
 [mineru]
 provider = "cloud"
 endpoint = ""
-# api_key may be stored only in the git-ignored config/paperos.toml.
+# Secrets may be stored only in the git-ignored config/paperos.toml.
+api_key = ""
 use_async_tasks = true
 poll_interval_seconds = 2.0
 timeout_seconds = 1800
 preferred_backend = "auto"
+
+[cognee.llm]
+provider = "openai"
+model = "openai/gpt-5-mini"
+endpoint = ""
+api_key = ""
+max_completion_tokens = 16384
+temperature = 0.0
+
+[cognee.embedding]
+provider = "custom"
+model = "default"
+endpoint = "http://127.0.0.1:8081/v1"
+api_key = ""
+dimensions = 768
+max_tokens = 2048
+batch_size = 5
+
+[cognee.storage]
+relational_provider = "sqlite"
+vector_provider = "lancedb"
+graph_provider = "kuzu"
+vector_subprocess_enabled = true
+graph_subprocess_enabled = true
 
 [local_inference]
 enabled = false

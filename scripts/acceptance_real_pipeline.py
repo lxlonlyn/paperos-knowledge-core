@@ -81,7 +81,14 @@ def _load_corpus(data_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, A
     for name in ("truth.jsonl", "associative.jsonl", "comprehensive.jsonl"):
         query_path = corpus / "queries" / name
         _require(query_path.is_file(), f"Real query cases are missing: {query_path}")
-        queries.extend(_load_jsonl(query_path))
+        cases = _load_jsonl(query_path)
+        expected_profile = name.removesuffix(".jsonl")
+        _require(cases, f"Retrieval profile has no real case: {expected_profile}")
+        _require(
+            all(case.get("profile") == expected_profile for case in cases),
+            f"Query file contains the wrong profile: {query_path}",
+        )
+        queries.extend(cases)
     _require(queries, "Real corpus contains no query cases.")
     return papers, queries
 
@@ -305,72 +312,119 @@ def _contains_concept(searchable: str, concept: str) -> bool:
     return bool(long_tokens) and all(token[:5] in searchable for token in long_tokens)
 
 
-def _validate_query(case: dict[str, Any], response: QueryResponse) -> list[str]:
-    """Enforce pipeline integrity and report model/retrieval quality separately."""
+def _validate_query(case: dict[str, Any], response: QueryResponse) -> dict[str, Any]:
+    """Enforce model-independent integrity and measure semantic quality softly."""
+
+    case_id = str(case["case_id"])
     quality_warnings: list[str] = []
-    _require(response.profile.value == case["profile"], f"Profile mismatch: {case['case_id']}")
+    _require(response.profile.value == case["profile"], f"Profile mismatch: {case_id}")
     _require(
         set(case.get("required_channels", [])) <= set(response.channels_used),
-        f"Missing retrieval channel: {case['case_id']}",
+        f"Missing retrieval channel: {case_id}",
     )
     _require(
         set(case.get("required_stages", [])) <= set(response.stages),
-        f"Missing retrieval stage: {case['case_id']}",
+        f"Missing retrieval stage: {case_id}",
     )
-    _require(response.provenance_complete, f"Incomplete provenance: {case['case_id']}")
+    _require(response.provenance_complete, f"Incomplete provenance: {case_id}")
     _require(
         len(response.evidence) == len(response.candidates) > 0,
-        f"No evidence-bound candidates: {case['case_id']}",
+        f"No evidence-bound candidates: {case_id}",
     )
     _require(
         all(item.chunk_id for item in response.evidence),
-        f"Evidence lacks chunk IDs: {case['case_id']}",
+        f"Evidence lacks chunk IDs: {case_id}",
     )
-    _require(
-        any(item.evidence_id in response.answer for item in response.evidence),
-        f"Answer lacks evidence citations: {case['case_id']}",
-    )
-    filenames = {item.source_filename for item in response.evidence}
-    missing_documents = sorted(set(case["expected_documents"]) - filenames)
-    if missing_documents:
-        quality_warnings.append(
-            f"{case['case_id']}: expected documents absent from ranked evidence: "
-            f"{missing_documents}"
-        )
-    if response.distinct_documents < case["minimum_distinct_documents"]:
-        quality_warnings.append(
-            f"{case['case_id']}: document diversity "
-            f"{response.distinct_documents} < {case['minimum_distinct_documents']}"
-        )
+    cited_evidence = [
+        item for item in response.evidence if item.evidence_id in response.answer
+    ]
+    _require(cited_evidence, f"Answer lacks evidence citations: {case_id}")
+
     if case.get("requires_page"):
         _require(
             all(item.page_start is not None for item in response.evidence),
-            f"Evidence lacks page coordinates: {case['case_id']}",
+            f"Evidence lacks page coordinates: {case_id}",
         )
     if case.get("requires_graph_relation"):
-        _require("graph" in response.channels_used, f"Graph channel absent: {case['case_id']}")
-        _require(
-            any(
-                "graph" in candidate.channels
-                or candidate.knowledge_kind == "structured_relation"
-                for candidate in response.candidates
-            ),
-            f"Graph evidence absent: {case['case_id']}",
+        _require("graph" in response.channels_used, f"Graph channel absent: {case_id}")
+        if not any(
+            "graph" in candidate.channels
+            or candidate.knowledge_kind == "structured_relation"
+            for candidate in response.candidates
+        ):
+            quality_warnings.append(
+                f"{case_id}: graph stage ran but returned no structured relation evidence"
+            )
+
+    filenames = {item.source_filename for item in response.evidence}
+    expected_documents = set(case.get("expected_documents", []))
+    document_hits = expected_documents & filenames
+    missing_documents = sorted(expected_documents - filenames)
+    if missing_documents:
+        quality_warnings.append(
+            f"{case_id}: expected documents absent from ranked evidence: "
+            f"{missing_documents}"
         )
+    minimum_documents = int(case.get("minimum_distinct_documents", 1))
+    if response.distinct_documents < minimum_documents:
+        quality_warnings.append(
+            f"{case_id}: document diversity "
+            f"{response.distinct_documents} < {minimum_documents}"
+        )
+
     searchable = " ".join(
         [response.answer, *(item.text for item in response.evidence)]
     ).casefold()
-    for group in case.get("required_evidence_groups", []):
-        if not any(term.casefold() in searchable for term in group["any_of"]):
+    evidence_groups = list(case.get("required_evidence_groups", []))
+    evidence_group_hits = 0
+    for group in evidence_groups:
+        if any(term.casefold() in searchable for term in group["any_of"]):
+            evidence_group_hits += 1
+        else:
             quality_warnings.append(
-                f"{case['case_id']}: expected evidence terms absent: {group['any_of']}"
+                f"{case_id}: expected evidence terms absent: {group['any_of']}"
             )
-    for concept in case.get("required_concepts", []):
-        if not _contains_concept(searchable, concept):
+
+    concepts = [str(item) for item in case.get("required_concepts", [])]
+    concept_hits = 0
+    for concept in concepts:
+        if _contains_concept(searchable, concept):
+            concept_hits += 1
+        else:
             quality_warnings.append(
-                f"{case['case_id']}: expected concept absent: {concept}"
+                f"{case_id}: expected concept absent: {concept}"
             )
-    return quality_warnings
+
+    evidence_count = len(response.evidence)
+    page_count = sum(item.page_start is not None for item in response.evidence)
+    return {
+        "case_id": case_id,
+        "profile": response.profile.value,
+        "channels_used": response.channels_used,
+        "stages": response.stages,
+        "candidate_count": len(response.candidates),
+        "distinct_documents": response.distinct_documents,
+        "provenance_complete": response.provenance_complete,
+        "expected_document_hit_rate": (
+            len(document_hits) / len(expected_documents) if expected_documents else None
+        ),
+        "expected_concept_hit_rate": (
+            concept_hits / len(concepts) if concepts else None
+        ),
+        "expected_evidence_group_hit_rate": (
+            evidence_group_hits / len(evidence_groups) if evidence_groups else None
+        ),
+        "evidence_precision_indicators": {
+            "chunk_provenance_ratio": (
+                sum(bool(item.chunk_id) for item in response.evidence) / evidence_count
+            ),
+            "page_provenance_ratio": page_count / evidence_count,
+            "citation_ratio": len(cited_evidence) / evidence_count,
+        },
+        "quality_warnings": quality_warnings,
+    }
+
+
 
 
 def _validate_enrichment(path: Path, filename: str) -> None:
@@ -416,6 +470,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     structural_results: list[dict[str, Any]] = []
     responses: list[QueryResponse] = []
     quality_warnings: list[str] = []
+    quality_results: list[dict[str, Any]] = []
     print(f"run_root={run_root}", flush=True)
     print(f"dataset={args.dataset}", flush=True)
     await application.start()
@@ -475,12 +530,11 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 payload = {
                     "resumed_snapshot_id": bundle.snapshot.id,
-                    "parse_run": parse_run.model_dump(mode="json"),
+                    "parse_run": parse_run.model_dump(
+                        mode="json", exclude={"artifact_manifest_path"}
+                    ),
                     "counts": {"chunks": len(projection.chunks)},
-                    "knowledge": {
-                        **indexing_report.model_dump(mode="json"),
-                        "enrichment_path": str(enrichment_path),
-                    },
+                    "knowledge": indexing_report.public_dict(),
                 }
             else:
                 print(f"ingest {position}/{len(papers)} live {filename}", flush=True)
@@ -502,11 +556,19 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             )
             _require(counts_payload["chunks"] > 0, f"No chunks produced for {filename}")
             _require(knowledge["consistency_valid"], f"Index inconsistency for {filename}")
-            _validate_enrichment(Path(knowledge["enrichment_path"]), filename)
-            projection = application.canonical_repository.get_chunk_projection(
+            snapshot_id = (
                 bundle.snapshot.id
                 if args.resume and filename in existing
-                else cast(dict[str, Any], payload["canonical_snapshot"])["id"]
+                else str(cast(dict[str, Any], payload["canonical_snapshot"])["id"])
+            )
+            _validate_enrichment(
+                application.paths.cognee
+                / "enrichment"
+                / f"{snapshot_id}.json",
+                filename,
+            )
+            projection = application.canonical_repository.get_chunk_projection(
+                snapshot_id
             )
             current_bundle = application.canonical_repository.get_bundle(
                 projection.snapshot_id
@@ -517,8 +579,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     bundle=current_bundle,
                     projection=projection,
                     chunk_target_tokens=settings.ingestion.chunk_target_tokens,
-                    cognee_manifest_path=Path(knowledge["cognee_manifest_path"]),
-                    index_manifest_path=Path(knowledge["manifest_path"]),
+                    cognee_manifest_path=application.paths.cognee
+                    / "manifests"
+                    / f"{snapshot_id}.json",
+                    index_manifest_path=application.paths.indexes
+                    / "manifests"
+                    / f"{snapshot_id}.json",
                 )
             )
             output_path = logs / f"ingest-{paper['case_id']}.json"
@@ -554,10 +620,17 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             response = await application.services.retrieval.query(
                 QueryRequest(query=case["query"], profile=case["profile"])
             )
+            quality = _validate_query(case, response)
+            quality_results.append(quality)
+            quality_warnings.extend(quality["quality_warnings"])
+            query_report = {
+                **quality,
+                "response": response.model_dump(mode="json"),
+            }
             (logs / f"query-{case['case_id']}.json").write_text(
-                response.model_dump_json(indent=2), encoding="utf-8"
+                json.dumps(query_report, ensure_ascii=False, indent=2),
+                encoding="utf-8",
             )
-            quality_warnings.extend(_validate_query(case, response))
             responses.append(response)
         _require(
             _file_hashes(
@@ -568,20 +641,61 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         )
         health = await application.services.health.report()
         _require(health["status"] == "healthy", f"Final health is not healthy: {health}")
+        executed_profiles = {response.profile.value for response in responses}
+        _require(
+            executed_profiles == {"truth", "associative", "comprehensive"},
+            "Not every retrieval profile completed a real query.",
+        )
+
+        def average_metric(name: str) -> float | None:
+            values = [
+                result[name]
+                for result in quality_results
+                if isinstance(result.get(name), (int, float))
+            ]
+            return (
+                sum(float(value) for value in values) / len(values)
+                if values
+                else None
+            )
+
+        quality_status = "reasonable" if not quality_warnings else "weak"
+        quality_metrics = {
+            "warning_count": len(quality_warnings),
+            "average_expected_document_hit_rate": average_metric(
+                "expected_document_hit_rate"
+            ),
+            "average_expected_concept_hit_rate": average_metric(
+                "expected_concept_hit_rate"
+            ),
+            "average_expected_evidence_group_hit_rate": average_metric(
+                "expected_evidence_group_hit_rate"
+            ),
+            "queries": quality_results,
+        }
+        health_summary = {
+            "status": health["status"],
+            "components": {
+                name: component.get("status", "unknown")
+                for name, component in health["components"].items()
+            },
+        }
         acceptance_report: dict[str, Any] = {
             "status": "passed",
+            "pipeline_status": "passed",
+            "quality_status": quality_status,
             "started_at": started_at.isoformat(),
             "completed_at": datetime.now(UTC).isoformat(),
-            "run_root": str(run_root),
+            "run_root": ".",
             "dataset": args.dataset,
             "paper_count": len(papers),
             "new_ingestion_count": len(ingestions),
             "structural_results": structural_results,
             "query_count": len(responses),
-            "profiles": sorted({response.profile.value for response in responses}),
+            "profiles": sorted(executed_profiles),
             "quality_warnings": quality_warnings,
-            "local_inference_pid": local_pid,
-            "health": health,
+            "quality_metrics": quality_metrics,
+            "health": health_summary,
         }
         (logs / "acceptance-report.json").write_text(
             json.dumps(acceptance_report, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -628,8 +742,36 @@ def main() -> None:
     args = parser.parse_args()
     try:
         report = asyncio.run(_run(args))
-    except PaperOSError as exc:
-        print(json.dumps(exc.as_dict(), ensure_ascii=False, indent=2), file=sys.stderr)
+    except Exception as exc:
+        failure_report = {
+            "status": "failed",
+            "pipeline_status": "failed",
+            "quality_status": "unevaluated",
+            "completed_at": datetime.now(UTC).isoformat(),
+            "run_root": ".",
+            "dataset": args.dataset,
+            "quality_warnings": [],
+            "quality_metrics": {},
+            "failure_type": type(exc).__name__,
+        }
+        report_path = (
+            args.run_root.resolve() / "logs" / "acceptance" / "acceptance-report.json"
+        )
+        try:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(
+                json.dumps(failure_report, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as report_error:
+            print(
+                f"Unable to persist failed acceptance report: {report_error}",
+                file=sys.stderr,
+            )
+        if isinstance(exc, PaperOSError):
+            print(json.dumps(exc.as_dict(), ensure_ascii=False, indent=2), file=sys.stderr)
+        else:
+            print(json.dumps(failure_report, ensure_ascii=False, indent=2), file=sys.stderr)
         raise
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
 

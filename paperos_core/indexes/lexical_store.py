@@ -121,7 +121,7 @@ class LexicalStore:
             fts5 = bool(
                 connection.execute("SELECT sqlite_compileoption_used('ENABLE_FTS5')").fetchone()[0]
             )
-        return {"path": str(self.path), "record_count": count, "fts5": fts5}
+        return {"record_count": count, "fts5": fts5}
 
 
 def _records_for_bundle(

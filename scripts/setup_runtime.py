@@ -10,6 +10,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from paperos_core.adapters.cognee.configurator import CogneeConfigurator
 from paperos_core.adapters.cognee.runtime_config import CogneeRuntimeConfigReader
 from paperos_core.config import load_settings, resolve_local_model_path
 from paperos_core.locations import SERVICES_ROOT
@@ -21,6 +22,7 @@ from paperos_core.storage import StorageInitializer
 def main() -> None:
     settings = load_settings()
     paths = build_data_paths(settings.data_dir)
+    CogneeConfigurator().apply(settings, paths)
     storage = StorageInitializer(paths)
     storage.initialize()
     checks: list[dict[str, object]] = []

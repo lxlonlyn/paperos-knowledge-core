@@ -28,12 +28,14 @@ from paperos_core.errors import CanonicalStorageError, CanonicalValidationError
 from paperos_core.ingestion.validation import calculate_sha256
 from paperos_core.paths import DataPaths
 from paperos_core.storage.immutable import ImmutableConflictError, write_immutable_bytes
+from paperos_core.storage.path_refs import DataPathCodec
 
 _Model = TypeVar("_Model", bound=BaseModel)
 
 
 class CanonicalRepository:
     def __init__(self, paths: DataPaths) -> None:
+        self.path_codec = DataPathCodec(paths.root)
         self.paths = paths
 
     def chunk_store_path(self, snapshot_id: str) -> Path:
@@ -155,7 +157,7 @@ class CanonicalRepository:
                         snapshot.source_file_id,
                         snapshot.parse_run_id,
                         snapshot.document_id,
-                        str(snapshot.manifest_path),
+                        self.path_codec.encode(snapshot.manifest_path),
                         snapshot.created_at.isoformat(),
                         snapshot.schema_version,
                         snapshot.id_version,
@@ -183,7 +185,7 @@ class CanonicalRepository:
                 f"CanonicalSnapshot '{snapshot_id}' does not exist.",
                 affected=snapshot_id,
             )
-        snapshot_path = Path(row["manifest_path"]).parent / "snapshot.json"
+        snapshot_path = self.path_codec.decode(str(row["manifest_path"])).parent / "snapshot.json"
         return self._read_model(snapshot_path, CanonicalSnapshot)
 
     def get_bundle(self, snapshot_id: str) -> CanonicalBundle:
@@ -323,21 +325,40 @@ class CanonicalRepository:
                 affected=path,
             ) from exc
 
-    @staticmethod
-    def _json_bytes(model: BaseModel) -> bytes:
+    def _portable_payload(self, model: BaseModel) -> dict[str, Any]:
+        payload = model.model_dump(mode="json")
+        if isinstance(model, CanonicalSnapshot):
+            payload["manifest_path"] = self.path_codec.encode(model.manifest_path)
+        elif isinstance(model, Element) and model.asset_path is not None:
+            payload["asset_path"] = self.path_codec.encode(model.asset_path)
+        return payload
+
+    def _runtime_payload(
+        self, payload: dict[str, Any], model: type[BaseModel]
+    ) -> dict[str, Any]:
+        if issubclass(model, CanonicalSnapshot):
+            payload["manifest_path"] = str(
+                self.path_codec.decode(str(payload["manifest_path"]))
+            )
+        elif issubclass(model, Element) and payload.get("asset_path") is not None:
+            payload["asset_path"] = str(
+                self.path_codec.decode(str(payload["asset_path"]))
+            )
+        return payload
+
+    def _json_bytes(self, model: BaseModel) -> bytes:
         return json.dumps(
-            model.model_dump(mode="json"),
+            self._portable_payload(model),
             ensure_ascii=False,
             sort_keys=True,
             indent=2,
         ).encode()
 
-    @staticmethod
-    def _jsonl_bytes(models: Sequence[BaseModel]) -> bytes:
+    def _jsonl_bytes(self, models: Sequence[BaseModel]) -> bytes:
         return (
             "\n".join(
                 json.dumps(
-                    model.model_dump(mode="json"),
+                    self._portable_payload(model),
                     ensure_ascii=False,
                     sort_keys=True,
                 )
@@ -346,25 +367,30 @@ class CanonicalRepository:
             + ("\n" if models else "")
         ).encode()
 
-    @staticmethod
-    def _read_model(path: Path, model: type[_Model]) -> _Model:
+    def _read_model(self, path: Path, model: type[_Model]) -> _Model:
         try:
-            return model.model_validate_json(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise TypeError("canonical model payload must be an object")
+            return model.model_validate(self._runtime_payload(payload, model))
+        except (OSError, UnicodeDecodeError, TypeError, ValueError) as exc:
             raise CanonicalValidationError(
                 f"Unable to validate canonical artifact: {exc}",
                 affected=path,
             ) from exc
 
-    @staticmethod
-    def _read_jsonl(path: Path, model: type[_Model]) -> list[_Model]:
+    def _read_jsonl(self, path: Path, model: type[_Model]) -> list[_Model]:
         try:
-            return [
-                model.model_validate_json(line)
-                for line in path.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
-        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            result: list[_Model] = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                payload = json.loads(line)
+                if not isinstance(payload, dict):
+                    raise TypeError("canonical JSONL entry must be an object")
+                result.append(model.model_validate(self._runtime_payload(payload, model)))
+            return result
+        except (OSError, UnicodeDecodeError, TypeError, ValueError) as exc:
             raise CanonicalValidationError(
                 f"Unable to validate canonical JSONL artifact: {exc}",
                 affected=path,

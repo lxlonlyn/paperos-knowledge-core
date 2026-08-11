@@ -12,6 +12,7 @@ from paperos_core.errors import IndexStorageError
 from paperos_core.indexes.lexical_store import LexicalStore
 from paperos_core.indexes.manifest import IndexManifest
 from paperos_core.paths import DataPaths
+from paperos_core.storage.path_refs import DataPathCodec
 
 
 class IndexManager:
@@ -20,6 +21,7 @@ class IndexManager:
         paths: DataPaths,
     ) -> None:
         self.paths = paths
+        self.path_codec = DataPathCodec(paths.root)
         self.lexical = LexicalStore(paths.indexes / "lexical.sqlite3")
 
     async def index_bundle(
@@ -37,7 +39,9 @@ class IndexManager:
             chunk_projection_ids=[chunk.id for chunk in chunks],
         )
         path = self.paths.indexes / "manifests" / f"{bundle.snapshot.id}.json"
-        _atomic_json(path, manifest.model_dump(mode="json"))
+        payload = manifest.model_dump(mode="json")
+        payload["lexical_database"] = self.path_codec.encode(manifest.lexical_database)
+        _atomic_json(path, payload)
         self.verify(bundle, manifest, chunks=chunks)
         return manifest, path
 

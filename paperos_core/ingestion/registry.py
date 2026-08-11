@@ -26,6 +26,7 @@ from paperos_core.storage.immutable import (
     ImmutableSourceChangedError,
     copy_immutable_file,
 )
+from paperos_core.storage.path_refs import DataPathCodec
 
 
 class SourceRegistry:
@@ -33,6 +34,7 @@ class SourceRegistry:
 
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
+        self.path_codec = DataPathCodec(paths.root)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.paths.registry_db, timeout=30)
@@ -48,8 +50,7 @@ class SourceRegistry:
     def _json_load(value: str | None) -> dict[str, Any] | None:
         return json.loads(value) if value is not None else None
 
-    @classmethod
-    def _source_from_row(cls, row: sqlite3.Row) -> SourceFile:
+    def _source_from_row(self, row: sqlite3.Row) -> SourceFile:
         return SourceFile(
             id=row["id"],
             sha256=row["sha256"],
@@ -57,12 +58,12 @@ class SourceRegistry:
             stored_filename=row["stored_filename"],
             media_type=row["media_type"],
             size_bytes=row["size_bytes"],
-            storage_path=Path(row["storage_path"]),
+            storage_path=self.path_codec.decode(str(row["storage_path"])),
             created_at=datetime.fromisoformat(row["created_at"]),
             schema_version=row["schema_version"],
             id_version=row["id_version"],
             source_url=row["source_url"],
-            user_metadata=cls._json_load(row["user_metadata"]),
+            user_metadata=self._json_load(row["user_metadata"]),
             dataset_id=row["dataset_id"],
         )
 
@@ -192,7 +193,7 @@ class SourceRegistry:
                         source.stored_filename,
                         source.media_type,
                         source.size_bytes,
-                        str(source.storage_path),
+                        self.path_codec.encode(source.storage_path),
                         source.created_at.isoformat(),
                         source.schema_version,
                         source.id_version,
@@ -326,8 +327,6 @@ class SourceRegistry:
                 "SELECT status, COUNT(*) AS count FROM ingestion_jobs GROUP BY status"
             ).fetchall()
         return {
-            "data_dir": str(self.paths.root),
-            "registry_db": str(self.paths.registry_db),
             "source_file_count": source_count,
             "ingestion_job_count": job_count,
             "jobs_by_status": {row["status"]: row["count"] for row in status_rows},

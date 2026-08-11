@@ -1,12 +1,12 @@
 """PaperOS-owned structured configuration.
 
-Cognee owns ``.env`` and loads it through its own settings classes.  This
-module deliberately does not read process environment variables or mirror
-Cognee provider/database settings into PaperOS models.
+The git-ignored TOML is the only persistent configuration. Three optional
+secret environment variables may override TOML keys without becoming a second system.
 """
 
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 from typing import Literal
@@ -14,9 +14,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
 from paperos_core.errors import ConfigurationError
-from paperos_core.locations import CONFIG_ROOT
+from paperos_core.locations import CONFIG_ROOT, PROJECT_ROOT
 
-DEFAULT_DATA_DIR = Path("~/paperos-knowledge-core/data")
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
 DEFAULT_CONFIG_PATH = CONFIG_ROOT / "paperos.toml"
 
 
@@ -53,6 +53,69 @@ class MinerUSettings(StrictSettings):
 
     def api_key_value(self) -> str | None:
         return self.api_key.get_secret_value() if self.api_key is not None else None
+
+
+class CogneeLLMSettings(StrictSettings):
+    provider: str = "openai"
+    model: str = "openai/gpt-5-mini"
+    endpoint: str = ""
+    api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
+    max_completion_tokens: int = Field(default=16384, gt=0)
+    temperature: float = Field(default=0.0, ge=0)
+
+    @field_validator("provider", "model")
+    @classmethod
+    def required_values_must_not_be_blank(cls, value: str) -> str:
+        selected = value.strip()
+        if not selected:
+            raise ValueError("Cognee LLM provider and model must not be blank")
+        return selected
+
+    def api_key_value(self) -> str | None:
+        return self.api_key.get_secret_value() if self.api_key is not None else None
+
+
+class CogneeEmbeddingSettings(StrictSettings):
+    provider: str = "custom"
+    model: str = "default"
+    endpoint: str = "http://127.0.0.1:8081/v1"
+    api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
+    dimensions: int = Field(default=768, gt=0)
+    max_tokens: int = Field(default=2048, gt=0)
+    batch_size: int = Field(default=5, gt=0)
+
+    @field_validator("provider", "model")
+    @classmethod
+    def required_values_must_not_be_blank(cls, value: str) -> str:
+        selected = value.strip()
+        if not selected:
+            raise ValueError("Cognee embedding provider and model must not be blank")
+        return selected
+
+    def api_key_value(self) -> str | None:
+        return self.api_key.get_secret_value() if self.api_key is not None else None
+
+
+class CogneeStorageSettings(StrictSettings):
+    relational_provider: str = "sqlite"
+    vector_provider: str = "lancedb"
+    graph_provider: str = "kuzu"
+    vector_subprocess_enabled: bool = True
+    graph_subprocess_enabled: bool = True
+
+    @field_validator("relational_provider", "vector_provider", "graph_provider")
+    @classmethod
+    def providers_must_not_be_blank(cls, value: str) -> str:
+        selected = value.strip().lower()
+        if not selected:
+            raise ValueError("Cognee storage providers must not be blank")
+        return selected
+
+
+class CogneeSettings(StrictSettings):
+    llm: CogneeLLMSettings = Field(default_factory=CogneeLLMSettings)
+    embedding: CogneeEmbeddingSettings = Field(default_factory=CogneeEmbeddingSettings)
+    storage: CogneeStorageSettings = Field(default_factory=CogneeStorageSettings)
 
 
 class IngestionSettings(StrictSettings):
@@ -112,6 +175,7 @@ class RetrievalSettings(StrictSettings):
 
 class RuntimeSettings(StrictSettings):
     data: DataSettings = Field(default_factory=DataSettings)
+    cognee: CogneeSettings = Field(default_factory=CogneeSettings)
     mineru: MinerUSettings = Field(default_factory=MinerUSettings)
     local_inference: LocalInferenceSettings = Field(default_factory=LocalInferenceSettings)
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
@@ -145,7 +209,7 @@ def resolve_local_model_path(settings: RuntimeSettings, configured: Path) -> Pat
 def load_settings(
     path: Path | None = None,
 ) -> RuntimeSettings:
-    """Load only PaperOS's TOML configuration."""
+    """Load the single PaperOS TOML plus the three supported secret overrides."""
     explicit_config = path is not None
     config_path = (path or DEFAULT_CONFIG_PATH).expanduser().resolve(strict=False)
     raw: dict[str, object] = {}
@@ -172,6 +236,24 @@ def load_settings(
         raise ConfigurationError("The [data] section must be a TOML table.")
     config_root = config_path.parent
     data_root = _resolve_path(data_raw.get("directory", DEFAULT_DATA_DIR), base_dir=config_root)
+    secret_overrides = {
+        ("mineru", "api_key"): os.getenv("PAPEROS_MINERU_API_KEY"),
+        ("cognee", "llm", "api_key"): os.getenv("PAPEROS_LLM_API_KEY"),
+        ("cognee", "embedding", "api_key"): os.getenv("PAPEROS_EMBEDDING_API_KEY"),
+    }
+    for keys, value in secret_overrides.items():
+        if value is None:
+            continue
+        target = raw
+        for key in keys[:-1]:
+            nested = target.setdefault(key, {})
+            if not isinstance(nested, dict):
+                raise ConfigurationError(
+                    f"The [{'.'.join(keys[:-1])}] section must be a TOML table."
+                )
+            target = nested
+        target[keys[-1]] = value
+
     data_raw["directory"] = data_root
 
     try:

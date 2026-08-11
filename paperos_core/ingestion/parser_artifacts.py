@@ -21,6 +21,7 @@ from paperos_core.errors import ParserArtifactValidationError, SourceRegistryErr
 from paperos_core.ingestion.validation import calculate_sha256
 from paperos_core.paths import DataPaths
 from paperos_core.storage.immutable import ImmutableConflictError, write_immutable_bytes
+from paperos_core.storage.path_refs import DataPathCodec
 
 _MAX_UNCOMPRESSED_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
 _WINDOWS_ILLEGAL_FILENAME_CHARACTERS = frozenset('<>:"|?*')
@@ -34,6 +35,7 @@ _WINDOWS_RESERVED_NAMES = frozenset(
 class ParserArtifactRepository:
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
+        self.path_codec = DataPathCodec(paths.root)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.paths.registry_db, timeout=30)
@@ -49,20 +51,19 @@ class ParserArtifactRepository:
     def _parse_json(value: str | None) -> Any:
         return json.loads(value) if value is not None else None
 
-    @classmethod
-    def _run_from_row(cls, row: sqlite3.Row) -> ParseRun:
+    def _run_from_row(self, row: sqlite3.Row) -> ParseRun:
         return ParseRun(
             id=row["id"],
             source_file_id=row["source_file_id"],
             provider=row["provider"],
             backend=row["backend"],
             status=ParseRunStatus(row["status"]),
-            request_options=cls._parse_json(row["request_options"]),
+            request_options=self._parse_json(row["request_options"]),
             created_at=datetime.fromisoformat(row["created_at"]),
             completed_at=(
                 datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None
             ),
-            artifact_manifest_path=Path(row["artifact_manifest_path"]),
+            artifact_manifest_path=self.path_codec.decode(str(row["artifact_manifest_path"])),
             schema_version=row["schema_version"],
             pipeline_version=row["pipeline_version"],
             provider_task_id=row["provider_task_id"],
@@ -70,23 +71,22 @@ class ParserArtifactRepository:
             provider_model=row["provider_model"],
             error_code=row["error_code"],
             error_message=row["error_message"],
-            raw_metadata=cls._parse_json(row["raw_metadata"]),
+            raw_metadata=self._parse_json(row["raw_metadata"]),
         )
 
-    @classmethod
-    def _artifact_from_row(cls, row: sqlite3.Row) -> ParserArtifact:
+    def _artifact_from_row(self, row: sqlite3.Row) -> ParserArtifact:
         return ParserArtifact(
             id=row["id"],
             parse_run_id=row["parse_run_id"],
             artifact_type=ParserArtifactType(row["artifact_type"]),
-            storage_path=Path(row["storage_path"]),
+            storage_path=self.path_codec.decode(str(row["storage_path"])),
             sha256=row["sha256"],
             size_bytes=row["size_bytes"],
             created_at=datetime.fromisoformat(row["created_at"]),
             media_type=row["media_type"],
             page=row["page"],
             provider_name=row["provider_name"],
-            provider_metadata=cls._parse_json(row["provider_metadata"]),
+            provider_metadata=self._parse_json(row["provider_metadata"]),
             id_version=row["id_version"],
         )
 
@@ -131,7 +131,7 @@ class ParserArtifactRepository:
                         self._json(run.request_options),
                         run.created_at.isoformat(),
                         None,
-                        str(run.artifact_manifest_path),
+                        self.path_codec.encode(run.artifact_manifest_path),
                         run.schema_version,
                         run.pipeline_version,
                         None,
@@ -260,7 +260,7 @@ class ParserArtifactRepository:
                     artifact.id,
                     artifact.parse_run_id,
                     artifact.artifact_type.value,
-                    str(artifact.storage_path),
+                    self.path_codec.encode(artifact.storage_path),
                     artifact.sha256,
                     artifact.size_bytes,
                     artifact.created_at.isoformat(),

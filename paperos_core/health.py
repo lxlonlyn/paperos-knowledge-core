@@ -89,7 +89,6 @@ class HealthService:
             components["vector"] = {
                 "status": "healthy",
                 "backend": "cognee",
-                "path": cognee_config.vector_db_url,
                 "collection_count": 0,
                 "record_count": 0,
                 "dimensions": cognee_config.embedding_dimensions,
@@ -125,7 +124,6 @@ class HealthService:
         }
         components["data_paths"] = {
             "status": "healthy",
-            "root": str(self.paths.root),
             "all_within_root": True,
         }
         overall = (

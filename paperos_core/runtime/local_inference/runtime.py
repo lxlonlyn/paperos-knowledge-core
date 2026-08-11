@@ -70,6 +70,10 @@ class LocalInferenceRuntime:
     @property
     def pid(self) -> int | None:
         return self.process.pid if self.process is not None else None
+    def cleanup_stale_record(self) -> None:
+        """Discard machine-local PID state before each application start."""
+        (self.paths.jobs / "local-inference-process.json").unlink(missing_ok=True)
+
 
     @property
     def running(self) -> bool:
