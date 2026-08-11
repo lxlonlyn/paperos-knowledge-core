@@ -81,6 +81,12 @@ class HealthService:
             **self.indexes.lexical.status(),
         }
         bundles = self.canonical_repository.list_bundles()
+        dataset_name: str | None = None
+        if bundles:
+            manifest = self.cognee.read_manifest(bundles[-1].snapshot.id)
+            dataset = manifest.get("dataset")
+            if isinstance(dataset, dict) and dataset.get("name"):
+                dataset_name = str(dataset["name"])
         if not bundles:
             # Constructing Cognee's vector engine can initialize its embedding
             # provider. Health must remain a read-only check, so an empty store
@@ -97,7 +103,7 @@ class HealthService:
             try:
                 components["vector"] = {
                     "status": "healthy",
-                    **await self.cognee.vector_status(),
+                    **await self.cognee.vector_status(dataset_name=dataset_name),
                 }
             except Exception as exc:  # noqa: BLE001 - health reports component failures.
                 components["vector"] = {
@@ -106,7 +112,10 @@ class HealthService:
                 }
         try:
             if bundles:
-                await self.cognee.get_datapoint(bundles[-1].document.id)
+                await self.cognee.get_datapoint(
+                    bundles[-1].document.id,
+                    dataset_name=dataset_name,
+                )
             components["cognee_graph"] = {
                 "status": "healthy",
                 "document_count": len(bundles),

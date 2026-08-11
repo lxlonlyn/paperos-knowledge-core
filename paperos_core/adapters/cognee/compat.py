@@ -6,14 +6,14 @@ here and is checked by the real-case acceptance entry. The public
 surface used elsewhere is limited to ``cognee.run_custom_pipeline``,
 ``cognee.search``/``cognee.recall``, and the ``LLMGateway``.
 
-Only three kinds of private access are justified and centralized here:
+Only narrowly version-locked private access is justified and centralized here:
 
 1. writing structured DataPoints with exact canonical provenance
    (``add_data_points`` needs a registered relational Data item and ctx);
 2. verifying and deleting derived projections and closing process-local
    engines, which Cognee does not expose publicly;
-3. the narrow typed graph reader used to backtrack search hits to canonical
-   source chunks (finite depth, explicit relation types only).
+3. Cognee 1.4.0 retrieval fallbacks for custom DataPoint collection selection,
+   canonical provenance readback, and finite-depth typed graph traversal.
 """
 
 from __future__ import annotations
@@ -44,6 +44,45 @@ from paperos_core.paths import DataPaths
 
 if TYPE_CHECKING:
     from paperos_core.adapters.cognee.models import DataPointGraph
+
+
+# Cognee 1.4.0 public search cannot select custom-pipeline DataPoint
+# collections. Collection names remain private to this compatibility boundary.
+_COGNEE_1_4_RETRIEVAL_COLLECTIONS: dict[
+    str, tuple[tuple[str, str, str], ...]
+] = {
+    "PAPEROS_CHUNKS": (("ChunkDataPoint_text", "text", "ChunkDataPoint"),),
+    "PAPEROS_ENTITIES": (
+        ("EntityDataPoint_name", "name", "EntityDataPoint"),
+        ("EntityDataPoint_description", "description", "EntityDataPoint"),
+    ),
+    "PAPEROS_CLAIMS": (("ClaimDataPoint_text", "text", "ClaimDataPoint"),),
+    "PAPEROS_ENTITY_CLAIM": (
+        ("EntityDataPoint_name", "name", "EntityDataPoint"),
+        ("EntityDataPoint_description", "description", "EntityDataPoint"),
+        ("ClaimDataPoint_text", "text", "ClaimDataPoint"),
+    ),
+    "PAPEROS_ASSOCIATIVE_SEEDS": (
+        ("ChunkDataPoint_text", "text", "ChunkDataPoint"),
+        ("EntityDataPoint_name", "name", "EntityDataPoint"),
+        ("EntityDataPoint_description", "description", "EntityDataPoint"),
+        ("ClaimDataPoint_text", "text", "ClaimDataPoint"),
+    ),
+    "PAPEROS_GRAPH_SEEDS": (
+        ("EntityDataPoint_name", "name", "EntityDataPoint"),
+        ("EntityDataPoint_description", "description", "EntityDataPoint"),
+        ("ClaimDataPoint_text", "text", "ClaimDataPoint"),
+        ("TripletDataPoint_text", "text", "TripletDataPoint"),
+        (
+            "ConceptRelationDataPoint_description",
+            "description",
+            "ConceptRelationDataPoint",
+        ),
+    ),
+    "PAPEROS_SUMMARIES": (
+        ("SummaryDataPoint_text", "text", "SummaryDataPoint"),
+    ),
+}
 
 
 def cognee_uuid(canonical_id: str, *, mapping_version: str = "1") -> UUID:
@@ -125,6 +164,31 @@ class CogneeCompatibilityAdapter:
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
         self.manifest_root = paths.cognee / "manifests"
+        self.retrieval_fallback_types_used: set[str] = set()
+
+    async def _dataset_scope(self, dataset_name: str) -> Any:
+        """Return Cognee's dataset/user context manager for scoped readback."""
+        from cognee.context_global_variables import (  # type: ignore[import-untyped]
+            set_database_global_context_variables,
+        )
+        from cognee.modules.data.methods import (  # type: ignore[import-untyped]
+            get_authorized_existing_datasets,
+        )
+        from cognee.modules.engine.operations.setup import setup  # type: ignore[import-untyped]
+        from cognee.modules.users.methods import get_default_user  # type: ignore[import-untyped]
+
+        await setup()
+        user = await get_default_user()
+        datasets = await get_authorized_existing_datasets(
+            [dataset_name], "read", user
+        )
+        if len(datasets) != 1:
+            raise CogneeStorageError(
+                "Cognee dataset does not resolve uniquely for scoped readback.",
+                affected=dataset_name,
+            )
+        dataset = datasets[0]
+        return set_database_global_context_variables(dataset.id, dataset.owner_id)
 
     @staticmethod
     def reset_configuration_caches() -> None:
@@ -270,13 +334,13 @@ class CogneeCompatibilityAdapter:
 
     async def ensure_dataset(self, dataset_name: str) -> Any:
         """Return the Cognee Dataset, creating it when missing (private path)."""
-        from cognee.modules.data.methods import (  # type: ignore[import-untyped]
+        from cognee.modules.data.methods import (
             load_or_create_datasets,
         )
-        from cognee.modules.engine.operations.setup import (  # type: ignore[import-untyped]
+        from cognee.modules.engine.operations.setup import (
             setup,
         )
-        from cognee.modules.users.methods import (  # type: ignore[import-untyped]
+        from cognee.modules.users.methods import (
             get_default_user,
         )
 
@@ -421,7 +485,15 @@ class CogneeCompatibilityAdapter:
                 details={"canonical_ids": failures},
             )
 
-    async def get_datapoint(self, canonical_id: str) -> dict[str, Any]:
+    async def get_datapoint(
+        self,
+        canonical_id: str,
+        *,
+        dataset_name: str | None = None,
+    ) -> dict[str, Any]:
+        if dataset_name is not None:
+            async with await self._dataset_scope(dataset_name):
+                return await self.get_datapoint(canonical_id)
         from cognee.infrastructure.databases.graph.get_graph_engine import (
             get_graph_engine,
         )
@@ -467,7 +539,12 @@ class CogneeCompatibilityAdapter:
             )
         return sorted({node.canonical_id for nodes in groups.values() for node in nodes})
 
-    async def vector_status(self) -> dict[str, object]:
+    async def vector_status(
+        self, *, dataset_name: str | None = None
+    ) -> dict[str, object]:
+        if dataset_name is not None:
+            async with await self._dataset_scope(dataset_name):
+                return await self.vector_status()
         from cognee.infrastructure.databases.vector import (
             get_vector_engine_async,
         )
@@ -498,7 +575,7 @@ class CogneeCompatibilityAdapter:
         query: str,
         *,
         dataset_name: str,
-        collections: tuple[tuple[str, str, str], ...],
+        search_type: str,
         canonical_ids: dict[str, str],
         top_k: int,
     ) -> list[CogneeVectorHit]:
@@ -516,7 +593,14 @@ class CogneeCompatibilityAdapter:
         """
         if top_k <= 0:
             return []
-        from cognee.context_global_variables import (  # type: ignore[import-untyped]
+        collections = _COGNEE_1_4_RETRIEVAL_COLLECTIONS.get(search_type)
+        if collections is None:
+            raise CogneeStorageError(
+                f"Unsupported PaperOS compatibility search type: {search_type}",
+                affected=dataset_name,
+            )
+        self.retrieval_fallback_types_used.add("custom_datapoint_vector_search")
+        from cognee.context_global_variables import (
             set_database_global_context_variables,
         )
         from cognee.infrastructure.databases.vector import (
@@ -545,6 +629,7 @@ class CogneeCompatibilityAdapter:
                 )
             dataset = datasets[0]
             best: dict[str, CogneeVectorHit] = {}
+            allowed_canonical_ids = set(canonical_ids.values())
             async with set_database_global_context_variables(
                 dataset.id, dataset.owner_id
             ):
@@ -560,10 +645,19 @@ class CogneeCompatibilityAdapter:
                         include_payload=True,
                     )
                     for result in results:
-                        cognee_id = str(result.id)
-                        canonical_id = canonical_ids.get(cognee_id)
                         payload = result.payload
-                        if not canonical_id or not isinstance(payload, dict):
+                        if not isinstance(payload, dict):
+                            continue
+                        cognee_id = str(payload.get("id") or result.id)
+                        canonical_id = canonical_ids.get(cognee_id)
+                        payload_canonical_id = payload.get("canonical_id")
+                        if (
+                            canonical_id is None
+                            and payload_canonical_id is not None
+                            and str(payload_canonical_id) in allowed_canonical_ids
+                        ):
+                            canonical_id = str(payload_canonical_id)
+                        if not canonical_id:
                             continue
                         text = payload.get(text_field)
                         if not isinstance(text, str) or not text.strip():
@@ -711,9 +805,13 @@ class CogneeCompatibilityAdapter:
     async def resolve_graph_nodes(
         self, cognee_ids: list[str]
     ) -> dict[str, dict[str, Any]]:
-        """Read typed node properties for search-hit provenance backtracking."""
+        """Read Cognee 1.4.0 node identity/provenance absent from public results.
+
+        Live contract capability: graph_node_provenance_readback.
+        """
         if not cognee_ids:
             return {}
+        self.retrieval_fallback_types_used.add("graph_node_provenance_readback")
         from cognee.infrastructure.databases.graph.get_graph_engine import (
             get_graph_engine,
         )
@@ -741,9 +839,14 @@ class CogneeCompatibilityAdapter:
         depth: int,
         edge_types: set[str],
     ) -> list[CogneeTraversalEvidence]:
-        """Narrow, finite-depth, typed-edge graph traversal with chunk provenance."""
+        """Return typed edge provenance absent from Cognee 1.4.0 public context.
+
+        Live contract capability: typed_graph_traversal. The traversal is
+        finite-depth and restricted to caller-approved relation types.
+        """
         if not seeds or depth <= 0:
             return []
+        self.retrieval_fallback_types_used.add("typed_graph_traversal")
         from cognee.infrastructure.databases.graph.get_graph_engine import (
             get_graph_engine,
         )

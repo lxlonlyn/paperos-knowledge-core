@@ -109,7 +109,11 @@ are rebuildable. Every derived object and graph relation retains canonical chunk
 provenance.
 
 Cognee/LanceDB is the only semantic vector layer. SQLite FTS5 is the lexical
-supplement. Both use the same canonical IDs.
+supplement. Both use the same canonical IDs. Retrieval prefers Cognee public
+search/recall when identity and provenance survive. For Cognee 1.4.0, custom
+DataPoint collection search and typed graph provenance require version-locked
+fallbacks isolated in `paperos_core/adapters/cognee/compat.py`; PaperOS does
+not create a second vector index, embedding client, or graph store.
 
 ## Local inference
 
@@ -144,6 +148,11 @@ Run the complete acceptance path with:
 ```bash
 python scripts/acceptance_real_pipeline.py
 ```
+
+Add `--visualize-graphs` to write capped, browser-readable JSON/SVG snapshots
+for real associative and comprehensive retrieval cases. The same acceptance run
+writes the real Cognee retrieval contract under `logs/contracts`; graph
+rendering failures remain non-blocking validation warnings.
 
 See [docs/architecture.md](docs/architecture.md),
 [docs/data_model.md](docs/data_model.md), and

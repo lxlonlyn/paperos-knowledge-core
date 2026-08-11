@@ -117,30 +117,16 @@ def _dataset_from_manifests(data_root: Path) -> str:
     return next(iter(names))
 
 
-def _allowed_canonical_ids(data_root: Path, dataset: str) -> set[str]:
-    result: set[str] = set()
-    for path in (data_root / "cognee" / "manifests").glob("*.json"):
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        dataset_payload = payload.get("dataset")
-        if isinstance(dataset_payload, dict):
-            manifest_dataset = dataset_payload.get("name")
-            if manifest_dataset and manifest_dataset != dataset:
-                continue
-        mapping = payload.get("canonical_to_cognee_id", {})
-        if isinstance(mapping, dict):
-            result.update(str(canonical_id) for canonical_id in mapping)
-    return result
-
-
 async def live_contract(
     data_root: Path,
     *,
     dataset: str | None,
-    query: str,
+    query: str | None,
 ) -> dict[str, Any]:
     resolved = data_root.expanduser().resolve(strict=False)
     from paperos_core.application import create_application
     from paperos_core.config import load_settings
+    from tests.validation.retrieval_contract import run_live_retrieval_contract
 
     selected_dataset = dataset or _dataset_from_manifests(resolved)
     configured = load_settings()
@@ -152,55 +138,33 @@ async def live_contract(
         }
     )
     application = create_application(settings)
-    from paperos_core.adapters.cognee.search import CogneeSearchAdapter
-
-    adapter = CogneeSearchAdapter(application.paths, application.knowledge_pipeline.compat)
-    allowed = _allowed_canonical_ids(resolved, selected_dataset)
-    _require(allowed, "No canonical IDs are registered for the selected dataset.")
+    output_path = resolved / "logs" / "contracts" / "cognee-retrieval-boundary.json"
     try:
         await application.start()
-        searched = await adapter.graph_search(
-            query,
+        report = await run_live_retrieval_contract(
+            application,
             dataset=selected_dataset,
-            top_k=8,
-            search_type="GRAPH_COMPLETION",
-        )
-        recalled = await adapter.recall_context(
-            query,
-            dataset=selected_dataset,
-            top_k=8,
-            search_type="GRAPH_COMPLETION",
+            output_path=output_path,
+            query_override=query,
         )
     finally:
         await application.aclose()
-
-    canonical_ids_present = all(
-        hit.canonical_id in allowed for hit in (*searched, *recalled)
+    _require(
+        not report["hard_failures"],
+        "Public and compatibility retrieval both failed for: "
+        + ", ".join(report["hard_failures"]),
     )
-    provenance_present = all(
-        hit.source_chunk_ids or hit.references for hit in (*searched, *recalled)
-    )
-    public_api_sufficient = bool(searched and recalled) and (
-        canonical_ids_present and provenance_present
-    )
-    return {
-        "status": "passed" if public_api_sufficient else "unsupported_by_cognee_1_4_0",
-        "dataset": selected_dataset,
-        "query": query,
-        "search_hit_count": len(searched),
-        "recall_hit_count": len(recalled),
-        "public_api_sufficient": public_api_sufficient,
-        "canonical_ids_present": canonical_ids_present,
-        "chunk_or_graph_provenance_present": provenance_present,
-        "fallback_required": not public_api_sufficient,
-    }
+    return report
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live-data-dir", type=Path)
     parser.add_argument("--dataset")
-    parser.add_argument("--query", default="weak coupling topology preservation")
+    parser.add_argument(
+        "--query",
+        help="Optional shared query override; default queries come from real DataPoints.",
+    )
     args = parser.parse_args()
     report: dict[str, object] = {"static": static_contract()}
     if args.live_data_dir is not None:

@@ -1,4 +1,4 @@
-"""Typed graph traversal seeded by public Cognee search, with chunk backtracking."""
+"""Typed graph retrieval through the Cognee 1.4.0 compatibility boundary."""
 
 from __future__ import annotations
 

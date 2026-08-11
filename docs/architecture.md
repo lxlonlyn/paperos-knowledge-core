@@ -185,29 +185,34 @@ for custom canonical input: the provenance spike contract proves it, and the
 minimal private registration stays centralized in
 ``paperos_core/adapters/cognee/compat.py``.
 
-Retrieval calls Cognee's public search/recall surface:
+Retrieval is public-first, with the current real profile mapping:
 
 ```text
-truth        -> FTS5 + Cognee CHUNKS lexical/chunk search
-associative  -> graph decomposition + context extension + typed traversal
-comprehensive-> FTS5 + Cognee search + provenance-bearing recall + fusion
+truth         -> FTS5 + compat custom ChunkDataPoint vector search
+associative   -> compat custom Chunk/Entity/Claim/Summary search
+                 + finite typed graph traversal
+comprehensive -> FTS5 + the same Cognee recall/search compatibility paths
+                 + fusion
 ```
 
-Each profile maps to a real Cognee SearchType, hits are constrained by the
-returned node type, and candidates backtrack through canonical IDs / node IDs
-/ source references (never by text-prefix matching). Absent vector distances
-use Cognee result rank as an explicit rank-based score. PaperOS retrieval code
-does not generate query embeddings, open vector collections, or retain a
-duplicate embedding BLOB store.
+Cognee public search/recall is preferred wherever it preserves PaperOS identity,
+dataset scope, ranking, and provenance. Cognee 1.4.0 public `CHUNKS` is fixed
+to its built-in `DocumentChunk_text` collection, cannot select PaperOS custom
+DataPoint collections, and does not reliably return `canonical_id`,
+`source_chunk_ids`, or typed edge provenance. The version-locked fallbacks for
+custom-DataPoint vector search, graph-node provenance readback, and finite typed
+traversal therefore remain only in
+`paperos_core/adapters/cognee/compat.py`. Cognee's configured embedding engine
+performs fallback query embedding; PaperOS does not implement a second embedding
+client, vector index, or graph store.
 
-Cognee 1.4.0's public `CHUNKS` retriever is bound to Cognee's built-in `Chunk`
-type and cannot search PaperOS `ChunkDataPoint`. The minimum typed-vector
-fallback remains in `paperos_core/adapters/cognee/compat.py`; it owns all query
-embedding and LanceDB details and documents this limitation. Retrieval modules
-only consume adapter results. The permanent static/live contract in
-`tests/contract/test_cognee_retrieval_boundary.py` detects both private-boundary
-regressions and whether a future Cognee public search/recall implementation can
-replace the fallback without losing dataset scope or canonical provenance.
+Hits backtrack through canonical IDs, node IDs, and source references, never by
+text-prefix matching. Missing vector distances use returned rank as an explicit
+rank-based score. The direct-run live contract compares public search, public
+recall, and compat for real Chunk, Entity, Claim, Summary, and associative graph
+context. It writes `logs/contracts/cognee-retrieval-boundary.json`, provides
+the evidence for every retained fallback, and can identify a future Cognee
+version where a fallback is safe to delete.
 
 ## Prompt ownership
 

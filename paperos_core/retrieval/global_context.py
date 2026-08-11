@@ -1,4 +1,4 @@
-"""Document summary retrieval through Cognee public search."""
+"""Document summary retrieval through Cognee's public-first adapter."""
 
 from __future__ import annotations
 

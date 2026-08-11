@@ -1,10 +1,9 @@
-"""CogneeSearchAdapter: public ``cognee.search`` / ``cognee.recall`` calls.
+"""Cognee retrieval adapter with public-first, contract-backed compatibility.
 
-PaperOS never generates query embeddings, opens vector collections, or calls
-the graph engine for ranking. This adapter only calls Cognee's public search
-surface and resolves returned Cognee node ids back to canonical ids through the
-PaperOS-owned manifests. Chunk provenance backtracking for non-chunk hits is
-performed by the narrow ``CogneeCompatibilityAdapter`` reader.
+Public ``cognee.search``/``cognee.recall`` is used when it preserves PaperOS
+identity and provenance. Cognee 1.4.0 cannot select custom DataPoint
+collections or recover all typed graph provenance through that surface, so the
+required version-locked paths are delegated exclusively to ``compat.py``.
 """
 
 from __future__ import annotations
@@ -25,35 +24,14 @@ _PUBLIC_GRAPH_SEARCH_TYPES = {
     "GRAPH_SUMMARY_COMPLETION",
 }
 
-_PAPEROS_VECTOR_SEARCH_TYPES: dict[str, tuple[tuple[str, str, str], ...]] = {
-    "PAPEROS_CHUNKS": (
-        ("ChunkDataPoint_text", "text", "ChunkDataPoint"),
-    ),
-    "PAPEROS_ENTITY_CLAIM": (
-        ("EntityDataPoint_name", "name", "EntityDataPoint"),
-        ("EntityDataPoint_description", "description", "EntityDataPoint"),
-        ("ClaimDataPoint_text", "text", "ClaimDataPoint"),
-    ),
-    "PAPEROS_ASSOCIATIVE_SEEDS": (
-        ("ChunkDataPoint_text", "text", "ChunkDataPoint"),
-        ("EntityDataPoint_name", "name", "EntityDataPoint"),
-        ("EntityDataPoint_description", "description", "EntityDataPoint"),
-        ("ClaimDataPoint_text", "text", "ClaimDataPoint"),
-    ),
-    "PAPEROS_GRAPH_SEEDS": (
-        ("EntityDataPoint_name", "name", "EntityDataPoint"),
-        ("EntityDataPoint_description", "description", "EntityDataPoint"),
-        ("ClaimDataPoint_text", "text", "ClaimDataPoint"),
-        ("TripletDataPoint_text", "text", "TripletDataPoint"),
-        (
-            "ConceptRelationDataPoint_description",
-            "description",
-            "ConceptRelationDataPoint",
-        ),
-    ),
-    "PAPEROS_SUMMARIES": (
-        ("SummaryDataPoint_text", "text", "SummaryDataPoint"),
-    ),
+_PAPEROS_VECTOR_SEARCH_TYPES = {
+    "PAPEROS_CHUNKS",
+    "PAPEROS_ENTITIES",
+    "PAPEROS_CLAIMS",
+    "PAPEROS_ENTITY_CLAIM",
+    "PAPEROS_ASSOCIATIVE_SEEDS",
+    "PAPEROS_GRAPH_SEEDS",
+    "PAPEROS_SUMMARIES",
 }
 
 
@@ -114,12 +92,11 @@ class CogneeSearchAdapter:
         if top_k <= 0:
             return []
         mapping = self._manifest_index()
-        vector_collections = _PAPEROS_VECTOR_SEARCH_TYPES.get(search_type)
-        if vector_collections is not None:
+        if search_type in _PAPEROS_VECTOR_SEARCH_TYPES:
             vector_hits = await self.compat.search_datapoint_vectors(
                 query,
                 dataset_name=dataset,
-                collections=vector_collections,
+                search_type=search_type,
                 canonical_ids=mapping,
                 top_k=top_k,
             )

@@ -83,8 +83,30 @@ python tests/contract/test_portable_data_paths.py \
 ```
 
 The first contract keeps private Cognee retrieval details outside business
-modules. Live mode executes public search/recall, validates any returned
-canonical provenance, and reports `public_api_sufficient=false` when Cognee
-1.4.0 cannot satisfy the contract so the documented minimum fallback remains.
+modules. Live mode derives queries from real retained Chunk, Entity, Claim, and
+Summary DataPoints, compares public search, public recall, compatibility vector
+search, and typed graph context, then atomically writes
+`logs/contracts/cognee-retrieval-boundary.json`. Public limitations are not a
+pipeline failure when the compatibility path preserves identity and provenance.
 The second scans retained SQLite/JSON references and performs a real
 raw/parsed/canonical checksum and FTS relocation check.
+
+## Retrieval graph validation
+
+Graph rendering is optional and remains a test artifact:
+
+```bash
+python scripts/acceptance_real_pipeline.py   --run-root DATA_DIR/validation/runs/<run>   --dataset <dataset-from-the-original-run>   --resume   --visualize-graphs
+```
+
+After retrieval and evidence validation, associative and comprehensive cases
+write `logs/graphs/<case_id>.graph.json` and `*.graph.svg`. Nodes and edges
+come only from the real QueryResponse provenance and retained Cognee graph
+snapshots; no relation is inferred and no second graph index is created.
+Rendering is capped and records truncation counts. A rendering error is reported
+through `graph_visualization_status` and warnings, never through
+`pipeline_status`.
+
+The final report records profile case counts, actual Cognee LLM/embedding
+provider and model, Cognee version, fallbacks actually used by that process,
+live-contract status/path, and graph visualization status/outputs.

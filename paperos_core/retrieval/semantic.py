@@ -1,4 +1,4 @@
-"""Semantic, entity/claim, and summary retrieval through Cognee public search."""
+"""Semantic retrieval through Cognee's public-first compatibility adapter."""
 
 from __future__ import annotations
 

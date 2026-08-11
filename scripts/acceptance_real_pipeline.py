@@ -647,6 +647,66 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "Not every retrieval profile completed a real query.",
         )
 
+        from tests.validation.retrieval_contract import (
+            run_live_retrieval_contract,
+        )
+
+        retrieval_contract_path = (
+            run_root / "logs" / "contracts" / "cognee-retrieval-boundary.json"
+        )
+        retrieval_contract = await run_live_retrieval_contract(
+            application,
+            dataset=args.dataset,
+            output_path=retrieval_contract_path,
+        )
+        _require(
+            not retrieval_contract["hard_failures"],
+            "Public and compatibility retrieval both failed for: "
+            + ", ".join(retrieval_contract["hard_failures"]),
+        )
+        runtime_config = application.knowledge_pipeline.compat.runtime_config_snapshot()
+        cognee_version = str(retrieval_contract["cognee_version"])
+        visualization_status = "disabled"
+        visualization_outputs: list[dict[str, Any]] = []
+        visualization_warnings: list[str] = []
+        if args.visualize_graphs:
+            from tests.validation.graph_visualization import (
+                generate_retrieval_graph,
+            )
+
+            for case, response in zip(queries, responses, strict=True):
+                if response.profile.value not in {"associative", "comprehensive"}:
+                    continue
+                try:
+                    output = generate_retrieval_graph(
+                        case_id=str(case["case_id"]),
+                        profile=response.profile.value,
+                        response=response,
+                        graph_root=application.paths.cognee / "graphs",
+                        output_root=run_root / "logs" / "graphs",
+                        dataset=args.dataset,
+                        cognee_version=cognee_version,
+                    )
+                    for field in ("json", "svg"):
+                        output[field] = (
+                            Path(str(output[field]))
+                            .relative_to(run_root)
+                            .as_posix()
+                        )
+                    visualization_outputs.append(output)
+                except Exception as exc:  # noqa: BLE001 - visualization is soft.
+                    visualization_warnings.append(
+                        f"{case['case_id']}: {type(exc).__name__}: {exc}"
+                    )
+            if visualization_warnings and visualization_outputs:
+                visualization_status = "partial"
+            elif visualization_warnings:
+                visualization_status = "failed"
+            else:
+                visualization_status = "passed"
+
+        profile_counts = Counter(response.profile.value for response in responses)
+
         def average_metric(name: str) -> float | None:
             values = [
                 result[name]
@@ -693,6 +753,26 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "structural_results": structural_results,
             "query_count": len(responses),
             "profiles": sorted(executed_profiles),
+            "truth_case_count": profile_counts["truth"],
+            "associative_case_count": profile_counts["associative"],
+            "comprehensive_case_count": profile_counts["comprehensive"],
+            "llm_provider": runtime_config["llm_provider"],
+            "llm_model": runtime_config["llm_model"],
+            "embedding_provider": runtime_config["embedding_provider"],
+            "embedding_model": runtime_config["embedding_model"],
+            "cognee_version": cognee_version,
+            "retrieval_fallback_types_used": sorted(
+                application.knowledge_pipeline.compat.retrieval_fallback_types_used
+            ),
+            "retrieval_contract_status": retrieval_contract["status"],
+            "retrieval_contract_path": retrieval_contract_path.relative_to(
+                run_root
+            ).as_posix(),
+            "graph_visualization_enabled": bool(args.visualize_graphs),
+            "graph_visualization_status": visualization_status,
+            "graph_visualization_case_count": len(visualization_outputs),
+            "graph_visualization_outputs": visualization_outputs,
+            "graph_visualization_warnings": visualization_warnings,
             "quality_warnings": quality_warnings,
             "quality_metrics": quality_metrics,
             "health": health_summary,
@@ -738,6 +818,11 @@ def main() -> None:
         "--resume",
         action="store_true",
         help="Reuse already ingested genuine papers in the selected run root.",
+    )
+    parser.add_argument(
+        "--visualize-graphs",
+        action="store_true",
+        help="Write real associative/comprehensive graph JSON and SVG after retrieval.",
     )
     args = parser.parse_args()
     try:
