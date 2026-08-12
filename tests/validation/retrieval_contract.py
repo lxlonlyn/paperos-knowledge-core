@@ -192,6 +192,50 @@ async def _safe_surface(
         return [], f"{type(exc).__name__}: {exc}"
 
 
+async def _observe_public_recall(
+    *, query: str, dataset: str, top_k: int, search_type: str
+) -> tuple[dict[str, Any], str | None]:
+    """Observe context separately from structured provenance preservation."""
+
+    import cognee
+
+    try:
+        entries = await cognee.recall(
+            query_text=query,
+            query_type=cognee.SearchType(search_type),
+            datasets=[dataset],
+            only_context=True,
+            top_k=top_k,
+            auto_route=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - limitation is contract data.
+        return {}, f"{type(exc).__name__}: {exc}"
+    items = entries if isinstance(entries, list) else []
+    context_count = 0
+    structured_count = 0
+    provenance_count = 0
+    for entry in items:
+        payload = entry.model_dump(mode="json") if hasattr(entry, "model_dump") else entry
+        if not isinstance(payload, dict):
+            continue
+        if isinstance(payload.get("text") or payload.get("content"), str):
+            context_count += 1
+        raw = payload.get("raw")
+        if isinstance(raw, dict) and any(
+            key in raw for key in ("id", "node_id", "canonical_id", "source_chunk_ids")
+        ):
+            structured_count += 1
+            if raw.get("canonical_id") and raw.get("source_chunk_ids"):
+                provenance_count += 1
+    return {
+        "raw_entry_count": len(items),
+        "context_returned": context_count > 0,
+        "context_entry_count": context_count,
+        "structured_objects_returned": structured_count,
+        "provenance_preserved": bool(structured_count)
+        and provenance_count == structured_count,
+    }, None
+
 async def _datapoint_case(
     adapter: CogneeSearchAdapter,
     *,
@@ -219,6 +263,12 @@ async def _datapoint_case(
         top_k=top_k,
         search_type=spec.public_search_type,
         recall=True,
+    )
+    recall_observation, recall_observation_error = await _observe_public_recall(
+        query=query,
+        dataset=dataset,
+        top_k=top_k,
+        search_type=spec.public_search_type,
     )
     compatible, compat_error = await _safe_surface(
         adapter,
@@ -312,6 +362,11 @@ async def _datapoint_case(
         for message in (
             f"public search: {search_error}" if search_error else None,
             f"public recall: {recall_error}" if recall_error else None,
+            (
+                f"public recall observation: {recall_observation_error}"
+                if recall_observation_error
+                else None
+            ),
             f"compat: {compat_error}" if compat_error else None,
         )
         if message
@@ -360,6 +415,10 @@ async def _datapoint_case(
         "surfaces": {
             "public_search": {**public_search, "error": search_error},
             "public_recall": {**public_recall, "error": recall_error},
+            "public_recall_observation": {
+                **recall_observation,
+                "error": recall_observation_error,
+            },
             "compat_vector_search": {
                 **compat,
                 "supported": compat_vector_supported,

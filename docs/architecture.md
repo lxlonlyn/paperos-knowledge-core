@@ -197,22 +197,36 @@ comprehensive -> FTS5 + the same Cognee recall/search compatibility paths
 
 Cognee public search/recall is preferred wherever it preserves PaperOS identity,
 dataset scope, ranking, and provenance. Cognee 1.4.0 public `CHUNKS` is fixed
-to its built-in `DocumentChunk_text` collection, cannot select PaperOS custom
-DataPoint collections, and does not reliably return `canonical_id`,
-`source_chunk_ids`, or typed edge provenance. The version-locked fallbacks for
-custom-DataPoint vector search, graph-node provenance readback, and finite typed
-traversal therefore remain only in
-`paperos_core/adapters/cognee/compat.py`. Cognee's configured embedding engine
-performs fallback query embedding; PaperOS does not implement a second embedding
-client, vector index, or graph store.
+to its built-in ``DocumentChunk_text`` collection. By contrast, public
+``GRAPH_COMPLETION`` discovers ``index_fields`` from loaded custom DataPoint
+subclasses and can retrieve the PaperOS custom graph. These are separate
+capability facts: public graph results still omit reliable ``canonical_id``,
+``source_chunk_ids``, and typed edge provenance. The real retrieval-quality
+benchmark additionally shows that the current public graph relevance is below
+PaperOS production, so custom-DataPoint seeds, graph-node provenance readback,
+and finite typed traversal remain version-locked in
+``paperos_core/adapters/cognee/compat.py``.
+PaperOS does not implement a second embedding client, vector index, or graph store.
 
 Hits backtrack through canonical IDs, node IDs, and source references, never by
 text-prefix matching. Missing vector distances use returned rank as an explicit
-rank-based score. The direct-run live contract compares public search, public
-recall, and compat for real Chunk, Entity, Claim, Summary, and associative graph
-context. It writes `logs/contracts/cognee-retrieval-boundary.json`, provides
-the evidence for every retained fallback, and can identify a future Cognee
-version where a fallback is safe to delete.
+rank-based score. The retained four-paper, 22-query benchmark against Cognee
+1.4.0 records 186 case-runs. PaperOS G reached 0.966 document and 0.954 concept
+recall. The primary public C comparison reached 0.871 and 0.658; context extension
+F reached 0.742 and 0.823 on its ten associative/comprehensive cases but averaged
+about 196 s, returned about 136k characters, and preserved no public canonical
+provenance. Top-k 12 to 40 was the clearest gain; depth 2 did not improve over
+depth 1, and wide=200/seed=80/depth=3 produced limited mixed gains. No
+triplet-penalty tuning was justified. Decisions: KEEP custom Chunk vector search,
+custom DataPoint graph seeds, typed traversal, graph-node provenance readback,
+and semantic graph retrieval; REMOVE none. Public API is therefore not yet the
+production semantic graph primary.
+
+The direct-run live contract compares public search, public recall, and compat
+for real Chunk, Entity, Claim, Summary, and associative graph context. It writes
+``logs/contracts/cognee-retrieval-boundary.json``, provides the evidence for
+every retained fallback, and can identify a future Cognee version where a
+fallback is safe to delete.
 
 ## Prompt ownership
 

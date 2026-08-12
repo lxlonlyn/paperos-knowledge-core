@@ -91,6 +91,25 @@ pipeline failure when the compatibility path preserves identity and provenance.
 The second scans retained SQLite/JSON references and performs a real
 raw/parsed/canonical checksum and FTS relocation check.
 
+## Retrieval quality benchmark
+
+Capability and quality are separate. The live boundary contract decides whether
+identity/provenance compatibility is required; the direct-run benchmark compares
+relevance and runtime on the retained 22 real queries without pytest, mocks, or
+production tuning:
+
+```bash
+python tests/validation/retrieval_quality_benchmark.py \
+  --run-root data/validation/runs/<latest> \
+  --dataset <dataset-from-the-original-run> --resume
+```
+
+The report is written to
+`logs/contracts/cognee-retrieval-quality-benchmark.json`. It stores every raw
+case, separates formatted context from structured provenance, and treats
+semantic relevance as a soft metric. Configuration F runs only the ten
+associative/comprehensive cases because context extension invokes the real LLM.
+
 ## Retrieval graph validation
 
 Graph rendering is optional and remains a test artifact:

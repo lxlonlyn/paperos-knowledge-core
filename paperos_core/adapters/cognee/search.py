@@ -1,9 +1,10 @@
 """Cognee retrieval adapter with public-first, contract-backed compatibility.
 
 Public ``cognee.search``/``cognee.recall`` is used when it preserves PaperOS
-identity and provenance. Cognee 1.4.0 cannot select custom DataPoint
-collections or recover all typed graph provenance through that surface, so the
-required version-locked paths are delegated exclusively to ``compat.py``.
+identity and provenance. Cognee 1.4.0 GraphCompletion discovers loaded custom
+DataPoint indexes, while built-in CHUNKS remains tied to Cognee native chunk
+schema and public graph output omits required typed provenance. The remaining
+version-locked paths are delegated exclusively to ``compat.py``.
 """
 
 from __future__ import annotations
