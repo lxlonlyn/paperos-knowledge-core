@@ -2,7 +2,8 @@
 
 The custom pipeline runs inside ``cognee.run_custom_pipeline``:
 
-    AcademicChunkTask -> SemanticEnrichmentTask -> DataPointMappingTask
+    AcademicChunkTask -> ScholarlyIdentityTask -> SemanticEnrichmentTask
+    -> DataPointMappingTask
     -> add_data_points
 
 PaperOS decides the academic chunking rules and the enrichment schema; Cognee
@@ -30,12 +31,13 @@ from paperos_core.adapters.cognee.models import (
     DataPointGraph,
     canonical_to_datapoints,
 )
-from paperos_core.adapters.cognee.reference_resolution import resolve_citations
 from paperos_core.domain.canonical import CanonicalBundle, ChunkProjection
 from paperos_core.domain.knowledge import SemanticEnrichment
+from paperos_core.domain.scholarly import ScholarlyContext
 from paperos_core.errors import CogneeStorageError
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.chunking import build_chunks
+from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
 
 
 @dataclass(slots=True)
@@ -45,10 +47,18 @@ class ChunkedBundle:
 
 
 @dataclass(slots=True)
+class IdentityBoundBundle:
+    bundle: CanonicalBundle
+    projection: ChunkProjection
+    scholarly: ScholarlyContext
+
+
+@dataclass(slots=True)
 class EnrichedBundle:
     bundle: CanonicalBundle
     projection: ChunkProjection
     enrichment: SemanticEnrichment
+    scholarly: ScholarlyContext
 
 
 async def academic_chunk_task(
@@ -86,8 +96,27 @@ async def academic_chunk_task(
     return results
 
 
-async def semantic_enrichment_task(
+async def scholarly_identity_task(
     data: list[ChunkedBundle],
+    ctx: Any = None,
+    *,
+    scholarly_registry: ScholarlyRegistry,
+) -> list[IdentityBoundBundle]:
+    """Resolve and persist Work identities before any semantic or graph task."""
+    return [
+        IdentityBoundBundle(
+            bundle=item.bundle,
+            projection=item.projection,
+            scholarly=scholarly_registry.resolve_bundle(
+                item.bundle, item.projection.chunks
+            ),
+        )
+        for item in data
+    ]
+
+
+async def semantic_enrichment_task(
+    data: list[IdentityBoundBundle],
     ctx: Any = None,
     *,
     llm: LLMClient,
@@ -106,6 +135,7 @@ async def semantic_enrichment_task(
                 bundle=chunked.bundle,
                 projection=chunked.projection,
                 enrichment=enrichment,
+                scholarly=chunked.scholarly,
             )
         )
     return results
@@ -115,7 +145,6 @@ async def datapoint_mapping_task(
     data: list[EnrichedBundle],
     ctx: Any = None,
     *,
-    repository: CanonicalRepository,
     graph_root: Path,
     graph_results: list[DataPointGraph] | None = None,
 ) -> list[DataPointGraph]:
@@ -126,13 +155,7 @@ async def datapoint_mapping_task(
             enriched.bundle,
             enriched.projection.chunks,
             enriched.enrichment,
-        )
-        graph.relations.extend(
-            resolve_citations(
-                enriched.bundle,
-                enriched.projection.chunks,
-                repository.list_bundles(),
-            )
+            enriched.scholarly,
         )
         _persist_graph(graph_root, enriched.bundle.snapshot.id, graph)
         if graph_results is not None:
@@ -173,6 +196,7 @@ async def store_datapoints_task(
 def configure_pipeline_tasks(
     *,
     repository: CanonicalRepository,
+    scholarly_registry: ScholarlyRegistry,
     compat: CogneeCompatibilityAdapter,
     llm: LLMClient,
     enrichment_root: Path,
@@ -191,6 +215,11 @@ def configure_pipeline_tasks(
             chunk_overlap_tokens=chunk_overlap_tokens,
         ).task,
         task(
+            scholarly_identity_task,
+            batch_size=1,
+            scholarly_registry=scholarly_registry,
+        ).task,
+        task(
             semantic_enrichment_task,
             batch_size=1,
             llm=llm,
@@ -199,7 +228,6 @@ def configure_pipeline_tasks(
         task(
             datapoint_mapping_task,
             batch_size=1,
-            repository=repository,
             graph_root=graph_root,
             graph_results=graph_results,
         ).task,

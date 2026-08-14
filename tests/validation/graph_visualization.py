@@ -17,6 +17,7 @@ _NODE_TYPES = {
     "ClaimDataPoint",
     "SummaryDataPoint",
     "DocumentDataPoint",
+    "ScholarlyWorkDataPoint",
     "ConceptRelationDataPoint",
     "TripletDataPoint",
 }
@@ -26,6 +27,7 @@ _COLORS = {
     "ClaimDataPoint": "#fef3c7",
     "SummaryDataPoint": "#f3e8ff",
     "DocumentDataPoint": "#fee2e2",
+    "ScholarlyWorkDataPoint": "#fce7f3",
     "ConceptRelationDataPoint": "#e0e7ff",
     "TripletDataPoint": "#cffafe",
 }

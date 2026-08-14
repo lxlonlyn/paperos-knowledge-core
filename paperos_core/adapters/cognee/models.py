@@ -12,8 +12,9 @@ from paperos_core.adapters.cognee.datapoints import (
     DocumentDataPoint,
     ElementDataPoint,
     EntityDataPoint,
-    PaperOSDataPoint,
+    PaperOSGraphDataPoint,
     ReferenceDataPoint,
+    ScholarlyWorkDataPoint,
     SectionDataPoint,
     SummaryDataPoint,
     TripletDataPoint,
@@ -22,11 +23,12 @@ from paperos_core.domain.canonical import CanonicalBundle, Chunk
 from paperos_core.domain.ids import knowledge_triplet_id
 from paperos_core.domain.knowledge import SemanticEnrichment
 from paperos_core.domain.provenance import RelationRecord, RelationType
+from paperos_core.domain.scholarly import ScholarlyContext
 
 
 @dataclass(slots=True)
 class DataPointGraph:
-    nodes: list[PaperOSDataPoint]
+    nodes: list[PaperOSGraphDataPoint]
     relations: list[RelationRecord]
 
     @property
@@ -48,6 +50,7 @@ def canonical_to_datapoints(
     bundle: CanonicalBundle,
     chunks: list[Chunk],
     enrichment: SemanticEnrichment,
+    scholarly: ScholarlyContext,
 ) -> DataPointGraph:
     snapshot = bundle.snapshot
     common = {
@@ -56,10 +59,32 @@ def canonical_to_datapoints(
         "parse_run_id": snapshot.parse_run_id,
     }
     document = bundle.document
-    nodes: list[PaperOSDataPoint] = [
+    resolutions = scholarly.resolution_by_reference()
+    nodes: list[PaperOSGraphDataPoint] = [
+        ScholarlyWorkDataPoint(
+            id=cognee_uuid(work.id),
+            canonical_id=work.id,
+            title=work.title,
+            normalized_title=work.normalized_title,
+            doi=work.doi,
+            arxiv_id=work.arxiv_id,
+            year=work.year,
+            authors=work.authors,
+            identity_status=work.identity_status.value,
+            identity_confidence=work.identity_confidence,
+            derived_from_ids=[
+                item.reference_id
+                for item in scholarly.reference_resolutions
+                if item.work_id == work.id
+            ] + ([document.id] if work.id == scholarly.document_work.id else []),
+        )
+        for work in scholarly.works
+    ]
+    nodes.append(
         DocumentDataPoint(
             id=cognee_uuid(document.id),
             canonical_id=document.id,
+            work_id=scholarly.document_work.id,
             title=document.title,
             document_type=document.document_type,
             language=document.language,
@@ -67,7 +92,7 @@ def canonical_to_datapoints(
             year=document.year,
             **common,
         )
-    ]
+    )
     nodes.extend(
         SectionDataPoint(
             id=cognee_uuid(section.id),
@@ -122,8 +147,16 @@ def canonical_to_datapoints(
             raw_text=reference.raw_text,
             doi=reference.doi,
             year=reference.year,
-            resolved_document_id=reference.resolved_document_id,
-            resolution_status=reference.resolution_status.value,
+            resolved_work_id=(
+                resolutions[reference.id].work_id
+                if reference.id in resolutions
+                else None
+            ),
+            resolution_status=(
+                resolutions[reference.id].resolution_status
+                if reference.id in resolutions
+                else "unresolved"
+            ),
             source_chunk_ids=chunks_by_element.get(reference.source_element_id or "", []),
             derived_from_ids=([reference.source_element_id] if reference.source_element_id else []),
             **common,
@@ -188,7 +221,7 @@ def canonical_to_datapoints(
         )
         for summary in enrichment.summaries
     )
-    relations = _canonical_relations(bundle, chunks) + _semantic_relations(
+    relations = _canonical_relations(bundle, chunks, scholarly) + _semantic_relations(
         bundle, enrichment
     )
     triplet_nodes, triplet_links = _triplet_datapoints(
@@ -204,7 +237,7 @@ def canonical_to_datapoints(
 
 def _triplet_datapoints(
     bundle: CanonicalBundle,
-    nodes: list[PaperOSDataPoint],
+    nodes: list[PaperOSGraphDataPoint],
     relations: list[RelationRecord],
     common: dict[str, str],
 ) -> tuple[list[TripletDataPoint], list[RelationRecord]]:
@@ -287,7 +320,7 @@ def _triplet_datapoints(
     return triplets, links
 
 
-def _datapoint_label(node: PaperOSDataPoint) -> str:
+def _datapoint_label(node: PaperOSGraphDataPoint) -> str:
     for field in ("name", "title", "text", "raw_text", "description"):
         value = getattr(node, field, None)
         if isinstance(value, str) and value.strip():
@@ -296,7 +329,7 @@ def _datapoint_label(node: PaperOSDataPoint) -> str:
 
 
 def _canonical_relations(
-    bundle: CanonicalBundle, chunks: list[Chunk]
+    bundle: CanonicalBundle, chunks: list[Chunk], scholarly: ScholarlyContext
 ) -> list[RelationRecord]:
     document_id = bundle.document.id
     relations: list[RelationRecord] = []
@@ -334,6 +367,35 @@ def _canonical_relations(
         )
         for reference in bundle.references
     )
+    relations.append(
+        RelationRecord(
+            source_id=document_id,
+            target_id=scholarly.document_work.id,
+            relation_type=RelationType.REPRESENTS_WORK,
+            derived_from_ids=[document_id],
+        )
+    )
+    for resolution in scholarly.reference_resolutions:
+        if resolution.work_id is None:
+            continue
+        relations.append(
+            RelationRecord(
+                source_id=resolution.reference_id,
+                target_id=resolution.work_id,
+                relation_type=RelationType.RESOLVES_TO,
+                source_chunk_ids=resolution.source_chunk_ids,
+                derived_from_ids=[resolution.reference_id],
+            )
+        )
+        relations.append(
+            RelationRecord(
+                source_id=scholarly.document_work.id,
+                target_id=resolution.work_id,
+                relation_type=RelationType.CITES,
+                source_chunk_ids=resolution.source_chunk_ids,
+                derived_from_ids=[resolution.reference_id],
+            )
+        )
     return relations
 
 

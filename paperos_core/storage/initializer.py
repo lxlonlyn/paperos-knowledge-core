@@ -21,6 +21,11 @@ REGISTRY_TABLES = frozenset(
         "corrections",
         "improvements",
         "document_tombstones",
+        "scholarly_works",
+        "work_identifiers",
+        "document_work_links",
+        "reference_work_links",
+        "work_redirects",
     }
 )
 
@@ -172,6 +177,50 @@ CREATE TABLE IF NOT EXISTS improvements (
     derived_from_ids TEXT NOT NULL, correction_id TEXT, version INTEGER NOT NULL,
     created_at TEXT NOT NULL, schema_version TEXT NOT NULL, id_version TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS scholarly_works (
+    id TEXT PRIMARY KEY, title TEXT NOT NULL, normalized_title TEXT NOT NULL,
+    doi TEXT, arxiv_id TEXT, year INTEGER, authors TEXT NOT NULL,
+    normalized_first_author TEXT, identity_status TEXT NOT NULL,
+    identity_confidence REAL NOT NULL CHECK(identity_confidence BETWEEN 0 AND 1),
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    schema_version TEXT NOT NULL, id_version TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS scholarly_work_title_idx
+    ON scholarly_works(normalized_title, year, normalized_first_author);
+CREATE TABLE IF NOT EXISTS work_identifiers (
+    work_id TEXT NOT NULL, kind TEXT NOT NULL, normalized_value TEXT NOT NULL,
+    raw_value TEXT NOT NULL, created_at TEXT NOT NULL,
+    PRIMARY KEY(work_id, kind, normalized_value),
+    FOREIGN KEY(work_id) REFERENCES scholarly_works(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS work_identifier_doi_unique
+    ON work_identifiers(normalized_value) WHERE kind = "doi";
+CREATE UNIQUE INDEX IF NOT EXISTS work_identifier_arxiv_unique
+    ON work_identifiers(normalized_value) WHERE kind = "arxiv";
+CREATE INDEX IF NOT EXISTS work_identifier_work_idx ON work_identifiers(work_id);
+CREATE TABLE IF NOT EXISTS document_work_links (
+    document_id TEXT PRIMARY KEY, work_id TEXT NOT NULL, created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL, FOREIGN KEY(work_id) REFERENCES scholarly_works(id)
+);
+CREATE INDEX IF NOT EXISTS document_work_link_work_idx ON document_work_links(work_id);
+CREATE TABLE IF NOT EXISTS reference_work_links (
+    reference_id TEXT PRIMARY KEY, source_document_id TEXT NOT NULL, work_id TEXT,
+    resolution_status TEXT NOT NULL, confidence REAL NOT NULL,
+    normalized_doi TEXT, normalized_arxiv TEXT, normalized_title TEXT, year INTEGER,
+    normalized_first_author TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    FOREIGN KEY(work_id) REFERENCES scholarly_works(id)
+);
+CREATE INDEX IF NOT EXISTS reference_work_link_work_idx ON reference_work_links(work_id);
+CREATE INDEX IF NOT EXISTS reference_work_identity_idx ON reference_work_links(
+    normalized_doi, normalized_arxiv, normalized_title, year, normalized_first_author
+);
+CREATE TABLE IF NOT EXISTS work_redirects (
+    loser_work_id TEXT PRIMARY KEY, survivor_work_id TEXT NOT NULL, created_at TEXT NOT NULL,
+    FOREIGN KEY(loser_work_id) REFERENCES scholarly_works(id),
+    FOREIGN KEY(survivor_work_id) REFERENCES scholarly_works(id),
+    CHECK(loser_work_id <> survivor_work_id)
+);
+CREATE INDEX IF NOT EXISTS work_redirect_survivor_idx ON work_redirects(survivor_work_id);
 CREATE TABLE IF NOT EXISTS document_tombstones (
     document_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

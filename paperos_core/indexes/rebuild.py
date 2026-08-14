@@ -69,6 +69,9 @@ class DerivedDataRebuilder:
         ]
         for selected_id in selected:
             self.canonical_repository.verify_snapshot(selected_id)
+        # Work identity is authoritative, persistent registry state; populate it
+        # before deleting and recreating any Cognee/FTS projections.
+        self.pipeline.scholarly_registry.backfill(self.canonical_repository)
         deleted = await self._delete_derived_data()
         self.storage.initialize_lexical()
         reports: list[IndexingReport] = []

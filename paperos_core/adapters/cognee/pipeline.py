@@ -1,8 +1,8 @@
 """CogneePipelineAdapter: run PaperOS ingestion through Cognee's custom pipeline.
 
 The adapter owns the ingestion orchestration boundary only. Cognee's public
-``run_custom_pipeline`` executes the four PaperOS tasks (AcademicChunkTask,
-SemanticEnrichmentTask, DataPointMappingTask, add_data_points), Cognee owns the
+``run_custom_pipeline`` executes the five PaperOS tasks (AcademicChunkTask,
+ScholarlyIdentityTask, SemanticEnrichmentTask, DataPointMappingTask, add_data_points), Cognee owns the
 dataset/pipeline lifecycle, and every Cognee-internal call is centralized in
 ``compat``.
 """
@@ -36,6 +36,7 @@ from paperos_core.indexes.manager import IndexManager
 from paperos_core.indexes.manifest import IndexingReport
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.registry import SourceRegistry
+from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
 from paperos_core.paths import DataPaths
 
 
@@ -58,6 +59,7 @@ class CogneePipelineAdapter:
         paths: DataPaths,
         canonical_repository: CanonicalRepository,
         source_registry: SourceRegistry,
+        scholarly_registry: ScholarlyRegistry,
         compat: CogneeCompatibilityAdapter,
         index_manager: IndexManager,
         llm: LLMClient,
@@ -66,6 +68,7 @@ class CogneePipelineAdapter:
         self.paths = paths
         self.canonical_repository = canonical_repository
         self.source_registry = source_registry
+        self.scholarly_registry = scholarly_registry
         self.compat = compat
         self.index_manager = index_manager
         self.llm = llm
@@ -106,6 +109,7 @@ class CogneePipelineAdapter:
         graph_results: list[DataPointGraph] = []
         tasks = configure_pipeline_tasks(
             repository=self.canonical_repository,
+            scholarly_registry=self.scholarly_registry,
             compat=self.compat,
             llm=self.llm,
             enrichment_root=self.paths.cognee / "enrichment",

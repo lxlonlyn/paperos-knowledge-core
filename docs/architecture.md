@@ -169,12 +169,25 @@ The ingestion chain is a Cognee custom pipeline:
 
 ```text
 MinerU -> Canonical Document / Section / Element / Reference
-       -> AcademicChunkTask -> SemanticEnrichmentTask
-       -> DataPointMappingTask -> add_data_points
+       -> AcademicChunkTask -> ScholarlyIdentityTask
+       -> SemanticEnrichmentTask -> DataPointMappingTask
+       -> add_data_points
 ```
 
-PaperOS decides the academic chunking rules; Cognee executes the pipeline and
-provides the injected tokenizer and final DataPoint write. Chunks are
+PaperOS decides the academic chunking and scholarly identity rules; Cognee
+executes the pipeline, provides the injected tokenizer, and owns the final
+DataPoint write. A permanent random Work ID is allocated once in
+`registry.db`; DOI, arXiv, and normalized bibliographic fields are reconciliation
+attributes rather than ID material. Document and Reference links plus merge
+redirects remain authoritative across reprocess and Cognee rebuild. Cognee's
+`ScholarlyWorkDataPoint` is only a projection and external Works never receive
+fabricated source-file, parse-run, snapshot, or chunk provenance.
+
+The citation backbone is `Document --REPRESENTS_WORK--> ScholarlyWork`,
+`ReferenceEntry --RESOLVES_TO--> ScholarlyWork`, and
+`ScholarlyWork --CITES--> ScholarlyWork`. Each CITES edge derives from its
+ReferenceEntry and carries citation-context chunk IDs when the source element
+can be located. Chunks are
 formally split from the canonical snapshot: canonical artifacts carry
 document/sections/elements/references only, and the derived
 ``ChunkProjection`` is produced by the pipeline and rebuilt on demand. Cognee's

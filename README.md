@@ -108,6 +108,12 @@ versioned. Cognee and FTS projections, enrichment, summaries, caches, and export
 are rebuildable. Every derived object and graph relation retains canonical chunk
 provenance.
 
+`registry.db` also owns stable `ScholarlyWork` identities independently of
+parsed Documents. External cited works may exist without a PDF. Cognee projects
+these identities without fake canonical provenance, and rebuild reproduces
+Document-to-Work, Reference-to-Work, and Work-to-Work CITES edges with the same
+permanent Work IDs.
+
 Cognee/LanceDB is the only semantic vector layer. SQLite FTS5 is the lexical
 supplement. Cognee 1.4.0 ``GRAPH_COMPLETION`` discovers loaded custom
 DataPoint indexes, but built-in ``CHUNKS`` remains tied to Cognee native
@@ -139,6 +145,11 @@ Application lifecycle can start or stop the child process.
   retained-data relocation contract, run directly without pytest.
 - `tests/contract/test_cognee_retrieval_boundary.py`: permanent static/live
   Cognee search, dataset-scope, and provenance boundary contract.
+- `tests/contract/test_scholarly_identity.py`: direct real-paper contract for
+  stable Work IDs, reconciliation, redirects, external provenance, and citation
+  backbone reprojection.
+- `scripts/backfill_scholarly_works.py`: deterministic registry backfill from
+  retained canonical snapshots without invoking MinerU, LLM, or Cognee rebuild.
 - `tests/validation/retrieval_quality_benchmark.py`: resumable real-query
   comparison of Cognee public graph search/recall and PaperOS production; no
   pytest, mocks, fabricated queries, or production weight changes.

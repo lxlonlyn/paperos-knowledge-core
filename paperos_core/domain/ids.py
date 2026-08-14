@@ -20,6 +20,8 @@ CLASSIFICATION_VERSION = "1"
 CHUNKING_VERSION = "2"
 REFERENCE_PROCESSING_VERSION = "1"
 KNOWLEDGE_TRIPLET_ID_VERSION = "1"
+SCHOLARLY_WORK_SCHEMA_VERSION = "1.0"
+SCHOLARLY_WORK_ID_VERSION = "1"
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -49,6 +51,11 @@ def ingestion_job_id() -> str:
 
 def parse_run_id() -> str:
     return f"parse_{uuid.uuid4().hex}"
+
+
+def scholarly_work_id() -> str:
+    """Allocate a permanent identity once; never derive it from mutable metadata."""
+    return f"work_{uuid.uuid4().hex}"
 
 
 def parser_artifact_id(

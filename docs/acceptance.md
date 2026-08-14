@@ -15,8 +15,9 @@ genuine PDF corpus
 → live MinerU parsing and immutable raw artifacts
 → canonical Document / Section / Element / Reference
 → academic ChunkProjection
+→ persistent ScholarlyWork identity and citation resolution
 → live Cognee LLM semantic enrichment
-→ DataPoint graph and provenance
+→ DataPoint graph and Work citation provenance
 → Cognee graph/vector persistence
 → SQLite FTS5 projection
 → truth, associative, and comprehensive retrieval
@@ -80,6 +81,8 @@ python tests/contract/test_cognee_retrieval_boundary.py \
   --live-data-dir data --dataset papers
 python tests/contract/test_portable_data_paths.py \
   --data-dir data/validation/runs/<latest> --relocate
+python tests/contract/test_scholarly_identity.py \
+  --live-data-dir data/validation/runs/<latest>
 ```
 
 The first contract keeps private Cognee retrieval details outside business
@@ -89,7 +92,11 @@ search, and typed graph context, then atomically writes
 `logs/contracts/cognee-retrieval-boundary.json`. Public limitations are not a
 pipeline failure when the compatibility path preserves identity and provenance.
 The second scans retained SQLite/JSON references and performs a real
-raw/parsed/canonical checksum and FTS relocation check.
+raw/parsed/canonical checksum and FTS relocation check. The ScholarlyWork
+contract copies the retained real canonical corpus to a temporary data root,
+then verifies stable reprocess IDs, provisional-to-ingested promotion, exact
+DOI/arXiv reconciliation, ambiguous-title safety, absence of fake external
+provenance, and deterministic Work-to-Work citation reprojection.
 
 ## Retrieval quality benchmark
 

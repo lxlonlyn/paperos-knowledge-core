@@ -12,6 +12,7 @@ from paperos_core.config import RuntimeSettings
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.parser_artifacts import ParserArtifactRepository
 from paperos_core.ingestion.registry import SourceRegistry
+from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
 from paperos_core.ingestion.service import IngestionService
 from paperos_core.paths import DataPaths, build_data_paths
 
@@ -53,6 +54,7 @@ class Application:
     runtime: ManagedRuntime
     paths: DataPaths
     registry: SourceRegistry
+    scholarly_registry: ScholarlyRegistry
     parser_artifacts: ParserArtifactRepository
     canonical_repository: CanonicalRepository
     canonical_mapper: MinerUCanonicalMapper
@@ -127,6 +129,7 @@ def create_application(settings: RuntimeSettings) -> Application:
 
     storage = StorageInitializer(paths)
     registry = SourceRegistry(paths)
+    scholarly_registry = ScholarlyRegistry(paths)
     parser_artifacts = ParserArtifactRepository(paths)
     canonical_repository = CanonicalRepository(paths)
     canonical_mapper = MinerUCanonicalMapper()
@@ -165,6 +168,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         paths,
         canonical_repository,
         registry,
+        scholarly_registry,
         compat,
         index_manager,
         llm,
@@ -250,6 +254,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         runtime=runtime,
         paths=paths,
         registry=registry,
+        scholarly_registry=scholarly_registry,
         parser_artifacts=parser_artifacts,
         canonical_repository=canonical_repository,
         canonical_mapper=canonical_mapper,

@@ -495,9 +495,13 @@ Supported resolution statuses:
 * `ambiguous`
 * `rejected`
 
-The original reference text must always be preserved.
+The original reference text must always be preserved. The legacy
+`resolved_document_id` field remains readable within canonical schema 1.0, but
+it is not citation identity truth and is not projected to Cognee. Authoritative
+resolution is the `reference_work_links` record and
+`ReferenceDataPoint.resolved_work_id`.
 
-A failed or ambiguous resolution must not create a false CITES relation.
+A failed or ambiguous Work resolution must not create a false CITES relation.
 
 ## Semantic knowledge model
 
@@ -723,6 +727,23 @@ Optional fields:
 
 Corrections must not overwrite original source objects.
 
+## ScholarlyWork identity
+
+`Document` is one parsed PaperOS document instance; `ScholarlyWork` is the
+stable identity of the academic result it represents. A Work may exist without
+a PDF and may be represented by zero or more Documents. Its random
+`work_<uuid>` ID and schema/id version are persisted once in `registry.db`.
+DOI, arXiv, normalized title/year/first-author, document links, reference links,
+and merge redirects support deterministic reconciliation. Redirected IDs remain
+readable and canonicalize to the survivor; merge priority is ingested,
+identified, then provisional, with older creation time breaking ties.
+
+Work identity is retained state, not a derived index. Cognee rebuild consumes
+Canonical plus the Work registry and must reproduce the same Work IDs and
+citation edges. Only the Work title is vector-indexed in the first projection
+version. A `ScholarlyWorkDataPoint` has no canonical snapshot provenance
+because an external cited Work may have no local source artifact.
+
 ## Required structural relations
 
 The unified graph must support the following core relations:
@@ -737,8 +758,9 @@ The unified graph must support the following core relations:
 * `Document AUTHORED_BY Person`
 * `Person AFFILIATED_WITH Organization`
 * `ReferenceEntry BELONGS_TO Document`
-* `ReferenceEntry RESOLVES_TO Document`
-* `Document CITES Document`
+* `Document REPRESENTS_WORK ScholarlyWork`
+* `ReferenceEntry RESOLVES_TO ScholarlyWork`
+* `ScholarlyWork CITES ScholarlyWork`
 * `Chunk MENTIONS Entity`
 * `Document PROPOSES Entity`
 * `Claim SUPPORTED_BY Chunk`
@@ -755,10 +777,13 @@ Every relation derived through an LLM must preserve evidence and model provenanc
 Cognee DataPoint declarations must be centralized in:
 
 ```
-paperos_core/domain/datapoints.py
+paperos_core/adapters/cognee/datapoints.py
 ```
 
-DataPoint models may reference canonical domain models but must not redefine them independently.
+Cognee-specific DataPoint models remain in the Cognee adapter. Canonical-backed
+nodes share snapshot/source/parse/chunk provenance, while
+`ScholarlyWorkDataPoint` inherits only the provider-neutral graph identity and
+derivation fields.
 
 The mapping must explicitly declare:
 
@@ -785,8 +810,9 @@ models:
 
 The Cognee manifest records these IDs and the graph/relational provenance
 counts. It is an audit projection, not the source used to infer Dataset
-membership. A rebuild recreates all bindings from the retained canonical
-snapshot and immutable SourceFile.
+membership. A rebuild recreates all bindings from the retained canonical snapshot,
+immutable SourceFile, and persistent Work registry. It never deletes or
+reallocates ScholarlyWork identities.
 
 ## Index representations
 
