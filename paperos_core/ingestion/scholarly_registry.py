@@ -7,6 +7,7 @@ import re
 import sqlite3
 import unicodedata
 from datetime import datetime
+from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Any
 
 from paperos_core.domain.canonical import (
@@ -40,6 +41,14 @@ _ARXIV_PREFIX = re.compile(
 _ARXIV_VERSION = re.compile(r"v\d+$", re.IGNORECASE)
 _ALPHA_REFERENCE = re.compile(
     r"^\[[A-Za-z][^]]*]\s*(?P<authors>[^:]{2,300}):\s*(?P<body>.+)$"
+)
+_REFERENCE_PREFIX = re.compile(r"^\[[^]]+]\s*")
+_YEAR_FIRST_REFERENCE = re.compile(
+    r"^(?P<authors>.{3,500}?)\.\s+(?P<year>(?:19|20)\d{2})\.\s+"
+    r"(?P<title>[^.]{4,500})(?:\.\s|$)"
+)
+_TITLE_AFTER_AUTHORS_REFERENCE = re.compile(
+    r"^(?P<authors>.{3,500}?)\.\s+(?P<title>[^.]{4,500})\.\s+(?P<body>.+)$"
 )
 _NON_WORD = re.compile(r"[^\w]+", re.UNICODE)
 _STATUS_PRIORITY = {
@@ -90,21 +99,142 @@ class ScholarlyRegistry:
         return normalized or None
 
     @staticmethod
-    def infer_reference_identity(raw_text: str) -> tuple[str | None, list[str]]:
-        """Extract only the explicit alpha-key, authors, title citation form."""
-        match = _ALPHA_REFERENCE.match(raw_text.strip())
-        if match is None:
-            return None, []
-        authors = [
-            item.strip()
-            for item in match.group("authors").split(",")
-            if item.strip()
+    def _split_reference_authors(value: str) -> list[str]:
+        normalized = re.sub(r"\s+(?:and|&)\s+", ", ", value, flags=re.IGNORECASE)
+        return [
+            item.strip().strip(",")
+            for item in normalized.split(",")
+            if item.strip().strip(",")
         ]
-        body = match.group("body").strip()
-        title = body.split(". ", 1)[0].strip().rstrip(".")
-        if not authors or not title:
+
+    @classmethod
+    def infer_reference_identity(
+        cls, raw_text: str
+    ) -> tuple[str | None, list[str]]:
+        """Conservatively recover identity from common bibliography styles."""
+        raw = raw_text.strip()
+        alpha = _ALPHA_REFERENCE.match(raw)
+        if alpha is not None:
+            authors = cls._split_reference_authors(alpha.group("authors"))
+            title = alpha.group("body").split(". ", 1)[0].strip().rstrip(".")
+            return (title, authors) if authors and title else (None, [])
+
+        unkeyed = _REFERENCE_PREFIX.sub("", raw)
+        match = _YEAR_FIRST_REFERENCE.match(unkeyed)
+        if match is None:
+            match = _TITLE_AFTER_AUTHORS_REFERENCE.match(unkeyed)
+            if match is None or re.search(r"(?:19|20)\d{2}", match.group("body")) is None:
+                return None, []
+        authors_text = match.group("authors").strip()
+        if "," not in authors_text and " and " not in authors_text.casefold():
+            return None, []
+        authors = cls._split_reference_authors(authors_text)
+        title = match.group("title").strip().rstrip(".")
+        if not authors or len(title.split()) < 2:
             return None, []
         return title, authors
+
+    @classmethod
+    def _authors_compatible(cls, first: str | None, second: str | None) -> bool:
+        if not first or not second:
+            return False
+        if first == second:
+            return True
+        first_tokens = first.split()
+        second_tokens = second.split()
+        boundary_tokens = {
+            token
+            for token in (
+                first_tokens[0],
+                first_tokens[-1],
+                second_tokens[0],
+                second_tokens[-1],
+            )
+            if len(token) >= 2
+        }
+        return bool(boundary_tokens & set(first_tokens) & set(second_tokens))
+
+    @classmethod
+    def _can_merge_ingested_duplicate(
+        cls,
+        first: ScholarlyWork,
+        second: ScholarlyWork,
+    ) -> bool:
+        """Conservatively reconcile one ingested Work with an identity duplicate."""
+        statuses = {first.identity_status, second.identity_status}
+        if WorkIdentityStatus.INGESTED not in statuses:
+            return False
+        if (
+            first.identity_status is WorkIdentityStatus.INGESTED
+            and second.identity_status is WorkIdentityStatus.INGESTED
+        ):
+            return False
+        if (
+            not first.normalized_title
+            or first.normalized_title != second.normalized_title
+            or first.year is None
+            or second.year is None
+            or first.year != second.year
+            or not cls._authors_compatible(
+                first.normalized_first_author,
+                second.normalized_first_author,
+            )
+        ):
+            return False
+        first_doi = cls.normalize_doi(first.doi)
+        second_doi = cls.normalize_doi(second.doi)
+        if first_doi and second_doi and first_doi != second_doi:
+            return False
+        first_arxiv = cls.normalize_arxiv(first.arxiv_id)
+        second_arxiv = cls.normalize_arxiv(second.arxiv_id)
+        return not (
+            first_arxiv and second_arxiv and first_arxiv != second_arxiv
+        )
+
+    @staticmethod
+    def _title_similarity(first: str, second: str) -> float:
+        if first == second:
+            return 1.0
+        return SequenceMatcher(None, first, second, autojunk=False).ratio()
+
+    @classmethod
+    def identity_attributes_match(
+        cls,
+        work: ScholarlyWork,
+        *,
+        title: str,
+        year: int | None,
+        first_author: str | None,
+        doi: str | None = None,
+        arxiv_id: str | None = None,
+    ) -> bool:
+        """Apply the registry's conservative read-only identity predicate."""
+        incoming_doi = cls.normalize_doi(doi)
+        candidate_doi = cls.normalize_doi(work.doi)
+        if incoming_doi and candidate_doi and incoming_doi != candidate_doi:
+            return False
+        incoming_arxiv = cls.normalize_arxiv(arxiv_id)
+        candidate_arxiv = cls.normalize_arxiv(work.arxiv_id)
+        if incoming_arxiv and candidate_arxiv and incoming_arxiv != candidate_arxiv:
+            return False
+        normalized_title = cls.normalize_text(title)
+        normalized_author = cls.normalize_author(first_author)
+        author_available = bool(
+            normalized_author and work.normalized_first_author
+        )
+        if author_available and not cls._authors_compatible(
+            normalized_author,
+            work.normalized_first_author,
+        ):
+            return False
+        threshold = 0.86 if author_available else 0.90
+        return bool(
+            normalized_title
+            and year is not None
+            and work.year == year
+            and cls._title_similarity(normalized_title, work.normalized_title)
+            >= threshold
+        )
 
     def canonicalize_work_id(
         self, work_id: str, connection: sqlite3.Connection | None = None
@@ -215,6 +345,23 @@ class ScholarlyRegistry:
                 work_id = candidates[0]
                 for candidate in candidates[1:]:
                     work_id = self._merge(connection, work_id, candidate)
+                for candidate in self._find_title_candidates(
+                    connection,
+                    normalized_title,
+                    document.year,
+                    first_author,
+                    incoming_doi=doi,
+                    incoming_arxiv=arxiv,
+                ):
+                    candidate = self.canonicalize_work_id(candidate, connection)
+                    work_id = self.canonicalize_work_id(work_id, connection)
+                    if candidate == work_id:
+                        continue
+                    if self._can_merge_ingested_duplicate(
+                        self._get_work(connection, work_id),
+                        self._get_work(connection, candidate),
+                    ):
+                        work_id = self._merge(connection, work_id, candidate)
             else:
                 title_candidates = self._find_title_candidates(
                     connection,
@@ -601,18 +748,30 @@ class ScholarlyRegistry:
         incoming_doi: str | None = None,
         incoming_arxiv: str | None = None,
     ) -> list[str]:
-        if not normalized_title or year is None or not first_author:
+        if not normalized_title:
             return []
-        rows = connection.execute(
-            """
-            SELECT id, doi, arxiv_id FROM scholarly_works
-            WHERE normalized_title = ? AND year = ?
-              AND normalized_first_author = ?
-              AND id NOT IN (SELECT loser_work_id FROM work_redirects)
-            ORDER BY created_at, id
-            """,
-            (normalized_title, year, first_author),
-        ).fetchall()
+        if year is None:
+            rows = connection.execute(
+                """
+                SELECT id, doi, arxiv_id, normalized_title,
+                       normalized_first_author, year
+                FROM scholarly_works
+                WHERE id NOT IN (SELECT loser_work_id FROM work_redirects)
+                ORDER BY created_at, id
+                """
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                """
+                SELECT id, doi, arxiv_id, normalized_title,
+                       normalized_first_author, year
+                FROM scholarly_works
+                WHERE (year = ? OR year IS NULL)
+                  AND id NOT IN (SELECT loser_work_id FROM work_redirects)
+                ORDER BY created_at, id
+                """,
+                (year,),
+            ).fetchall()
         compatible: list[str] = []
         for row in rows:
             candidate_doi = self.normalize_doi(row["doi"])
@@ -625,6 +784,34 @@ class ScholarlyRegistry:
                 and incoming_arxiv != candidate_arxiv
             ):
                 continue
+            candidate_title = str(row["normalized_title"])
+            candidate_author = (
+                str(row["normalized_first_author"])
+                if row["normalized_first_author"] is not None
+                else None
+            )
+            candidate_year = (
+                int(row["year"]) if row["year"] is not None else None
+            )
+            if year is not None and candidate_year is not None and year != candidate_year:
+                continue
+            author_available = bool(first_author and candidate_author)
+            if author_available and not self._authors_compatible(
+                first_author,
+                candidate_author,
+            ):
+                continue
+            similarity = self._title_similarity(
+                normalized_title,
+                candidate_title,
+            )
+            if similarity < 1.0:
+                same_year = year is not None and year == candidate_year
+                if not same_year:
+                    continue
+                threshold = 0.86 if author_available else 0.90
+                if similarity < threshold:
+                    continue
             compatible.append(str(row["id"]))
         return compatible
 

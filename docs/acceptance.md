@@ -92,11 +92,27 @@ search, and typed graph context, then atomically writes
 `logs/contracts/cognee-retrieval-boundary.json`. Public limitations are not a
 pipeline failure when the compatibility path preserves identity and provenance.
 The second scans retained SQLite/JSON references and performs a real
-raw/parsed/canonical checksum and FTS relocation check. The ScholarlyWork
-contract copies the retained real canonical corpus to a temporary data root,
-then verifies stable reprocess IDs, provisional-to-ingested promotion, exact
-DOI/arXiv reconciliation, ambiguous-title safety, absence of fake external
-provenance, and deterministic Work-to-Work citation reprojection.
+raw/parsed/canonical checksum and FTS relocation check. The fast ScholarlyWork
+contract copies retained real canonical data to a temporary root and verifies
+repeated identity resolution, DOI/arXiv reconciliation, ambiguous-title safety,
+external provenance, and deterministic citation reprojection. It does not claim
+to perform PDF reprocess or a live Cognee rebuild.
+
+The final Task 01 acceptance uses the dedicated four-paper reference corpus and
+the formal application services for ingestion, reprocess, and rebuild:
+
+```bash
+python tests/validation/scholarly_work_reference_acceptance.py \
+  --corpus-dir data/validation/corpus/scholarly-work-reference \
+  --run-dir data/validation/runs/scholarly-work-reference \
+  --dataset paperos-scholarly-work-reference --resume
+```
+
+It persists step state and the final
+`logs/contracts/scholarly-work-citation-backbone.json`, so provider/network
+interruptions resume without repeating completed ingestion or reprocess steps.
+Ground truth is committed under `tests/fixtures/scholarly_work_reference/`;
+PDFs and run artifacts remain local and untracked.
 
 ## Retrieval quality benchmark
 

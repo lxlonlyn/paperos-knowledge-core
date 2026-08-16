@@ -389,6 +389,18 @@ class MinerUCanonicalMapper:
 
     @staticmethod
     def _extract_year(content: list[dict[str, Any]], frontmatter: str) -> int | None:
+        margin_text = "\n".join(
+            plain_text(str(item.get("text", "")))
+            for item in content
+            if item.get("page_idx") == 0
+            and item.get("type") in {"header", "footer"}
+        )
+        margin_years = [int(value) for value in _YEAR.findall(margin_text)]
+        if margin_years:
+            return max(
+                set(margin_years),
+                key=lambda year: (margin_years.count(year), year),
+            )
         first_page = "\n".join(
             plain_text(str(item.get("text", ""))) for item in content if item.get("page_idx") == 0
         )

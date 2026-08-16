@@ -171,8 +171,8 @@ def _real_graph_contract(
                 "Citation backbone contains a non-Work endpoint.",
             )
             _require(
-                len(relation.derived_from_ids) == 1
-                and relation.derived_from_ids[0] in reference_ids,
+                bool(relation.derived_from_ids)
+                and set(relation.derived_from_ids) <= reference_ids,
                 "Work CITES Work is missing its ReferenceEntry provenance.",
             )
 
@@ -196,37 +196,38 @@ def _identity_cases(
     repository: CanonicalRepository,
     registry: ScholarlyRegistry,
 ) -> dict[str, object]:
+    _require(
+        registry._authors_compatible("liu h t d", "hsueh ti derek liu"),
+        "Short surname boundary matching regressed.",
+    )
     bundles = repository.list_bundles()
     _require(bundles, "Real corpus contains no canonical bundles.")
 
     document = bundles[0].document
     first = registry.resolve_document(document)
     second = registry.resolve_document(document)
-    _require(first.id == second.id, "Repeated reprocess changed the Work ID.")
+    _require(first.id == second.id, "Repeated resolution changed the Work ID.")
 
-    doi_documents = [bundle.document for bundle in bundles if bundle.document.doi]
-    _require(len(doi_documents) >= 2, "Real corpus needs two DOI-bearing papers.")
+    distinct_doi_documents = {
+        registry.normalize_doi(bundle.document.doi): bundle.document
+        for bundle in bundles
+        if bundle.document.doi
+    }
+    doi_documents = list(distinct_doi_documents.values())
+    _require(len(doi_documents) >= 2, "Real corpus needs two distinct DOI papers.")
     doi_document = doi_documents[0]
     doi_work = registry.resolve_document(doi_document)
-    doi_reprocess = doi_document.model_copy(
+    doi_resolution_probe = doi_document.model_copy(
         update={"id": f"{doi_document.id}_doi_contract"}
     )
     _require(
-        registry.resolve_document(doi_reprocess).id == doi_work.id,
+        registry.resolve_document(doi_resolution_probe).id == doi_work.id,
         "Exact DOI did not reconcile to the existing Work.",
     )
 
-    gaussian = next(
-        (
-            bundle.document
-            for bundle in bundles
-            if "Gaussian Splatting" in bundle.document.title
-        ),
-        None,
-    )
-    _require(gaussian is not None, "Real 3D Gaussian Splatting paper is missing.")
-    gaussian_work = registry.resolve_document(
-        gaussian.model_copy(update={"arxiv_id": "2308.04079"})
+    contract_arxiv_id = "2608.00001"
+    arxiv_work = registry.resolve_document(
+        doi_document.model_copy(update={"arxiv_id": contract_arxiv_id})
     )
     reference_template = next(
         reference for bundle in bundles for reference in bundle.references
@@ -235,16 +236,18 @@ def _identity_cases(
         update={
             "id": f"{reference_template.id}_arxiv_contract",
             "document_id": document.id,
-            "title": gaussian.title,
-            "authors": [person.display_name for person in gaussian.authors],
-            "year": gaussian.year,
+            "title": doi_document.title,
+            "authors": [
+                person.display_name for person in doi_document.authors
+            ],
+            "year": doi_document.year,
             "doi": None,
-            "arxiv_id": "https://arxiv.org/abs/2308.04079v3",
+            "arxiv_id": f"https://arxiv.org/abs/{contract_arxiv_id}v3",
         }
     )
     arxiv_resolution = registry.resolve_reference(arxiv_reference)
     _require(
-        arxiv_resolution.work_id == gaussian_work.id,
+        arxiv_resolution.work_id == arxiv_work.id,
         "Normalized arXiv exact match did not reconcile.",
     )
 
@@ -305,7 +308,8 @@ def _identity_cases(
         "Provisional Work was not promoted to ingested.",
     )
 
-    left_document, right_document = doi_documents[:2]
+    left_document = next(item for item in doi_documents if item.authors)
+    right_document = next(item for item in doi_documents if item is not left_document)
     left_work = registry.resolve_document(left_document)
     right_clone = right_document.model_copy(
         update={
@@ -360,9 +364,9 @@ def _identity_cases(
 
     return {
         "status": "passed",
-        "stable_reprocess_work_id": first.id,
+        "stable_repeated_resolution_work_id": first.id,
         "doi_exact_work_id": doi_work.id,
-        "arxiv_exact_work_id": gaussian_work.id,
+        "arxiv_exact_work_id": arxiv_work.id,
         "promoted_provisional_work_id": promoted.id,
         "ambiguous_title_preserved": True,
         "merge_redirect_survivor": survivor.id,

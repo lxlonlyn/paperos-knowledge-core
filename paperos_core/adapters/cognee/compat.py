@@ -832,6 +832,78 @@ class CogneeCompatibilityAdapter:
                 resolved[str(node_id)] = properties
         return resolved
 
+    async def read_graph_records(
+        self,
+        cognee_ids: list[str],
+        *,
+        depth: int = 1,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Read unfiltered nodes and typed edges for live graph contracts.
+
+        Cognee 1.4.0 has no public structured graph readback API. Unlike
+        ``typed_traverse``, this contract-only read preserves edges without
+        chunk provenance (notably ``REPRESENTS_WORK``) and does not infer
+        evidence. All private graph-engine access remains isolated here.
+        """
+        if not cognee_ids or depth <= 0:
+            return {"nodes": [], "edges": []}
+        self.retrieval_fallback_types_used.add("structured_graph_readback")
+        from cognee.infrastructure.databases.graph.get_graph_engine import (
+            get_graph_engine,
+        )
+
+        engine = await get_graph_engine()
+        seeds = sorted({str(item) for item in cognee_ids})
+        try:
+            nodes, edges = await engine.get_neighborhood(
+                seeds,
+                depth=depth,
+                edge_types=None,
+            )
+        except Exception as exc:
+            raise CogneeStorageError(
+                f"Cognee structured graph readback failed: {exc}",
+                affected=self.paths.cognee,
+            ) from exc
+
+        node_records = []
+        for node_id, raw_properties in nodes:
+            properties = (
+                _flatten_node(dict(raw_properties))
+                if isinstance(raw_properties, dict)
+                else {}
+            )
+            properties.setdefault("id", str(node_id))
+            node_records.append(properties)
+
+        edge_records = []
+        for source_id, target_id, relation_type, raw_properties in edges:
+            properties = (
+                dict(raw_properties) if isinstance(raw_properties, dict) else {}
+            )
+            edge_records.append(
+                {
+                    "source_id": str(source_id),
+                    "target_id": str(target_id),
+                    "relation_type": str(relation_type),
+                    **properties,
+                }
+            )
+        return {
+            "nodes": sorted(
+                node_records,
+                key=lambda item: str(item.get("id") or item.get("canonical_id") or ""),
+            ),
+            "edges": sorted(
+                edge_records,
+                key=lambda item: (
+                    str(item["source_id"]),
+                    str(item["relation_type"]),
+                    str(item["target_id"]),
+                ),
+            ),
+        }
+
     async def typed_traverse(
         self,
         seeds: list[CogneeVectorHit],

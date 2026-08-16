@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "corpus_name": "paperos-cross-paper-reference-test",
+  "purpose": "Real-paper acceptance corpus for ScholarlyWork identity, citation backbone, cross-paper ABOUT claims, and scoped retrieval.",
+  "recommended_ingest_order": [
+    "efis_2026",
+    "adadiv_2025",
+    "nise_2023",
+    "lipmlp_2022"
+  ],
+  "ingest_order_reason": "Reverse chronological order intentionally forces cited works to exist provisionally before their PDFs are ingested.",
+  "papers": [
+    {
+      "id": "lipmlp_2022",
+      "file": "Liu 等 - 2022 - Learning Smooth Neural Functions via Lipschitz Regularization-已压缩.pdf",
+      "title": "Learning Smooth Neural Functions via Lipschitz Regularization",
+      "year": 2022,
+      "first_author": "Hsueh-Ti Derek Liu",
+      "doi": "10.1145/3528233.3530713"
+    },
+    {
+      "id": "nise_2023",
+      "file": "Novello 等 - 2023 - Neural Implicit Surface Evolution_compressed.pdf",
+      "title": "Neural Implicit Surface Evolution",
+      "year": 2023,
+      "first_author": "Tiago Novello"
+    },
+    {
+      "id": "adadiv_2025",
+      "file": "2025 - Volume Preserving Neural Shape Morphing-已压缩.pdf",
+      "title": "Volume Preserving Neural Shape Morphing",
+      "year": 2025,
+      "first_author": "Camille Buonomo"
+    },
+    {
+      "id": "efis_2026",
+      "file": "Buonomo 等 - Explicit flows for implicit surfaces-已压缩.pdf",
+      "title": "Explicit flows for implicit surfaces",
+      "year": 2026,
+      "first_author": "Camille Buonomo",
+      "doi": "10.1145/3811331"
+    }
+  ]
+}

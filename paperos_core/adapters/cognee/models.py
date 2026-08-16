@@ -221,8 +221,9 @@ def canonical_to_datapoints(
         )
         for summary in enrichment.summaries
     )
-    relations = _canonical_relations(bundle, chunks, scholarly) + _semantic_relations(
-        bundle, enrichment
+    relations = _consolidate_relations(
+        _canonical_relations(bundle, chunks, scholarly)
+        + _semantic_relations(bundle, enrichment)
     )
     triplet_nodes, triplet_links = _triplet_datapoints(
         bundle,
@@ -233,6 +234,34 @@ def canonical_to_datapoints(
     nodes.extend(triplet_nodes)
     relations.extend(triplet_links)
     return DataPointGraph(nodes=nodes, relations=relations)
+
+
+def _consolidate_relations(
+    relations: list[RelationRecord],
+) -> list[RelationRecord]:
+    """Merge duplicate typed edges while retaining every provenance ID."""
+    consolidated: dict[tuple[str, RelationType, str], RelationRecord] = {}
+    for relation in relations:
+        key = (
+            relation.source_id,
+            relation.relation_type,
+            relation.target_id,
+        )
+        existing = consolidated.get(key)
+        if existing is None:
+            consolidated[key] = relation.model_copy(deep=True)
+            continue
+        existing.source_chunk_ids = list(
+            dict.fromkeys(
+                [*existing.source_chunk_ids, *relation.source_chunk_ids]
+            )
+        )
+        existing.derived_from_ids = list(
+            dict.fromkeys(
+                [*existing.derived_from_ids, *relation.derived_from_ids]
+            )
+        )
+    return list(consolidated.values())
 
 
 def _triplet_datapoints(

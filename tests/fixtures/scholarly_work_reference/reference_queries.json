@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "citation_chain_all_four",
+      "stage": [
+        "01",
+        "03"
+      ],
+      "query": "这四篇论文之间有哪些直接引用关系？",
+      "expected_citation_edges": [
+        {
+          "source": "nise_2023",
+          "target": "lipmlp_2022"
+        },
+        {
+          "source": "adadiv_2025",
+          "target": "nise_2023"
+        },
+        {
+          "source": "adadiv_2025",
+          "target": "lipmlp_2022"
+        },
+        {
+          "source": "efis_2026",
+          "target": "adadiv_2025"
+        },
+        {
+          "source": "efis_2026",
+          "target": "nise_2023"
+        },
+        {
+          "source": "efis_2026",
+          "target": "lipmlp_2022"
+        }
+      ],
+      "hard": true
+    },
+    {
+      "id": "nise_external_limitations",
+      "stage": [
+        "02",
+        "03"
+      ],
+      "query": "后续论文如何评价 NISE 的主要缺陷？",
+      "subject_work": "nise_2023",
+      "expected_source_works": [
+        "adadiv_2025",
+        "efis_2026"
+      ],
+      "expected_fact_ids": [
+        "adadiv_about_nise_volume",
+        "adadiv_about_nise_sdf",
+        "adadiv_about_baseline_artifacts",
+        "efis_about_nise_handcrafted",
+        "efis_about_nise_lipmlp_quality"
+      ],
+      "hard": true
+    },
+    {
+      "id": "lipmlp_external_evaluations",
+      "stage": [
+        "02",
+        "03"
+      ],
+      "query": "NISE、Volume Preserving Neural Shape Morphing 和 EFIS 分别如何评价 LipMLP？",
+      "subject_work": "lipmlp_2022",
+      "expected_source_works": [
+        "nise_2023",
+        "adadiv_2025",
+        "efis_2026"
+      ],
+      "expected_fact_ids": [
+        "nise_about_lipmlp_method",
+        "nise_about_lipmlp_quality",
+        "nise_about_lipmlp_experiment",
+        "adadiv_about_lipmlp_volume",
+        "adadiv_about_baseline_artifacts",
+        "efis_about_nise_lipmlp_quality"
+      ],
+      "hard": true
+    },
+    {
+      "id": "adadiv_identity_alias",
+      "stage": [
+        "01",
+        "02"
+      ],
+      "query": "Explicit Flows for Implicit Surfaces 中的 ADADIV 指的是哪篇论文，它被描述为具有什么性质？",
+      "expected_target_work": "adadiv_2025",
+      "expected_fact_ids": [
+        "efis_about_adadiv"
+      ],
+      "hard": true
+    },
+    {
+      "id": "source_vs_subject_scope",
+      "stage": [
+        "03"
+      ],
+      "query": "只根据 NISE 原文，说明它与 LipMLP 的差异。",
+      "source_work_ids": [
+        "nise_2023"
+      ],
+      "subject_work_ids": [
+        "lipmlp_2022"
+      ],
+      "expected_source_works": [
+        "nise_2023"
+      ],
+      "expected_fact_ids": [
+        "nise_about_lipmlp_method",
+        "nise_about_lipmlp_quality",
+        "nise_about_lipmlp_experiment"
+      ],
+      "hard": true
+    },
+    {
+      "id": "subject_scope_cross_source",
+      "stage": [
+        "03"
+      ],
+      "query": "NISE 有哪些后来论文指出、但并非 NISE 自己强调的问题？",
+      "subject_work_ids": [
+        "nise_2023"
+      ],
+      "expected_source_works": [
+        "adadiv_2025",
+        "efis_2026"
+      ],
+      "forbidden_only_source_work": "nise_2023",
+      "expected_fact_ids": [
+        "adadiv_about_nise_volume",
+        "efis_about_nise_handcrafted"
+      ],
+      "hard": true
+    },
+    {
+      "id": "self_limitation_adadiv",
+      "stage": [
+        "02",
+        "03"
+      ],
+      "query": "Volume Preserving Neural Shape Morphing 自己报告了什么失败模式？",
+      "subject_work": "adadiv_2025",
+      "expected_source_works": [
+        "adadiv_2025"
+      ],
+      "expected_fact_ids": [
+        "adadiv_self_limitation"
+      ],
+      "hard": true
+    },
+    {
+      "id": "multi_work_comparison",
+      "stage": [
+        "03"
+      ],
+      "query": "比较 NISE、LipMLP、Volume Preserving Neural Shape Morphing 和 EFIS 在形变自然性、体积控制和拓扑约束上的差异，并标明哪些判断来自后续论文的评价。",
+      "work_set_ids": [
+        "nise_2023",
+        "lipmlp_2022",
+        "adadiv_2025",
+        "efis_2026"
+      ],
+      "expected_source_works_min": [
+        "nise_2023",
+        "adadiv_2025",
+        "efis_2026"
+      ],
+      "expected_fact_ids_min": [
+        "adadiv_about_lipmlp_volume",
+        "adadiv_about_nise_volume",
+        "efis_about_nise_handcrafted",
+        "efis_self_topology_constraint"
+      ],
+      "hard": false
+    }
+  ]
+}

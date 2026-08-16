@@ -241,6 +241,7 @@ class LLMClient:
             "evidence": _chunk_evidence(chunks),
         }
         failures: list[dict[str, Any]] = []
+        extraction: _SectionExtraction | None = None
         for attempt in range(1, 4):
             extraction = await self._generate_structured(
                 system=prompt.text,
@@ -270,10 +271,16 @@ class LLMClient:
                         ),
                         "previous_error": exc.details,
                     }
-        raise SemanticEnrichmentError(
-            "LLM semantic provenance remained invalid after finite retries.",
-            affected=section_id or "(front matter)",
-            details={"snapshot_id": bundle.snapshot.id, "attempts": failures},
+        if extraction is None:
+            raise SemanticEnrichmentError(
+                "LLM semantic extraction produced no structured response.",
+                affected=section_id or "(front matter)",
+                details={"snapshot_id": bundle.snapshot.id, "attempts": failures},
+            )
+        return _sanitize_section_extraction(
+            extraction,
+            valid_chunks={chunk.id for chunk in chunks},
+            snapshot_id=bundle.snapshot.id,
         )
 
     async def _summarize_document(
@@ -290,15 +297,24 @@ class LLMClient:
             )
         section_summaries: list[dict[str, Any]] = []
         for section_id, section_chunks in grouped:
-            batches = [
-                await self._summarize_evidence(
-                    bundle,
-                    prompt,
-                    task=f"summarize section {section_id or '(front matter)'} batch",
-                    evidence=_chunk_evidence(batch),
+            batches: list[_SummaryExtraction] = []
+            for batch_index, batch in enumerate(_chunk_batches(section_chunks)):
+                batches.append(
+                    await self._summarize_evidence(
+                        bundle,
+                        prompt,
+                        task=(
+                            f"summarize section {section_id or '(front matter)'} "
+                            f"batch {batch_index + 1}"
+                        ),
+                        evidence=_chunk_evidence(batch),
+                        valid_chunks={chunk.id for chunk in batch},
+                        object_key=(
+                            f"section_summary:{section_id or '(front matter)'}:"
+                            f"batch:{batch_index + 1}"
+                        ),
+                    )
                 )
-                for batch in _chunk_batches(section_chunks)
-            ]
             source_ids = list(
                 dict.fromkeys(chunk_id for item in batches for chunk_id in item.source_chunk_ids)
             )
@@ -313,6 +329,8 @@ class LLMClient:
                         {"text": item.text, "source_chunk_ids": item.source_chunk_ids}
                         for item in batches
                     ],
+                    valid_chunks=set(source_ids),
+                    object_key=f"section_summary:{section_id or '(front matter)'}:merge",
                 )
                 section_text = merged.text
             section_summaries.append(
@@ -327,19 +345,14 @@ class LLMClient:
             prompt,
             task="merge all section summaries into one four-sentence document summary",
             evidence=section_summaries,
-        )
-        valid_chunks = {chunk.id for chunk in chunks}
-        source_ids = _validate_chunk_ids(
-            extraction.source_chunk_ids,
-            valid_chunks,
+            valid_chunks={chunk.id for chunk in chunks},
             object_key="document_summary",
-            snapshot_id=bundle.snapshot.id,
         )
         summary_id = semantic_object_id(
             "summary",
             bundle.snapshot.id,
             extraction.text,
-            source_ids,
+            extraction.source_chunk_ids,
         )
         return Summary(
             id=summary_id,
@@ -347,8 +360,8 @@ class LLMClient:
             summary_type="document",
             text=extraction.text,
             status=KnowledgeStatus.INFERRED,
-            source_chunk_ids=source_ids,
-            derived_from_ids=source_ids,
+            source_chunk_ids=extraction.source_chunk_ids,
+            derived_from_ids=extraction.source_chunk_ids,
             model=self.model,
             model_version=self.model,
         )
@@ -360,22 +373,54 @@ class LLMClient:
         *,
         task: str,
         evidence: list[dict[str, Any]],
+        valid_chunks: set[str],
+        object_key: str,
     ) -> _SummaryExtraction:
-        return await self._generate_structured(
-            system=prompt.text,
-            user=json.dumps(
-                {
-                    "schema": {"text": "string", "source_chunk_ids": ["chunk id"]},
-                    "document": {
-                        "title": bundle.document.title,
-                        "abstract": bundle.document.abstract,
-                    },
-                    "task": task,
-                    "evidence": evidence,
-                },
-                ensure_ascii=False,
-            ),
-            response_model=_SummaryExtraction,
+        request: dict[str, Any] = {
+            "schema": {"text": "string", "source_chunk_ids": ["chunk id"]},
+            "document": {
+                "title": bundle.document.title,
+                "abstract": bundle.document.abstract,
+            },
+            "task": task,
+            "evidence": evidence,
+        }
+        failures: list[dict[str, Any]] = []
+        for attempt in range(1, 4):
+            extraction = await self._generate_structured(
+                system=prompt.text,
+                user=json.dumps(request, ensure_ascii=False),
+                response_model=_SummaryExtraction,
+            )
+            try:
+                source_ids = _validate_chunk_ids(
+                    extraction.source_chunk_ids,
+                    valid_chunks,
+                    object_key=object_key,
+                    snapshot_id=bundle.snapshot.id,
+                )
+                return extraction.model_copy(update={"source_chunk_ids": source_ids})
+            except SemanticEnrichmentError as exc:
+                failures.append(
+                    {
+                        "attempt": attempt,
+                        "affected": exc.affected,
+                        **exc.details,
+                    }
+                )
+                if attempt < 3:
+                    request["validation_feedback"] = {
+                        "instruction": (
+                            "Regenerate the complete summary. Every source_chunk_ids value "
+                            "must exactly equal a chunk_id present in evidence."
+                        ),
+                        "allowed_source_chunk_ids": sorted(valid_chunks),
+                        "previous_error": exc.details,
+                    }
+        raise SemanticEnrichmentError(
+            "LLM summary provenance remained invalid after finite retries.",
+            affected=object_key,
+            details={"snapshot_id": bundle.snapshot.id, "attempts": failures},
         )
 
     async def _generate_structured(
@@ -644,6 +689,54 @@ def _normalize_section_extraction(
                 }
             )
         )
+    return extraction.model_copy(
+        update={"entities": entities, "claims": claims, "relations": relations}
+    )
+
+
+def _sanitize_section_extraction(
+    extraction: _SectionExtraction,
+    *,
+    valid_chunks: set[str],
+    snapshot_id: str,
+) -> _SectionExtraction:
+    """Drop ungrounded items after retries instead of persisting bad provenance."""
+
+    def valid_ids(ids: list[str], *, object_key: str) -> list[str] | None:
+        try:
+            return _validate_chunk_ids(
+                ids,
+                valid_chunks,
+                object_key=object_key,
+                snapshot_id=snapshot_id,
+            )
+        except SemanticEnrichmentError:
+            return None
+
+    entities: list[_EntityExtraction] = []
+    for item in extraction.entities:
+        source_ids = valid_ids(item.source_chunk_ids, object_key=item.key)
+        if source_ids:
+            entities.append(item.model_copy(update={"source_chunk_ids": source_ids}))
+
+    claims: list[_ClaimExtraction] = []
+    for item in extraction.claims:
+        source_ids = valid_ids(item.source_chunk_ids, object_key=item.key)
+        if source_ids:
+            claims.append(item.model_copy(update={"source_chunk_ids": source_ids}))
+
+    entity_keys = {item.key for item in entities}
+    relations: list[_RelationExtraction] = []
+    for item in extraction.relations:
+        if item.source_key not in entity_keys or item.target_key not in entity_keys:
+            continue
+        source_ids = valid_ids(
+            item.source_chunk_ids,
+            object_key=f"{item.source_key}->{item.target_key}",
+        )
+        if source_ids:
+            relations.append(item.model_copy(update={"source_chunk_ids": source_ids}))
+
     return extraction.model_copy(
         update={"entities": entities, "claims": claims, "relations": relations}
     )
