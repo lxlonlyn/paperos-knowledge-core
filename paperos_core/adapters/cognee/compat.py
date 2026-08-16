@@ -836,6 +836,7 @@ class CogneeCompatibilityAdapter:
         self,
         cognee_ids: list[str],
         *,
+        dataset_name: str,
         depth: int = 1,
     ) -> dict[str, list[dict[str, Any]]]:
         """Read unfiltered nodes and typed edges for live graph contracts.
@@ -851,20 +852,20 @@ class CogneeCompatibilityAdapter:
         from cognee.infrastructure.databases.graph.get_graph_engine import (
             get_graph_engine,
         )
-
-        engine = await get_graph_engine()
         seeds = sorted({str(item) for item in cognee_ids})
-        try:
-            nodes, edges = await engine.get_neighborhood(
-                seeds,
-                depth=depth,
-                edge_types=None,
-            )
-        except Exception as exc:
-            raise CogneeStorageError(
-                f"Cognee structured graph readback failed: {exc}",
-                affected=self.paths.cognee,
-            ) from exc
+        async with await self._dataset_scope(dataset_name):
+            engine = await get_graph_engine()
+            try:
+                nodes, edges = await engine.get_neighborhood(
+                    seeds,
+                    depth=depth,
+                    edge_types=None,
+                )
+            except Exception as exc:
+                raise CogneeStorageError(
+                    f"Cognee structured graph readback failed: {exc}",
+                    affected=self.paths.cognee,
+                ) from exc
 
         node_records = []
         for node_id, raw_properties in nodes:

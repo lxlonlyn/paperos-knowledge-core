@@ -226,6 +226,30 @@ class CanonicalRepository:
             ).fetchall()
         return [str(row["id"]) for row in rows]
 
+    def list_latest_snapshot_ids(self) -> list[str]:
+        """Return the current canonical snapshot for every Document."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT current.id
+                FROM canonical_snapshots AS current
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM canonical_snapshots AS newer
+                    WHERE newer.document_id = current.document_id
+                      AND (
+                          newer.created_at > current.created_at
+                          OR (
+                              newer.created_at = current.created_at
+                              AND newer.id > current.id
+                          )
+                      )
+                )
+                ORDER BY current.created_at, current.id
+                """
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
+
     def list_bundles(self) -> list[CanonicalBundle]:
         return [self.get_bundle(snapshot_id) for snapshot_id in self.list_snapshot_ids()]
 

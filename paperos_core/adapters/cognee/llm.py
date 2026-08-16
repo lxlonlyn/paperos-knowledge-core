@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
@@ -39,6 +40,7 @@ from paperos_core.errors import SemanticEnrichmentError
 from paperos_core.prompt_repository import PromptDescriptor, PromptRepository
 
 _BATCH_CHARACTER_BUDGET = 20_000
+_LOGGER = logging.getLogger(__name__)
 
 
 class _StrictModel(BaseModel):
@@ -736,6 +738,20 @@ def _sanitize_section_extraction(
         )
         if source_ids:
             relations.append(item.model_copy(update={"source_chunk_ids": source_ids}))
+
+    dropped_entity_count = len(extraction.entities) - len(entities)
+    dropped_claim_count = len(extraction.claims) - len(claims)
+    dropped_relation_count = len(extraction.relations) - len(relations)
+    if dropped_entity_count or dropped_claim_count or dropped_relation_count:
+        _LOGGER.warning(
+            "Dropped semantic objects with invalid provenance after finite retries: "
+            "snapshot_id=%s dropped_entity_count=%d dropped_claim_count=%d "
+            "dropped_relation_count=%d",
+            snapshot_id,
+            dropped_entity_count,
+            dropped_claim_count,
+            dropped_relation_count,
+        )
 
     return extraction.model_copy(
         update={"entities": entities, "claims": claims, "relations": relations}

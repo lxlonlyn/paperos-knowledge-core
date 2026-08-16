@@ -92,7 +92,12 @@ class CogneePipelineAdapter:
         )
 
     async def ingest_bundle(
-        self, bundle: CanonicalBundle, *, rebuilt: bool = False
+        self,
+        bundle: CanonicalBundle,
+        *,
+        rebuilt: bool = False,
+        reuse_existing_enrichment: bool = False,
+        generate_enrichment_if_missing: bool = True,
     ) -> tuple[IndexingReport, Path]:
         """Run one canonical/enrichment pair through the Cognee custom pipeline."""
         self.canonical_repository.verify_snapshot(bundle.snapshot.id)
@@ -117,6 +122,8 @@ class CogneePipelineAdapter:
             chunk_target_tokens=self.ingestion.chunk_target_tokens,
             chunk_overlap_tokens=self.ingestion.chunk_overlap_tokens,
             graph_results=graph_results,
+            reuse_existing_enrichment=reuse_existing_enrichment,
+            generate_enrichment_if_missing=generate_enrichment_if_missing,
         )
         item = PipelineItem(
             id=data_id,

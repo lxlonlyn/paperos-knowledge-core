@@ -121,15 +121,28 @@ async def semantic_enrichment_task(
     *,
     llm: LLMClient,
     enrichment_root: Path,
+    reuse_existing: bool = False,
+    generate_if_missing: bool = True,
 ) -> list[EnrichedBundle]:
-    """Run PaperOS's enrichment schema through Cognee's LLMGateway."""
+    """Reuse validated enrichment or generate it only when explicitly allowed."""
     results: list[EnrichedBundle] = []
     for chunked in data:
-        enrichment = await llm.enrich(chunked.bundle, chunked.projection.chunks)
+        enrichment_path = enrichment_root / f"{chunked.bundle.snapshot.id}.json"
+        if reuse_existing and enrichment_path.is_file():
+            enrichment = _load_enrichment(enrichment_path)
+        elif not generate_if_missing:
+            raise CogneeStorageError(
+                "Semantic enrichment artifact is missing and generation is disabled.",
+                affected=enrichment_path,
+            )
+        else:
+            enrichment = await llm.enrich(
+                chunked.bundle, chunked.projection.chunks
+            )
+            _persist_enrichment(
+                enrichment_root, chunked.bundle.snapshot.id, enrichment
+            )
         _validate_semantic_provenance(chunked.projection.chunks, enrichment)
-        _persist_enrichment(
-            enrichment_root, chunked.bundle.snapshot.id, enrichment
-        )
         results.append(
             EnrichedBundle(
                 bundle=chunked.bundle,
@@ -204,6 +217,8 @@ def configure_pipeline_tasks(
     chunk_target_tokens: int,
     chunk_overlap_tokens: int,
     graph_results: list[DataPointGraph],
+    reuse_existing_enrichment: bool,
+    generate_enrichment_if_missing: bool,
 ) -> list[Any]:
     """Bind per-run dependencies and return the Cognee Task list."""
     return [
@@ -224,6 +239,8 @@ def configure_pipeline_tasks(
             batch_size=1,
             llm=llm,
             enrichment_root=enrichment_root,
+            reuse_existing=reuse_existing_enrichment,
+            generate_if_missing=generate_enrichment_if_missing,
         ).task,
         task(
             datapoint_mapping_task,
@@ -287,6 +304,16 @@ def _persist_enrichment(
     path = root / f"{snapshot_id}.json"
     _atomic_json(path, enrichment.model_dump(mode="json"))
     return path
+
+
+def _load_enrichment(path: Path) -> SemanticEnrichment:
+    try:
+        return SemanticEnrichment.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise CogneeStorageError(
+            f"Unable to read semantic enrichment artifact: {exc}",
+            affected=path,
+        ) from exc
 
 
 def _persist_graph(

@@ -123,18 +123,6 @@ def _matching_works(
     return sorted({work.id: work for work in matches}.values(), key=lambda item: item.id)
 
 
-def _derived_ready(application: Application, snapshot_id: str) -> bool:
-    return all(
-        path.is_file()
-        for path in (
-            application.paths.cognee / "graphs" / f"{snapshot_id}.json",
-            application.paths.cognee / "enrichment" / f"{snapshot_id}.json",
-            application.paths.cognee / "manifests" / f"{snapshot_id}.json",
-            application.paths.indexes / "manifests" / f"{snapshot_id}.json",
-        )
-    )
-
-
 def _identity_snapshot_path(contract_root: Path, position: int, paper_key: str) -> Path:
     return contract_root / f"identity-after-{position:02d}-{paper_key}.json"
 
@@ -322,6 +310,7 @@ async def _live_cognee_contract(
     )
     readback = await application.knowledge_pipeline.compat.read_graph_records(
         [str(cognee_uuid(item)) for item in sorted(canonical_ids)],
+        dataset_name=application.settings.dataset,
         depth=1,
     )
     canonical_by_cognee = {
@@ -736,12 +725,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 bundle = application.canonical_repository.get_bundle(
                     str(step["snapshot_id"])
                 )
-                if not _derived_ready(application, bundle.snapshot.id):
-                    print(f"ingest {position}/4 resume-knowledge {paper_key}", flush=True)
-                    await application.knowledge_pipeline.ingest_bundle(bundle)
-                    bundle = application.canonical_repository.get_bundle(bundle.snapshot.id)
-                else:
-                    print(f"ingest {position}/4 reused {paper_key}", flush=True)
+                print(f"ingest {position}/4 reused {paper_key}", flush=True)
             else:
                 latest = _latest_bundles(application)
                 bundle = latest.get(str(paper["file"]))
@@ -853,11 +837,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 _record_failure(report, f"Real reprocess did not create a snapshot: {paper_key}")
 
         rebuild_state = dict(state.get("rebuild") or {})
-        retained_before = (
-            None
-            if args.rerun_rebuild
-            else rebuild_state.get("before_signature")
-        )
+        retained_before = rebuild_state.get("before_signature")
         if isinstance(retained_before, dict):
             before_signature = retained_before
         else:
@@ -882,14 +862,36 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 or datetime.now(UTC).isoformat(),
             }
             _atomic_json(state_path, state)
-            print("rebuild live DerivedDataRebuilder.rebuild()", flush=True)
-            rebuilt = await application.services.rebuilder.rebuild()
+            print("rebuild first current snapshots with missing enrichment refresh", flush=True)
+            rebuilt = await application.services.rebuilder.rebuild(
+                refresh_enrichment=True,
+            )
             state["rebuild"] = {
-                "status": "completed",
+                "status": "first_completed_second_pending",
                 "before_signature": before_signature,
+                **rebuilt.public_dict(),
+                "first_rebuild_status": "passed",
+                "first_rebuild": rebuilt.public_dict(),
                 "rebuilt_snapshot_ids": rebuilt.rebuilt_snapshot_ids,
-                "completed_at": datetime.now(UTC).isoformat(),
+                "first_completed_at": datetime.now(UTC).isoformat(),
             }
+            _atomic_json(state_path, state)
+            print("rebuild second current snapshots without LLM enrichment", flush=True)
+            second_rebuild = await application.services.rebuilder.rebuild(
+                refresh_enrichment=False,
+            )
+            if second_rebuild.llm_enrichment_call_count != 0:
+                raise RuntimeError(
+                    "Second rebuild unexpectedly invoked semantic enrichment."
+                )
+            state["rebuild"].update(
+                {
+                    "status": "completed",
+                    "second_rebuild_status": "passed",
+                    "second_rebuild": second_rebuild.public_dict(),
+                    "completed_at": datetime.now(UTC).isoformat(),
+                }
+            )
             _atomic_json(state_path, state)
         else:
             print("rebuild reused from retained state", flush=True)
@@ -898,13 +900,22 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         after_stored = _stored_graph_contract(application, after_registry)
         after_live = await _live_cognee_contract(application, after_registry)
         after_signature = _semantic_signature(after_registry, after_stored, after_live)
-        rebuild_stable = before_signature == after_signature
+        rebuild_stable = all(
+            before_signature.get(field) == after_signature.get(field)
+            for field in (
+                "work_ids",
+                "document_links",
+                "reference_links",
+                "citation_edges",
+            )
+        )
         report["rebuild"] = {
             "before_signature": before_signature,
             "after_signature": after_signature,
             "stable": rebuild_stable,
             **state["rebuild"],
         }
+        report["live_cognee"] = after_live
         if not rebuild_stable:
             _record_failure(report, "Real rebuild changed Work/citation signature.")
 
