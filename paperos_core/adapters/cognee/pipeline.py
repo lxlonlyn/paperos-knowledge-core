@@ -306,6 +306,12 @@ def _validate_semantic_provenance(
         _validate_provenance(entity.id, entity.source_chunk_ids, chunk_ids)
     for claim in enrichment.claims:
         _validate_provenance(claim.id, claim.source_chunk_ids, chunk_ids)
+        for about in claim.about:
+            _validate_provenance(
+                f"{claim.id}:ABOUT:{about.work_id}",
+                about.source_chunk_ids,
+                chunk_ids,
+            )
     for relation in enrichment.relations:
         _validate_provenance(relation.id, relation.source_chunk_ids, chunk_ids)
     for summary in enrichment.summaries:

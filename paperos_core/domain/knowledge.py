@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from paperos_core.domain.documents import DomainModel
 from paperos_core.domain.ids import CANONICAL_ID_VERSION, CANONICAL_SCHEMA_VERSION
@@ -16,6 +16,24 @@ class KnowledgeStatus(StrEnum):
     USER_CONFIRMED = "user_confirmed"
     REJECTED = "rejected"
     SUPERSEDED = "superseded"
+
+
+class AboutRole(StrEnum):
+    SELF = "self"
+    SUBJECT = "subject"
+    COMPARISON_TARGET = "comparison_target"
+    TOPIC = "topic"
+
+
+class ClaimAboutTarget(BaseModel):
+    """Claim → ScholarlyWork ABOUT target with per-edge provenance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    work_id: str
+    roles: list[str] = Field(default_factory=list)
+    source_chunk_ids: list[str] = Field(default_factory=list)
+    derived_from_ids: list[str] = Field(default_factory=list)
 
 
 class Entity(DomainModel):
@@ -48,6 +66,11 @@ class Claim(DomainModel):
     confidence: float | None = Field(default=None, ge=0, le=1)
     model: str | None = None
     model_version: str | None = None
+    # Filled programmatically from Document / ScholarlyContext; never by the LLM.
+    source_document_id: str | None = None
+    source_work_id: str | None = None
+    # Retained enrichments without ABOUT load safely as about=[].
+    about: list[ClaimAboutTarget] = Field(default_factory=list)
 
 
 class ConceptRelation(DomainModel):

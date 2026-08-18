@@ -137,7 +137,9 @@ async def semantic_enrichment_task(
             )
         else:
             enrichment = await llm.enrich(
-                chunked.bundle, chunked.projection.chunks
+                chunked.bundle,
+                chunked.projection.chunks,
+                scholarly=chunked.scholarly,
             )
             _persist_enrichment(
                 enrichment_root, chunked.bundle.snapshot.id, enrichment
@@ -270,6 +272,7 @@ def _custom_edge(
             "canonical_target_id": relation.target_id,
             "source_chunk_ids": relation.source_chunk_ids,
             "derived_from_ids": relation.derived_from_ids,
+            "roles": list(getattr(relation, "roles", []) or []),
         },
     )
 
@@ -282,6 +285,12 @@ def _validate_semantic_provenance(
         _validate_provenance(entity.id, entity.source_chunk_ids, chunk_ids)
     for claim in enrichment.claims:
         _validate_provenance(claim.id, claim.source_chunk_ids, chunk_ids)
+        for about in claim.about:
+            _validate_provenance(
+                f"{claim.id}:ABOUT:{about.work_id}",
+                about.source_chunk_ids,
+                chunk_ids,
+            )
     for relation in enrichment.relations:
         _validate_provenance(relation.id, relation.source_chunk_ids, chunk_ids)
     for summary in enrichment.summaries:

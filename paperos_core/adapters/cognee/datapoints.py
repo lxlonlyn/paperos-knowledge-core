@@ -95,6 +95,8 @@ class ClaimDataPoint(CanonicalBackedDataPoint):
     claim_type: str | None = None
     status: str
     confidence: float | None = None
+    source_document_id: str | None = None
+    source_work_id: str | None = None
     metadata: dict[str, Any] = {"index_fields": ["text"]}  # noqa: RUF012
 
 

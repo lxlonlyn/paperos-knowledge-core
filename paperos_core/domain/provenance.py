@@ -17,6 +17,7 @@ class RelationType(StrEnum):
     REPRESENTS_WORK = "REPRESENTS_WORK"
     RESOLVES_TO = "RESOLVES_TO"
     CITES = "CITES"
+    ABOUT = "ABOUT"
     MENTIONS = "MENTIONS"
     SUPPORTS = "SUPPORTS"
     CONTRADICTS = "CONTRADICTS"
@@ -39,3 +40,4 @@ class RelationRecord(BaseModel):
     relation_type: RelationType
     source_chunk_ids: list[str] = Field(default_factory=list)
     derived_from_ids: list[str] = Field(default_factory=list)
+    roles: list[str] = Field(default_factory=list)

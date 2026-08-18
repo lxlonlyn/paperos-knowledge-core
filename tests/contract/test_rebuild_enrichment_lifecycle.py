@@ -56,7 +56,9 @@ class _LLMProbe:
         self.enrichment = enrichment
         self.calls = 0
 
-    async def enrich(self, bundle: Any, chunks: list[Any]) -> SemanticEnrichment:
+    async def enrich(
+        self, bundle: Any, chunks: list[Any], scholarly: Any = None
+    ) -> SemanticEnrichment:
         self.calls += 1
         return self.enrichment
 

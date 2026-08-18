@@ -29,17 +29,22 @@ from paperos_core.adapters.cognee.runtime_config import CogneeRuntimeConfigReade
 from paperos_core.domain.canonical import CanonicalBundle, Chunk, Section
 from paperos_core.domain.ids import semantic_object_id
 from paperos_core.domain.knowledge import (
+    AboutRole,
     Claim,
+    ClaimAboutTarget,
     ConceptRelation,
     Entity,
     KnowledgeStatus,
     SemanticEnrichment,
     Summary,
 )
+from paperos_core.domain.scholarly import ScholarlyContext, ScholarlyWork
 from paperos_core.errors import SemanticEnrichmentError
 from paperos_core.prompt_repository import PromptDescriptor, PromptRepository
 
 _BATCH_CHARACTER_BUDGET = 20_000
+_SELF_WORK_KEY = "SELF"
+_ABOUT_ROLES = {role.value for role in AboutRole}
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -56,12 +61,19 @@ class _EntityExtraction(_StrictModel):
     confidence: float | None = Field(default=None, ge=0, le=1)
 
 
+class _ClaimAboutExtraction(_StrictModel):
+    work_key: str
+    role: str
+    source_chunk_ids: list[str] | None = None
+
+
 class _ClaimExtraction(_StrictModel):
     key: str
     text: str
     claim_type: str | None = None
     source_chunk_ids: list[str] = Field(min_length=1)
     confidence: float | None = Field(default=None, ge=0, le=1)
+    about: list[_ClaimAboutExtraction] = Field(default_factory=list)
 
 
 class _RelationExtraction(_StrictModel):
@@ -104,11 +116,19 @@ class _MergedEntity:
 
 
 @dataclass(slots=True)
+class _MergedAbout:
+    work_id: str
+    roles: list[str]
+    source_chunk_ids: list[str]
+
+
+@dataclass(slots=True)
 class _MergedClaim:
     text: str
     claim_type: str | None
     confidence: float | None
     source_chunk_ids: list[str]
+    about_by_work: dict[str, _MergedAbout]
 
 
 @dataclass(slots=True)
@@ -119,6 +139,12 @@ class _MergedRelation:
     description: str | None
     confidence: float | None
     source_chunk_ids: list[str]
+
+
+@dataclass(slots=True)
+class _WorkCatalog:
+    key_to_work_id: dict[str, str]
+    entries: list[dict[str, Any]]
 
 
 class LLMClient:
@@ -158,21 +184,35 @@ class LLMClient:
             "model": config.llm_model,
         }
 
-    async def enrich(self, bundle: CanonicalBundle, chunks: list[Chunk]) -> SemanticEnrichment:
+    async def enrich(
+        self,
+        bundle: CanonicalBundle,
+        chunks: list[Chunk],
+        scholarly: ScholarlyContext,
+    ) -> SemanticEnrichment:
         """Section-grouped, batch-local semantic enrichment with coverage."""
         prompt = self.prompts.describe("semantic_enrichment")
+        catalog = _build_work_catalog(bundle, scholarly)
         raw_sections: list[tuple[str | None, list[Chunk], _SectionExtraction]] = []
         covered: list[str] = []
         for section_id, section_chunks in _chunks_by_section(chunks, bundle.sections):
             for batch in _chunk_batches(section_chunks):
                 covered.extend(chunk.id for chunk in batch)
                 extraction = await self._extract_batch(
-                    bundle, prompt, section_id=section_id, chunks=batch
+                    bundle,
+                    prompt,
+                    section_id=section_id,
+                    chunks=batch,
+                    catalog=catalog,
                 )
                 raw_sections.append((section_id, batch, extraction))
         config = self.runtime_config.read()
         entities, claims, relations = _merge_section_extractions(
-            bundle, raw_sections, model=config.llm_model
+            bundle,
+            raw_sections,
+            scholarly=scholarly,
+            catalog=catalog,
+            model=config.llm_model,
         )
         summary = await self._summarize_document(bundle, chunks, prompt)
         covered_ids = list(dict.fromkeys(covered))
@@ -202,6 +242,7 @@ class LLMClient:
         *,
         section_id: str | None,
         chunks: list[Chunk],
+        catalog: _WorkCatalog,
     ) -> _SectionExtraction:
         request = {
             "schema": {
@@ -222,6 +263,15 @@ class LLMClient:
                         "claim_type": "optional string",
                         "source_chunk_ids": ["chunk id"],
                         "confidence": "optional number 0..1",
+                        "about": [
+                            {
+                                "work_key": "SELF or CITED_NNN from work_catalog",
+                                "role": "self|subject|comparison_target|topic",
+                                "source_chunk_ids": [
+                                    "optional; defaults to claim source_chunk_ids"
+                                ],
+                            }
+                        ],
                     }
                 ],
                 "relations": [
@@ -239,6 +289,7 @@ class LLMClient:
                 "title": bundle.document.title,
                 "abstract": bundle.document.abstract,
             },
+            "work_catalog": catalog.entries,
             "section": section_id or "(front matter)",
             "evidence": _chunk_evidence(chunks),
         }
@@ -254,6 +305,7 @@ class LLMClient:
                 return _normalize_section_extraction(
                     extraction,
                     valid_chunks={chunk.id for chunk in chunks},
+                    valid_work_keys=set(catalog.key_to_work_id),
                     snapshot_id=bundle.snapshot.id,
                 )
             except SemanticEnrichmentError as exc:
@@ -269,8 +321,11 @@ class LLMClient:
                         "instruction": (
                             "Regenerate the complete response. Every source_chunk_ids value "
                             "must exactly equal a chunk_id present in evidence; relation keys "
-                            "must reference entities in this response."
+                            "must reference entities in this response; claim about.work_key "
+                            "must exactly equal a work_key from work_catalog; about.role must "
+                            "be one of self, subject, comparison_target, topic."
                         ),
+                        "allowed_work_keys": sorted(catalog.key_to_work_id),
                         "previous_error": exc.details,
                     }
         if extraction is None:
@@ -282,6 +337,7 @@ class LLMClient:
         return _sanitize_section_extraction(
             extraction,
             valid_chunks={chunk.id for chunk in chunks},
+            valid_work_keys=set(catalog.key_to_work_id),
             snapshot_id=bundle.snapshot.id,
         )
 
@@ -633,10 +689,78 @@ def _validate_chunk_ids(
     return list(dict.fromkeys(resolved))
 
 
+def _normalize_about_items(
+    about_items: list[_ClaimAboutExtraction],
+    *,
+    claim_source_ids: list[str],
+    valid_chunks: set[str],
+    valid_work_keys: set[str],
+    object_key: str,
+    snapshot_id: str,
+    raise_on_invalid_work: bool,
+) -> list[_ClaimAboutExtraction]:
+    normalized: list[_ClaimAboutExtraction] = []
+    invalid_work_keys: list[str] = []
+    invalid_roles: list[str] = []
+    for item in about_items:
+        work_key = item.work_key.strip().upper()
+        if work_key not in valid_work_keys:
+            invalid_work_keys.append(item.work_key)
+            continue
+        role = item.role.strip().casefold().replace("-", "_").replace(" ", "_")
+        if role not in _ABOUT_ROLES:
+            invalid_roles.append(item.role)
+            continue
+        raw_ids = item.source_chunk_ids if item.source_chunk_ids else claim_source_ids
+        try:
+            about_ids = _validate_chunk_ids(
+                raw_ids,
+                valid_chunks,
+                object_key=f"{object_key}:about:{work_key}",
+                snapshot_id=snapshot_id,
+            )
+        except SemanticEnrichmentError:
+            if raise_on_invalid_work:
+                raise
+            continue
+        if not about_ids:
+            continue
+        normalized.append(
+            _ClaimAboutExtraction(
+                work_key=work_key,
+                role=role,
+                source_chunk_ids=about_ids,
+            )
+        )
+    if raise_on_invalid_work and (invalid_work_keys or invalid_roles):
+        raise SemanticEnrichmentError(
+            "LLM claim ABOUT grounding is invalid.",
+            affected=object_key,
+            details={
+                "snapshot_id": snapshot_id,
+                "invalid_work_keys": sorted(set(invalid_work_keys)),
+                "invalid_roles": sorted(set(invalid_roles)),
+                "allowed_work_keys": sorted(valid_work_keys),
+                "allowed_roles": sorted(_ABOUT_ROLES),
+            },
+        )
+    if invalid_work_keys or invalid_roles:
+        _LOGGER.warning(
+            "Dropped invalid claim ABOUT relations after finite retries: "
+            "snapshot_id=%s claim=%s invalid_work_keys=%s invalid_roles=%s",
+            snapshot_id,
+            object_key,
+            sorted(set(invalid_work_keys)),
+            sorted(set(invalid_roles)),
+        )
+    return normalized
+
+
 def _normalize_section_extraction(
     extraction: _SectionExtraction,
     *,
     valid_chunks: set[str],
+    valid_work_keys: set[str],
     snapshot_id: str,
 ) -> _SectionExtraction:
     """Validate one response while it can still be retried, then canonicalize IDs."""
@@ -653,19 +777,26 @@ def _normalize_section_extraction(
         )
         for item in extraction.entities
     ]
-    claims = [
-        item.model_copy(
-            update={
-                "source_chunk_ids": _validate_chunk_ids(
-                    item.source_chunk_ids,
-                    valid_chunks,
-                    object_key=item.key,
-                    snapshot_id=snapshot_id,
-                )
-            }
+    claims: list[_ClaimExtraction] = []
+    for item in extraction.claims:
+        source_ids = _validate_chunk_ids(
+            item.source_chunk_ids,
+            valid_chunks,
+            object_key=item.key,
+            snapshot_id=snapshot_id,
         )
-        for item in extraction.claims
-    ]
+        about = _normalize_about_items(
+            item.about,
+            claim_source_ids=source_ids,
+            valid_chunks=valid_chunks,
+            valid_work_keys=valid_work_keys,
+            object_key=item.key,
+            snapshot_id=snapshot_id,
+            raise_on_invalid_work=True,
+        )
+        claims.append(
+            item.model_copy(update={"source_chunk_ids": source_ids, "about": about})
+        )
     entity_keys = {item.key for item in entities}
     relations: list[_RelationExtraction] = []
     for item in extraction.relations:
@@ -700,6 +831,7 @@ def _sanitize_section_extraction(
     extraction: _SectionExtraction,
     *,
     valid_chunks: set[str],
+    valid_work_keys: set[str],
     snapshot_id: str,
 ) -> _SectionExtraction:
     """Drop ungrounded items after retries instead of persisting bad provenance."""
@@ -724,8 +856,20 @@ def _sanitize_section_extraction(
     claims: list[_ClaimExtraction] = []
     for item in extraction.claims:
         source_ids = valid_ids(item.source_chunk_ids, object_key=item.key)
-        if source_ids:
-            claims.append(item.model_copy(update={"source_chunk_ids": source_ids}))
+        if not source_ids:
+            continue
+        about = _normalize_about_items(
+            item.about,
+            claim_source_ids=source_ids,
+            valid_chunks=valid_chunks,
+            valid_work_keys=valid_work_keys,
+            object_key=item.key,
+            snapshot_id=snapshot_id,
+            raise_on_invalid_work=False,
+        )
+        claims.append(
+            item.model_copy(update={"source_chunk_ids": source_ids, "about": about})
+        )
 
     entity_keys = {item.key for item in entities}
     relations: list[_RelationExtraction] = []
@@ -758,14 +902,78 @@ def _sanitize_section_extraction(
     )
 
 
+def _build_work_catalog(
+    bundle: CanonicalBundle,
+    scholarly: ScholarlyContext,
+) -> _WorkCatalog:
+    """Build a bounded SELF/CITED_* catalog; LLM never sees real work_<uuid> IDs."""
+    works_by_id = {work.id: work for work in scholarly.works}
+    document_work = scholarly.document_work
+    works_by_id[document_work.id] = document_work
+    references_by_id = {reference.id: reference for reference in bundle.references}
+    reference_texts: dict[str, list[str]] = {}
+    for resolution in scholarly.reference_resolutions:
+        if resolution.work_id is None:
+            continue
+        reference = references_by_id.get(resolution.reference_id)
+        if reference is None:
+            continue
+        text = reference.raw_text.strip()
+        if not text:
+            continue
+        reference_texts.setdefault(resolution.work_id, [])
+        if text not in reference_texts[resolution.work_id]:
+            reference_texts[resolution.work_id].append(text)
+
+    key_to_work_id = {_SELF_WORK_KEY: document_work.id}
+    entries: list[dict[str, Any]] = [
+        _catalog_entry(_SELF_WORK_KEY, document_work, reference_texts.get(document_work.id, []))
+    ]
+    cited_works = sorted(
+        (
+            work
+            for work_id, work in works_by_id.items()
+            if work_id != document_work.id
+        ),
+        key=lambda work: work.id,
+    )
+    for index, work in enumerate(cited_works, start=1):
+        key = f"CITED_{index:03d}"
+        key_to_work_id[key] = work.id
+        entries.append(
+            _catalog_entry(key, work, reference_texts.get(work.id, []))
+        )
+    return _WorkCatalog(key_to_work_id=key_to_work_id, entries=entries)
+
+
+def _catalog_entry(
+    work_key: str,
+    work: ScholarlyWork,
+    reference_texts: list[str],
+) -> dict[str, Any]:
+    return {
+        "work_key": work_key,
+        "title": work.title,
+        "authors": list(work.authors),
+        "year": work.year,
+        "doi": work.doi,
+        "arxiv_id": work.arxiv_id,
+        "reference_texts": reference_texts[:3],
+    }
+
+
 def _merge_section_extractions(
     bundle: CanonicalBundle,
     raw_sections: list[tuple[str | None, list[Chunk], _SectionExtraction]],
     *,
+    scholarly: ScholarlyContext,
+    catalog: _WorkCatalog,
     model: str,
 ) -> tuple[list[Entity], list[Claim], list[ConceptRelation]]:
     """Merge batch-local extractions into canonical, deduplicated objects."""
     snapshot_id = bundle.snapshot.id
+    source_document_id = bundle.document.id
+    source_work_id = scholarly.document_work.id
     entity_by_key: dict[tuple[str, str], _MergedEntity] = {}
     local_entity_keys: dict[tuple[int, str], tuple[str, str]] = {}
 
@@ -828,7 +1036,7 @@ def _merge_section_extractions(
         )
 
     claim_by_key: dict[str, _MergedClaim] = {}
-    for batch_index, (_section_id, chunks, extraction) in enumerate(raw_sections):
+    for _batch_index, (_section_id, chunks, extraction) in enumerate(raw_sections):
         batch_valid = {chunk.id for chunk in chunks}
         for claim_item in extraction.claims:
             source_ids = _validate_chunk_ids(
@@ -845,6 +1053,7 @@ def _merge_section_extractions(
                     claim_type=claim_item.claim_type,
                     confidence=claim_item.confidence,
                     source_chunk_ids=[],
+                    about_by_work={},
                 )
                 claim_by_key[claim_key] = claim_merged
             claim_merged.source_chunk_ids = list(
@@ -854,12 +1063,56 @@ def _merge_section_extractions(
                 claim_merged.confidence is None or claim_item.confidence > claim_merged.confidence
             ):
                 claim_merged.confidence = claim_item.confidence
+            for about_item in claim_item.about:
+                work_id = catalog.key_to_work_id.get(about_item.work_key.strip().upper())
+                if work_id is None:
+                    _LOGGER.warning(
+                        "Dropped ABOUT with unknown work_key during merge: "
+                        "snapshot_id=%s work_key=%s",
+                        snapshot_id,
+                        about_item.work_key,
+                    )
+                    continue
+                about_ids = list(about_item.source_chunk_ids or source_ids)
+                about_ids = _validate_chunk_ids(
+                    about_ids,
+                    batch_valid,
+                    object_key=f"{claim_item.key}:about:{about_item.work_key}",
+                    snapshot_id=snapshot_id,
+                )
+                role = about_item.role.strip().casefold().replace("-", "_").replace(" ", "_")
+                if role not in _ABOUT_ROLES:
+                    continue
+                about_merged = claim_merged.about_by_work.get(work_id)
+                if about_merged is None:
+                    about_merged = _MergedAbout(
+                        work_id=work_id,
+                        roles=[],
+                        source_chunk_ids=[],
+                    )
+                    claim_merged.about_by_work[work_id] = about_merged
+                about_merged.roles = list(
+                    dict.fromkeys([*about_merged.roles, role])
+                )
+                about_merged.source_chunk_ids = list(
+                    dict.fromkeys([*about_merged.source_chunk_ids, *about_ids])
+                )
 
     claims: list[Claim] = []
     for claim_merged in claim_by_key.values():
         claim_id = semantic_object_id(
             "claim", snapshot_id, claim_merged.text, claim_merged.source_chunk_ids
         )
+        about_targets = [
+            ClaimAboutTarget(
+                work_id=about_merged.work_id,
+                roles=list(about_merged.roles),
+                source_chunk_ids=list(about_merged.source_chunk_ids),
+                derived_from_ids=list(about_merged.source_chunk_ids),
+            )
+            for about_merged in claim_merged.about_by_work.values()
+            if about_merged.source_chunk_ids
+        ]
         claims.append(
             Claim(
                 id=claim_id,
@@ -872,6 +1125,9 @@ def _merge_section_extractions(
                 confidence=claim_merged.confidence,
                 model=model,
                 model_version=model,
+                source_document_id=source_document_id,
+                source_work_id=source_work_id,
+                about=about_targets,
             )
         )
 
@@ -895,6 +1151,9 @@ def _merge_section_extractions(
             source_object_id = entity_id_by_key[source_key]
             target_object_id = entity_id_by_key[target_key]
             relation_type = relation_item.relation_type.upper().replace(" ", "_")
+            if relation_type == "ABOUT":
+                # ABOUT is Claim→Work only; Entity relations must not emit it.
+                continue
             relation_key = (source_object_id, relation_type, target_object_id)
             relation_merged = relation_by_key.get(relation_key)
             if relation_merged is None:

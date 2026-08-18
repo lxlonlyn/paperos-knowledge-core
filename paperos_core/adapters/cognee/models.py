@@ -186,6 +186,8 @@ def canonical_to_datapoints(
             claim_type=claim.claim_type,
             status=claim.status.value,
             confidence=claim.confidence,
+            source_document_id=claim.source_document_id or document.id,
+            source_work_id=claim.source_work_id or scholarly.document_work.id,
             source_chunk_ids=claim.source_chunk_ids,
             derived_from_ids=claim.derived_from_ids,
             **common,
@@ -260,6 +262,9 @@ def _consolidate_relations(
             dict.fromkeys(
                 [*existing.derived_from_ids, *relation.derived_from_ids]
             )
+        )
+        existing.roles = list(
+            dict.fromkeys([*existing.roles, *relation.roles])
         )
     return list(consolidated.values())
 
@@ -446,6 +451,19 @@ def _semantic_relations(
             claim.source_chunk_ids,
             claim.derived_from_ids,
         )
+        for about in claim.about:
+            relations.append(
+                RelationRecord(
+                    source_id=claim.id,
+                    target_id=about.work_id,
+                    relation_type=RelationType.ABOUT,
+                    source_chunk_ids=list(about.source_chunk_ids),
+                    derived_from_ids=list(
+                        about.derived_from_ids or about.source_chunk_ids
+                    ),
+                    roles=list(about.roles),
+                )
+            )
     for summary in enrichment.summaries:
         _append_provenance_relations(
             relations,
@@ -458,6 +476,9 @@ def _semantic_relations(
             kind = RelationType(relation.relation_type)
         except ValueError:
             kind = RelationType.RELATED_TO
+        if kind is RelationType.ABOUT:
+            # ABOUT is Claim → ScholarlyWork only; never from Entity relation extraction.
+            continue
         relations.extend(
             [
                 RelationRecord(
