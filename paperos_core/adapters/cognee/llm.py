@@ -103,6 +103,18 @@ class AnswerOutput(_StrictModel):
     cited_chunk_ids: list[str]
 
 
+class ScopePlannerOutput(_StrictModel):
+    """Bounded work-catalog scope plan. Never invents work keys or answers."""
+
+    source_work_keys: list[str] = Field(default_factory=list)
+    exclude_source_work_keys: list[str] = Field(default_factory=list)
+    subject_work_keys: list[str] = Field(default_factory=list)
+    work_set_work_keys: list[str] = Field(default_factory=list)
+    topic_queries: list[str] = Field(default_factory=list)
+    notes: str | None = None
+    confident: bool = True
+
+
 _T = TypeVar("_T", bound=BaseModel)
 
 
@@ -513,6 +525,37 @@ class LLMClient:
             details={"attempts": failures},
         )
 
+    async def plan_query_scope(
+        self,
+        *,
+        query: str,
+        catalog_entries: list[dict[str, Any]],
+    ) -> ScopePlannerOutput:
+        """Classify source/subject/work-set/topic using a bounded Work catalog."""
+        from cognee.infrastructure.llm import LLMGateway
+
+        content = await LLMGateway.acreate_structured_output(
+            text_input=json.dumps(
+                {
+                    "question": query,
+                    "work_catalog": catalog_entries,
+                    "instructions": {
+                        "return_only_catalog_keys": True,
+                        "do_not_answer": True,
+                        "do_not_retrieve": True,
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            system_prompt=self.prompts.load("query_scope"),
+            response_model=ScopePlannerOutput,
+            temperature=0.0,
+            max_tokens=2_000,
+        )
+        if not isinstance(content, ScopePlannerOutput):
+            raise TypeError("scope planner returned unexpected type")
+        return content
+
     async def synthesize_answer(
         self,
         *,
@@ -520,6 +563,7 @@ class LLMClient:
         profile: str,
         evidence: list[dict[str, Any]],
         recall_context: list[str] | None = None,
+        resolved_scope: dict[str, Any] | None = None,
     ) -> str:
         """Synthesize one evidence-bound answer with an explicit Pydantic schema."""
         from cognee.infrastructure.llm import LLMGateway
@@ -557,6 +601,7 @@ class LLMClient:
                         {
                             "profile": profile,
                             "question": query,
+                            "resolved_scope": resolved_scope or {},
                             "evidence": compact_evidence,
                             "recall_context": recall_context or [],
                         },

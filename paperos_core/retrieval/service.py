@@ -12,6 +12,7 @@ from paperos_core.feedback.service import FeedbackService
 from paperos_core.indexes.manager import IndexManager
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.registry import SourceRegistry
+from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
 from paperos_core.paths import DataPaths
 from paperos_core.retrieval.cache import QueryCache
 from paperos_core.retrieval.candidates import (
@@ -30,10 +31,17 @@ from paperos_core.retrieval.graph import graph_retrieve
 from paperos_core.retrieval.lexical import lexical_retrieve
 from paperos_core.retrieval.profiles import build_query_plan
 from paperos_core.retrieval.rerank import rerank_candidates
+from paperos_core.retrieval.scope import (
+    apply_scope_to_document_ids,
+    filter_candidates_by_scope,
+    resolve_query_scope_async,
+    should_apply_explicit_document_scope,
+)
 from paperos_core.retrieval.semantic import (
     entity_claim_retrieve,
     semantic_retrieve,
 )
+from paperos_core.retrieval.subject_claim import subject_claim_retrieve
 from paperos_core.retrieval.synthesis import synthesize_answer
 from paperos_core.runtime.local_inference.client import LocalInferenceClient
 
@@ -47,6 +55,7 @@ class RetrievalService:
         paths: DataPaths,
         canonical_repository: CanonicalRepository,
         registry: SourceRegistry,
+        scholarly_registry: ScholarlyRegistry,
         search: CogneeSearchAdapter,
         compat: CogneeCompatibilityAdapter,
         index_manager: IndexManager,
@@ -58,6 +67,7 @@ class RetrievalService:
         self.paths = paths
         self.canonical_repository = canonical_repository
         self.registry = registry
+        self.scholarly_registry = scholarly_registry
         self.search = search
         self.compat = compat
         self.index_manager = index_manager
@@ -70,7 +80,10 @@ class RetrievalService:
         dataset_name = (request.dataset or self.config.dataset).strip()
         request = request.model_copy(update={"dataset": dataset_name})
         corpus = CorpusView.load(
-            self.paths, self.canonical_repository, self.registry
+            self.paths,
+            self.canonical_repository,
+            self.registry,
+            self.scholarly_registry,
         )
         cache_key = self.cache.key(request, corpus)
         cached = self.cache.get(cache_key)
@@ -83,89 +96,138 @@ class RetrievalService:
         pool = plan.candidate_pool_size
         query = request.query
         stages = ["profile_mapping"]
+        scope, scope_trace = await resolve_query_scope_async(
+            request, corpus, self.scholarly_registry, llm=self.llm
+        )
+        stages.append(f"scope_resolution:{scope_trace.resolution}")
         explicit_document_ids = corpus.explicitly_mentioned_document_ids(query)
         comparative_query = (
             request.profile is not RetrievalProfile.TRUTH
             and _has_multi_document_cue(query)
         )
-        apply_explicit_scope = bool(explicit_document_ids) and not (
-            len(explicit_document_ids) == 1 and comparative_query
+        apply_explicit_scope = should_apply_explicit_document_scope(
+            scope=scope,
+            explicit_document_ids=explicit_document_ids,
+            comparative_query=comparative_query,
         )
         if request.document_ids is None and apply_explicit_scope:
             document_ids.intersection_update(explicit_document_ids)
             stages.append("explicit_document_scope")
+        scoped_document_ids = apply_scope_to_document_ids(
+            corpus, document_ids, scope
+        )
+        if scoped_document_ids != document_ids:
+            stages.append("work_scope_document_filter")
+        document_ids = scoped_document_ids
+        scope_trace = scope_trace.model_copy(
+            update={"applied_document_ids": sorted(document_ids)}
+        )
         channels: dict[str, list[Candidate]] = {}
 
         if "lexical" in plan.channels:
-            channels["lexical"] = lexical_retrieve(
-                self.index_manager.lexical,
-                corpus,
-                [query],
-                limit=pool,
-                document_ids=document_ids,
+            channels["lexical"] = filter_candidates_by_scope(
+                lexical_retrieve(
+                    self.index_manager.lexical,
+                    corpus,
+                    [query, *scope.topic_queries],
+                    limit=pool,
+                    document_ids=document_ids,
+                ),
+                scope,
             )
             stages.append("lexical_retrieval")
         if "semantic" in plan.channels:
-            channels["semantic"] = await semantic_retrieve(
-                self.search,
-                self.compat,
-                corpus,
-                query,
-                dataset_name=dataset_name,
-                search_type=plan.search_types["semantic"],
-                limit=pool,
-                document_ids=document_ids,
-                chunk_only=request.profile is RetrievalProfile.TRUTH,
+            channels["semantic"] = filter_candidates_by_scope(
+                await semantic_retrieve(
+                    self.search,
+                    self.compat,
+                    corpus,
+                    _scoped_search_query(query, scope.topic_queries),
+                    dataset_name=dataset_name,
+                    search_type=plan.search_types["semantic"],
+                    limit=pool,
+                    document_ids=document_ids,
+                    chunk_only=request.profile is RetrievalProfile.TRUTH,
+                ),
+                scope,
             )
             stages.append("cognee_search")
         if "entity_claim" in plan.channels:
-            channels["entity_claim"] = await entity_claim_retrieve(
-                self.search,
-                self.compat,
-                corpus,
-                query,
-                dataset_name=dataset_name,
-                search_type=plan.search_types["entity_claim"],
-                limit=pool,
-                document_ids=document_ids,
+            channels["entity_claim"] = filter_candidates_by_scope(
+                await entity_claim_retrieve(
+                    self.search,
+                    self.compat,
+                    corpus,
+                    _scoped_search_query(query, scope.topic_queries),
+                    dataset_name=dataset_name,
+                    search_type=plan.search_types["entity_claim"],
+                    limit=pool,
+                    document_ids=document_ids,
+                ),
+                scope,
             )
             stages.append("entity_claim_search")
         if "graph" in plan.channels:
-            channels["graph"] = await graph_retrieve(
-                self.search,
-                self.compat,
-                corpus,
-                query,
-                dataset_name=dataset_name,
-                search_type=plan.search_types["graph"],
-                limit=pool,
-                depth=plan.graph_depth,
-                document_ids=document_ids,
+            channels["graph"] = filter_candidates_by_scope(
+                await graph_retrieve(
+                    self.search,
+                    self.compat,
+                    corpus,
+                    _scoped_search_query(query, scope.topic_queries),
+                    dataset_name=dataset_name,
+                    search_type=plan.search_types["graph"],
+                    limit=pool,
+                    depth=plan.graph_depth,
+                    document_ids=document_ids,
+                ),
+                scope,
             )
             stages.append("typed_traversal")
-        if "global_context" in plan.channels:
-            channels["global_context"] = await global_context_retrieve(
+        if scope.subject_work_ids:
+            channels["subject_claim"] = await subject_claim_retrieve(
                 self.search,
                 self.compat,
                 corpus,
                 query,
                 dataset_name=dataset_name,
-                search_type=plan.search_types["global_context"],
+                scope=scope,
                 limit=pool,
-                document_ids=document_ids,
+            )
+            stages.append("subject_about_retrieval")
+        if "global_context" in plan.channels:
+            channels["global_context"] = filter_candidates_by_scope(
+                await global_context_retrieve(
+                    self.search,
+                    self.compat,
+                    corpus,
+                    query,
+                    dataset_name=dataset_name,
+                    search_type=plan.search_types["global_context"],
+                    limit=pool,
+                    document_ids=document_ids,
+                ),
+                scope,
             )
             stages.append("global_context")
         if "confirmed_knowledge" in plan.channels:
-            channels["confirmed_knowledge"] = confirmed_knowledge_retrieve(
-                self.feedback,
-                corpus,
-                [query],
-                limit=pool,
-                document_ids=document_ids,
+            channels["confirmed_knowledge"] = filter_candidates_by_scope(
+                confirmed_knowledge_retrieve(
+                    self.feedback,
+                    corpus,
+                    [query],
+                    limit=pool,
+                    document_ids=document_ids,
+                ),
+                scope,
             )
             stages.append("confirmed_knowledge_retrieval")
 
-        fused = weighted_rrf(channels, plan.weights)[:pool]
+        fused = weighted_rrf(channels, plan.weights)
+        about_order = [item.id for item in channels.get("subject_claim", [])]
+        if scope.subject_work_ids:
+            fused = _prepend_subject_claims(fused, about_order, pool)
+        else:
+            fused = fused[:pool]
         stages.append("fusion")
         if self.config.retrieval.rerank_enabled:
             reranked = await rerank_candidates(
@@ -177,12 +239,18 @@ class RetrievalService:
             stages.append("rerank")
         else:
             reranked = fused
+        if scope.subject_work_ids:
+            reranked = _prepend_subject_claims(reranked, about_order, pool)
         truth_profile = request.profile is RetrievalProfile.TRUTH
         if truth_profile:
             max_per_document = plan.top_k
         elif apply_explicit_scope:
             max_per_document = math.ceil(
                 plan.top_k / max(len(explicit_document_ids), 1)
+            )
+        elif scope.work_set_work_ids:
+            max_per_document = math.ceil(
+                plan.top_k / max(len(scope.work_set_work_ids), 1)
             )
         else:
             max_per_document = self.config.retrieval.max_chunks_per_document
@@ -192,12 +260,19 @@ class RetrievalService:
             max_per_document=max_per_document,
             max_per_section=self.config.retrieval.max_chunks_per_section,
             seed_each_document=not truth_profile,
-            aspect_queries=[query],
+            aspect_queries=[query, *scope.topic_queries],
         )
         stages.append("diversification")
         evidence = format_evidence(selected, corpus.bundles)
         recall_context: list[str] | None = None
-        if request.profile is RetrievalProfile.COMPREHENSIVE:
+        disable_recall = (
+            request.profile is RetrievalProfile.COMPREHENSIVE
+            and scope.has_hard_work_scope
+        )
+        if (
+            request.profile is RetrievalProfile.COMPREHENSIVE
+            and not disable_recall
+        ):
             recall_hits = await self.search.recall_context(
                 query,
                 dataset=dataset_name,
@@ -206,12 +281,18 @@ class RetrievalService:
             )
             recall_context = [hit.text for hit in recall_hits]
             stages.append("cognee_recall")
+        elif disable_recall:
+            stages.append("cognee_recall_skipped_unscoped")
+            scope_trace = scope_trace.model_copy(
+                update={"recall_context_disabled": True}
+            )
         answer = await synthesize_answer(
             self.llm,
             query=request.query,
             profile=request.profile,
             evidence=evidence,
             recall_context=recall_context,
+            resolved_scope=scope,
         )
         stages.append("synthesis")
         response = QueryResponse(
@@ -233,9 +314,29 @@ class RetrievalService:
                 and item.evidence_id
                 for item in evidence
             ),
+            resolved_scope=scope,
+            scope_trace=scope_trace,
         )
         self.cache.put(response)
         return response
+
+
+def _prepend_subject_claims(
+    candidates: list[Candidate],
+    about_order: list[str],
+    limit: int,
+) -> list[Candidate]:
+    by_id = {item.id: item for item in candidates}
+    about = [by_id[item_id] for item_id in about_order if item_id in by_id]
+    rest = [
+        item for item in candidates if "subject_claim" not in item.channels
+    ]
+    return [*about, *rest][:limit]
+
+
+def _scoped_search_query(query: str, topic_queries: list[str]) -> str:
+    extra = " ".join(item for item in topic_queries if item.strip())
+    return f"{query} {extra}".strip() if extra else query
 
 
 def _has_multi_document_cue(query: str) -> bool:

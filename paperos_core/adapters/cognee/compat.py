@@ -130,6 +130,22 @@ class CogneeTraversalEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class CogneeIncomingRelation:
+    """One bounded incoming typed edge onto an exact canonical target."""
+
+    source_canonical_id: str
+    target_canonical_id: str
+    relation_type: str
+    source_chunk_ids: tuple[str, ...]
+    derived_from_ids: tuple[str, ...]
+    roles: tuple[str, ...]
+    source_work_id: str | None
+    source_document_id: str | None
+    text: str
+    score: float
+
+
+@dataclass(frozen=True, slots=True)
 class CogneeDatasetBinding:
     user_id: str
     dataset_id: str
@@ -904,6 +920,123 @@ class CogneeCompatibilityAdapter:
                 ),
             ),
         }
+
+    async def incoming_typed_relations(
+        self,
+        target_canonical_ids: list[str],
+        *,
+        dataset_name: str,
+        relation_type: str,
+        depth: int = 1,
+        limit: int = 200,
+    ) -> list[CogneeIncomingRelation]:
+        """Read bounded incoming typed edges for exact canonical targets.
+
+        Production-compatible Cognee 1.4.0 path used by subject ABOUT retrieval.
+        Private graph access stays here: dataset-scoped, depth=1 by default,
+        relation-filtered, result-bounded, provenance-preserving.
+        """
+        if not target_canonical_ids or depth <= 0 or limit <= 0:
+            return []
+        self.retrieval_fallback_types_used.add("incoming_typed_relations")
+        from cognee.infrastructure.databases.graph.get_graph_engine import (
+            get_graph_engine,
+        )
+
+        target_ids = list(dict.fromkeys(str(item) for item in target_canonical_ids))
+        seed_cognee_ids = [str(cognee_uuid(item)) for item in target_ids]
+        seed_by_cognee = {
+            str(cognee_uuid(item)): item for item in target_ids
+        }
+        async with await self._dataset_scope(dataset_name):
+            engine = await get_graph_engine()
+            try:
+                nodes, edges = await engine.get_neighborhood(
+                    seed_cognee_ids,
+                    depth=depth,
+                    # Same Cognee 1.4 Kuzu limitation as typed_traverse: filter
+                    # relation types after an undirected neighborhood read.
+                    edge_types=None,
+                )
+            except Exception as exc:
+                raise CogneeStorageError(
+                    f"Cognee incoming typed relation read failed: {exc}",
+                    affected=self.paths.cognee,
+                ) from exc
+
+        node_properties = {
+            str(node_id): _flatten_node(dict(properties))
+            for node_id, properties in nodes
+        }
+        results: list[CogneeIncomingRelation] = []
+        for source_id, target_id, edge_relation, raw_properties in edges:
+            relation = str(edge_relation)
+            if relation != relation_type:
+                continue
+            target_key = str(target_id)
+            if target_key not in seed_by_cognee:
+                continue
+            properties = (
+                dict(raw_properties) if isinstance(raw_properties, dict) else {}
+            )
+            source = node_properties.get(str(source_id), {})
+            source_canonical_id = str(
+                properties.get("canonical_source_id")
+                or source.get("canonical_id")
+                or source_id
+            )
+            target_canonical_id = seed_by_cognee[target_key]
+            chunk_ids = list(
+                dict.fromkeys(
+                    [
+                        *_string_list(properties.get("source_chunk_ids")),
+                        *_node_source_chunk_ids(source),
+                    ]
+                )
+            )
+            if not chunk_ids:
+                continue
+            roles_value = properties.get("roles")
+            roles = tuple(
+                str(item) for item in roles_value if item is not None
+            ) if isinstance(roles_value, list) else ()
+            text = str(source.get("text") or "").strip()
+            source_work_id = source.get("source_work_id")
+            source_document_id = source.get("source_document_id")
+            results.append(
+                CogneeIncomingRelation(
+                    source_canonical_id=source_canonical_id,
+                    target_canonical_id=target_canonical_id,
+                    relation_type=relation,
+                    source_chunk_ids=tuple(chunk_ids),
+                    derived_from_ids=tuple(
+                        dict.fromkeys(
+                            [
+                                *_string_list(properties.get("derived_from_ids")),
+                                source_canonical_id,
+                                target_canonical_id,
+                            ]
+                        )
+                    ),
+                    roles=roles,
+                    source_work_id=(
+                        str(source_work_id) if source_work_id else None
+                    ),
+                    source_document_id=(
+                        str(source_document_id) if source_document_id else None
+                    ),
+                    text=text,
+                    score=1.0,
+                )
+            )
+        results.sort(
+            key=lambda item: (
+                item.target_canonical_id,
+                item.source_canonical_id,
+                item.source_chunk_ids,
+            )
+        )
+        return results[:limit]
 
     async def typed_traverse(
         self,

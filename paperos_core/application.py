@@ -184,6 +184,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         paths,
         canonical_repository,
         registry,
+        scholarly_registry,
         search,
         compat,
         index_manager,

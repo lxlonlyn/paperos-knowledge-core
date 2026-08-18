@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from paperos_core.domain.canonical import CanonicalBundle, Chunk
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.registry import SourceRegistry
+from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
 from paperos_core.paths import DataPaths
 from paperos_core.retrieval.candidates import Candidate
 
@@ -21,6 +22,9 @@ class CorpusView:
     chunks: dict[str, Chunk]
     chunk_bundles: dict[str, CanonicalBundle]
     source_filenames: dict[str, str]
+    work_id_by_document: dict[str, str] = field(default_factory=dict)
+    document_ids_by_work: dict[str, set[str]] = field(default_factory=dict)
+    work_titles: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def load(
@@ -28,6 +32,7 @@ class CorpusView:
         paths: DataPaths,
         canonical_repository: CanonicalRepository,
         registry: SourceRegistry,
+        scholarly_registry: ScholarlyRegistry | None = None,
     ) -> CorpusView:
         retained_bundles = canonical_repository.list_bundles()
         bundles = {bundle.document.id: bundle for bundle in retained_bundles}
@@ -76,12 +81,26 @@ class CorpusView:
             ).original_filename
             for bundle in bundles.values()
         }
+        work_id_by_document: dict[str, str] = {}
+        document_ids_by_work: dict[str, set[str]] = {}
+        work_titles: dict[str, str] = {}
+        if scholarly_registry is not None:
+            for document_id in bundles:
+                work = scholarly_registry.work_for_document(document_id)
+                if work is None:
+                    continue
+                work_id_by_document[document_id] = work.id
+                document_ids_by_work.setdefault(work.id, set()).add(document_id)
+                work_titles[work.id] = work.title
         return cls(
             paths=paths,
             bundles=bundles,
             chunks=chunks,
             chunk_bundles=chunk_bundles,
             source_filenames=source_filenames,
+            work_id_by_document=work_id_by_document,
+            document_ids_by_work=document_ids_by_work,
+            work_titles=work_titles,
         )
 
     def candidate_for_chunk(
@@ -99,11 +118,18 @@ class CorpusView:
             "user_confirmed",
         ] = "source_fact",
         derived_from_ids: list[str] | None = None,
+        text: str | None = None,
+        source_work_id: str | None = None,
+        subject_work_ids: list[str] | None = None,
+        candidate_id: str | None = None,
     ) -> Candidate:
         chunk = self.chunks[chunk_id]
         bundle = self.chunk_bundles[chunk_id]
+        resolved_source_work = source_work_id or self.work_id_by_document.get(
+            chunk.document_id
+        )
         return Candidate(
-            id=chunk.id,
+            id=candidate_id or chunk.id,
             object_id=object_id or chunk.id,
             object_type=object_type,
             document_id=chunk.document_id,
@@ -115,11 +141,13 @@ class CorpusView:
             section_path=chunk.section_path,
             page_start=chunk.page_start,
             page_end=chunk.page_end,
-            text=chunk.text,
+            text=text if text is not None else chunk.text,
             channels=[channel],
             channel_scores={channel: score},
             knowledge_kind=knowledge_kind,
             derived_from_ids=derived_from_ids or [],
+            source_work_id=resolved_source_work,
+            subject_work_ids=list(subject_work_ids or []),
         )
 
     def filtered_document_ids(
@@ -135,6 +163,12 @@ class CorpusView:
         if requested_document_ids is None:
             return dataset_documents
         return dataset_documents.intersection(requested_document_ids)
+
+    def document_ids_for_works(self, work_ids: list[str] | set[str]) -> set[str]:
+        selected: set[str] = set()
+        for work_id in work_ids:
+            selected.update(self.document_ids_by_work.get(work_id, set()))
+        return selected
 
     def explicitly_mentioned_document_ids(self, query: str) -> set[str]:
         """Resolve unambiguous title/identifier mentions without an LLM planner."""

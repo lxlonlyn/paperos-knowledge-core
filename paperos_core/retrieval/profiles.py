@@ -62,5 +62,6 @@ def build_query_plan(request: QueryRequest, config: RuntimeSettings) -> QueryPla
             "graph": profile_config.graph_weight,
             "global_context": profile_config.global_context_weight,
             "confirmed_knowledge": profile_config.confirmed_knowledge_weight,
+            "subject_claim": profile_config.graph_weight,
         },
     )

@@ -20,6 +20,11 @@ def main() -> None:
     query = subcommands.add_parser("query")
     query.add_argument("question")
     query.add_argument("--profile", default="comprehensive")
+    query.add_argument("--dataset")
+    query.add_argument(
+        "--scope-json",
+        help="Optional JSON object for QueryRequest.scope",
+    )
     job = subcommands.add_parser("job")
     job.add_argument("job_id")
     subcommands.add_parser("health")
@@ -42,10 +47,15 @@ def main() -> None:
                 status_response.raise_for_status()
                 payload = status_response.json()
         elif args.command == "query":
-            response = client.post(
-                "/api/v1/query",
-                json={"query": args.question, "profile": args.profile},
-            )
+            payload_body: dict[str, object] = {
+                "query": args.question,
+                "profile": args.profile,
+            }
+            if args.dataset:
+                payload_body["dataset"] = args.dataset
+            if args.scope_json:
+                payload_body["scope"] = json.loads(args.scope_json)
+            response = client.post("/api/v1/query", json=payload_body)
             response.raise_for_status()
             payload = response.json()
         elif args.command == "job":

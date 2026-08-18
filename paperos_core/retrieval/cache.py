@@ -13,9 +13,9 @@ from paperos_core.retrieval.candidates import QueryRequest, QueryResponse
 from paperos_core.retrieval.corpus import CorpusView
 
 QUERY_CACHE_VERSIONS = {
-    "truth": "10",
-    "associative": "16",
-    "comprehensive": "16",
+    "truth": "13",
+    "associative": "22",
+    "comprehensive": "22",
 }
 
 

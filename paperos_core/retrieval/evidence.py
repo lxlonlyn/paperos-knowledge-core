@@ -14,7 +14,7 @@ def format_evidence(
         bundle = bundles[candidate.document_id]
         evidence.append(
             Evidence(
-                evidence_id=f"evidence:{candidate.chunk_id}",
+                evidence_id=f"evidence:{candidate.id}",
                 chunk_id=candidate.chunk_id,
                 document_id=candidate.document_id,
                 source_file_id=candidate.source_file_id,
@@ -27,6 +27,8 @@ def format_evidence(
                 channels=candidate.channels,
                 knowledge_kind=candidate.knowledge_kind,
                 derived_from_ids=candidate.derived_from_ids,
+                source_work_id=candidate.source_work_id,
+                subject_work_ids=list(candidate.subject_work_ids),
             )
         )
     return evidence

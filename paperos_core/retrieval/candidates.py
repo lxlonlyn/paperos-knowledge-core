@@ -14,6 +14,54 @@ class RetrievalProfile(StrEnum):
     ASSOCIATIVE = "associative"
 
 
+class QueryScopeInput(BaseModel):
+    """Optional explicit scope supplied by a client or agent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_work_ids: list[str] | None = None
+    exclude_source_work_ids: list[str] | None = None
+    subject_work_ids: list[str] | None = None
+    work_set_work_ids: list[str] | None = None
+    topic_queries: list[str] | None = None
+
+
+class ResolvedQueryScope(BaseModel):
+    """Resolved source / subject / work-set / topic scope for one query."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_work_ids: list[str] = Field(default_factory=list)
+    exclude_source_work_ids: list[str] = Field(default_factory=list)
+    subject_work_ids: list[str] = Field(default_factory=list)
+    work_set_work_ids: list[str] = Field(default_factory=list)
+    topic_queries: list[str] = Field(default_factory=list)
+
+    @property
+    def has_hard_work_scope(self) -> bool:
+        return bool(
+            self.source_work_ids
+            or self.exclude_source_work_ids
+            or self.subject_work_ids
+            or self.work_set_work_ids
+        )
+
+
+class QueryScopeTrace(BaseModel):
+    """Trace of how scope was resolved and applied."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolution: Literal["explicit", "deterministic", "llm", "fallback_unscoped"] = (
+        "fallback_unscoped"
+    )
+    warnings: list[str] = Field(default_factory=list)
+    mentioned_work_ids: list[str] = Field(default_factory=list)
+    planner_notes: str | None = None
+    applied_document_ids: list[str] = Field(default_factory=list)
+    recall_context_disabled: bool = False
+
+
 class QueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -22,6 +70,7 @@ class QueryRequest(BaseModel):
     dataset: str | None = Field(default=None, min_length=1)
     top_k: int | None = Field(default=None, gt=0, le=100)
     document_ids: list[str] | None = None
+    scope: QueryScopeInput | None = None
 
     @field_validator("dataset")
     @classmethod
@@ -75,6 +124,8 @@ class Candidate(BaseModel):
         "user_confirmed",
     ] = "source_fact"
     derived_from_ids: list[str] = Field(default_factory=list)
+    source_work_id: str | None = None
+    subject_work_ids: list[str] = Field(default_factory=list)
 
 
 class Evidence(BaseModel):
@@ -93,6 +144,8 @@ class Evidence(BaseModel):
     channels: list[str]
     knowledge_kind: str
     derived_from_ids: list[str]
+    source_work_id: str | None = None
+    subject_work_ids: list[str] = Field(default_factory=list)
 
 
 class QueryResponse(BaseModel):
@@ -110,3 +163,5 @@ class QueryResponse(BaseModel):
     candidates: list[Candidate]
     distinct_documents: int
     provenance_complete: bool
+    resolved_scope: ResolvedQueryScope = Field(default_factory=ResolvedQueryScope)
+    scope_trace: QueryScopeTrace = Field(default_factory=QueryScopeTrace)
