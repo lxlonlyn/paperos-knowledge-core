@@ -18,6 +18,8 @@ If the user asks what later papers said about a paper, set subject_work_keys to
 that paper and exclude_source_work_keys to that paper.
 If the user asks a paper's self-reported limitations, set source and subject to
 that paper.
+If the user asks how existing papers discuss a work, set subject_work_keys to
+that work even if it has no ingested PDF.
 If the user asks to compare named papers, set work_set_work_keys to those papers.
 
 If unsure, set confident=false and leave lists empty.

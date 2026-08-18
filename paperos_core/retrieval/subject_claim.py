@@ -62,6 +62,7 @@ async def subject_claim_retrieve(
             self_about = source_work_id == relation.target_canonical_id
             score = _about_rank_score(
                 claim_text=relation.text or "",
+                chunk_text=chunk.text,
                 topic_blob=topic_blob,
                 vector_score=vector_scores.get(relation.source_canonical_id, 0.0),
                 section=section,
@@ -131,6 +132,7 @@ async def _claim_vector_scores(
 def _about_rank_score(
     *,
     claim_text: str,
+    chunk_text: str,
     topic_blob: str,
     vector_score: float,
     section: str = "",
@@ -138,16 +140,21 @@ def _about_rank_score(
     self_about: bool = False,
 ) -> float:
     claim_haystack = claim_text.casefold()
+    support_haystack = " ".join(
+        part for part in (claim_text, chunk_text, section) if part
+    ).casefold()
     tokens = list(dict.fromkeys(_TOKEN.findall(topic_blob.casefold())))
     overlap = sum(1 for token in tokens if token in claim_haystack)
     score = 1.0 + overlap + max(vector_score, 0.0)
+    if self_about:
+        score += 1.0
     if any(
         token in section
         for token in ("limit", "限制", "discussion", "结论", "conclusion")
     ):
         score += 2.0
     if limitation_query and any(
-        token in claim_haystack
+        token in support_haystack
         for token in (
             "limit",
             "restrict",
@@ -155,12 +162,38 @@ def _about_rank_score(
             "cannot",
             "fail",
             "however",
+            "artifact",
+            "problem",
+            "weakness",
+            "shortcoming",
+            "although",
+            "error",
+            "noise",
         )
     ):
         score += 3.0
-    if self_about and limitation_query:
-        if any(token in claim_haystack for token in ("blob", "detach", "reattach")):
-            score += 8.0
+    elif limitation_query:
+        # Implementation / method prose without limitation language should not
+        # outrank real self-reported failure modes via vector similarity alone.
+        score -= 3.5
+    if limitation_query and any(
+        token in section for token in ("result", "experiment", "evaluation")
+    ):
+        score += 1.0
+    if limitation_query and any(
+        phrase in support_haystack
+        for phrase in (
+            "may appear",
+            "local minimum",
+            "local minima",
+            "nonzero",
+            "tends to",
+            "artifact",
+        )
+    ):
+        score += 2.0
+    if limitation_query and self_about:
+        score += 1.5
         if any(
             token in section
             for token in ("appendix", "proof", "theorem", "related work")

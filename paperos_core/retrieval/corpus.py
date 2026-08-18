@@ -85,6 +85,8 @@ class CorpusView:
         document_ids_by_work: dict[str, set[str]] = {}
         work_titles: dict[str, str] = {}
         if scholarly_registry is not None:
+            for work in scholarly_registry.list_works():
+                work_titles[work.id] = work.title
             for document_id in bundles:
                 work = scholarly_registry.work_for_document(document_id)
                 if work is None:

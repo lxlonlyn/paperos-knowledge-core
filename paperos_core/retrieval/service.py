@@ -32,8 +32,10 @@ from paperos_core.retrieval.lexical import lexical_retrieve
 from paperos_core.retrieval.profiles import build_query_plan
 from paperos_core.retrieval.rerank import rerank_candidates
 from paperos_core.retrieval.scope import (
+    apply_scope_filters,
     apply_scope_to_document_ids,
-    filter_candidates_by_scope,
+    build_mention_index,
+    residual_query_text,
     resolve_query_scope_async,
     should_apply_explicit_document_scope,
 )
@@ -99,6 +101,12 @@ class RetrievalService:
         scope, scope_trace = await resolve_query_scope_async(
             request, corpus, self.scholarly_registry, llm=self.llm
         )
+        mention_index = build_mention_index(
+            {work.id: work for work in self.scholarly_registry.list_works()}
+        )
+        residual_query = residual_query_text(
+            query, list(corpus.work_titles.values())
+        )
         stages.append(f"scope_resolution:{scope_trace.resolution}")
         explicit_document_ids = corpus.explicitly_mentioned_document_ids(query)
         comparative_query = (
@@ -125,7 +133,7 @@ class RetrievalService:
         channels: dict[str, list[Candidate]] = {}
 
         if "lexical" in plan.channels:
-            channels["lexical"] = filter_candidates_by_scope(
+            channels["lexical"] = apply_scope_filters(
                 lexical_retrieve(
                     self.index_manager.lexical,
                     corpus,
@@ -134,10 +142,11 @@ class RetrievalService:
                     document_ids=document_ids,
                 ),
                 scope,
+                mention_index,
             )
             stages.append("lexical_retrieval")
         if "semantic" in plan.channels:
-            channels["semantic"] = filter_candidates_by_scope(
+            channels["semantic"] = apply_scope_filters(
                 await semantic_retrieve(
                     self.search,
                     self.compat,
@@ -150,10 +159,11 @@ class RetrievalService:
                     chunk_only=request.profile is RetrievalProfile.TRUTH,
                 ),
                 scope,
+                mention_index,
             )
             stages.append("cognee_search")
         if "entity_claim" in plan.channels:
-            channels["entity_claim"] = filter_candidates_by_scope(
+            channels["entity_claim"] = apply_scope_filters(
                 await entity_claim_retrieve(
                     self.search,
                     self.compat,
@@ -165,10 +175,11 @@ class RetrievalService:
                     document_ids=document_ids,
                 ),
                 scope,
+                mention_index,
             )
             stages.append("entity_claim_search")
         if "graph" in plan.channels:
-            channels["graph"] = filter_candidates_by_scope(
+            channels["graph"] = apply_scope_filters(
                 await graph_retrieve(
                     self.search,
                     self.compat,
@@ -181,21 +192,26 @@ class RetrievalService:
                     document_ids=document_ids,
                 ),
                 scope,
+                mention_index,
             )
             stages.append("typed_traversal")
         if scope.subject_work_ids:
-            channels["subject_claim"] = await subject_claim_retrieve(
-                self.search,
-                self.compat,
-                corpus,
-                query,
-                dataset_name=dataset_name,
-                scope=scope,
-                limit=pool,
+            channels["subject_claim"] = apply_scope_filters(
+                await subject_claim_retrieve(
+                    self.search,
+                    self.compat,
+                    corpus,
+                    query,
+                    dataset_name=dataset_name,
+                    scope=scope,
+                    limit=pool,
+                ),
+                scope,
+                mention_index,
             )
             stages.append("subject_about_retrieval")
         if "global_context" in plan.channels:
-            channels["global_context"] = filter_candidates_by_scope(
+            channels["global_context"] = apply_scope_filters(
                 await global_context_retrieve(
                     self.search,
                     self.compat,
@@ -207,10 +223,11 @@ class RetrievalService:
                     document_ids=document_ids,
                 ),
                 scope,
+                mention_index,
             )
             stages.append("global_context")
         if "confirmed_knowledge" in plan.channels:
-            channels["confirmed_knowledge"] = filter_candidates_by_scope(
+            channels["confirmed_knowledge"] = apply_scope_filters(
                 confirmed_knowledge_retrieve(
                     self.feedback,
                     corpus,
@@ -219,10 +236,15 @@ class RetrievalService:
                     document_ids=document_ids,
                 ),
                 scope,
+                mention_index,
             )
             stages.append("confirmed_knowledge_retrieval")
 
-        fused = weighted_rrf(channels, plan.weights)
+        fused = apply_scope_filters(
+            weighted_rrf(channels, plan.weights),
+            scope,
+            mention_index,
+        )
         about_order = [item.id for item in channels.get("subject_claim", [])]
         if scope.subject_work_ids:
             fused = _prepend_subject_claims(fused, about_order, pool)
@@ -240,7 +262,11 @@ class RetrievalService:
         else:
             reranked = fused
         if scope.subject_work_ids:
-            reranked = _prepend_subject_claims(reranked, about_order, pool)
+            reranked = apply_scope_filters(
+                _prepend_subject_claims(reranked, about_order, pool),
+                scope,
+                mention_index,
+            )
         truth_profile = request.profile is RetrievalProfile.TRUTH
         if truth_profile:
             max_per_document = plan.top_k
@@ -254,13 +280,17 @@ class RetrievalService:
             )
         else:
             max_per_document = self.config.retrieval.max_chunks_per_document
-        selected = diversify(
-            reranked,
-            limit=plan.top_k,
-            max_per_document=max_per_document,
-            max_per_section=self.config.retrieval.max_chunks_per_section,
-            seed_each_document=not truth_profile,
-            aspect_queries=[query, *scope.topic_queries],
+        selected = apply_scope_filters(
+            diversify(
+                reranked,
+                limit=plan.top_k,
+                max_per_document=max_per_document,
+                max_per_section=self.config.retrieval.max_chunks_per_section,
+                seed_each_document=not truth_profile,
+                aspect_queries=[residual_query or query, *scope.topic_queries],
+            ),
+            scope,
+            mention_index,
         )
         stages.append("diversification")
         evidence = format_evidence(selected, corpus.bundles)

@@ -110,6 +110,9 @@ class LocalInferenceRuntime:
         local = self.settings.local_inference
         if not self.required:
             return {"status": "disabled"}
+        reused = await self._reuse_healthy_endpoint(local.host, local.port)
+        if reused is not None:
+            return reused
         await self._assert_port_available(local.host, local.port)
         service_root = self._service_root()
         cognee = self.cognee_config.read()
@@ -220,6 +223,33 @@ class LocalInferenceRuntime:
             return
         writer.close()
         await writer.wait_closed()
+        raise LocalInferenceUnavailableError(
+            f"Cannot start local inference because {host}:{port} is already in use.",
+            affected=f"{host}:{port}",
+            retryable=False,
+        )
+
+    async def _reuse_healthy_endpoint(
+        self, host: str, port: int
+    ) -> dict[str, Any] | None:
+        """Reuse an already-healthy local inference service instead of rebinding."""
+        try:
+            _reader, writer = await asyncio.open_connection(host, port)
+        except OSError:
+            return None
+        writer.close()
+        await writer.wait_closed()
+        try:
+            health = await self.client.health()
+        except LocalInferenceUnavailableError as exc:
+            raise LocalInferenceUnavailableError(
+                f"Cannot start local inference because {host}:{port} is already in use.",
+                affected=f"{host}:{port}",
+                retryable=False,
+            ) from exc
+        if health.get("status") == "healthy":
+            self._owned = False
+            return health
         raise LocalInferenceUnavailableError(
             f"Cannot start local inference because {host}:{port} is already in use.",
             affected=f"{host}:{port}",

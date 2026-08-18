@@ -80,6 +80,19 @@ _COMPARE_CUES = (
     "differences",
 )
 
+_DISCUSSION_SUBJECT_CUES = (
+    "现有论文",
+    "有哪些评价",
+    "评价或讨论",
+    "评价",
+    "讨论",
+    "existing papers",
+    "what do papers say",
+    "how do papers discuss",
+    "discussion of",
+    "comments on",
+)
+
 _TOPIC_STOP = {
     "哪些",
     "什么",
@@ -122,29 +135,28 @@ def resolve_query_scope(
     llm: LLMClient | None = None,
 ) -> tuple[ResolvedQueryScope, QueryScopeTrace]:
     """Resolve scope: explicit request beats planner; planner failure stays unscoped."""
-    works = {
-        work.id: work
-        for work in scholarly_registry.list_works()
-        if work.id in corpus.document_ids_by_work
-    }
-
-    mentioned = _mention_work_ids(request.query, works, corpus)
+    all_works, ingested_works = _work_catalogs(scholarly_registry, corpus)
+    mentioned = _mention_work_ids(request.query, all_works, corpus)
     if request.scope is not None:
-        resolved = _from_explicit(request.scope, set(works))
+        resolved = _from_explicit(
+            request.scope,
+            ingested_ids=set(ingested_works),
+            all_ids=set(all_works),
+        )
         return resolved, QueryScopeTrace(
             resolution="explicit",
             mentioned_work_ids=sorted(mentioned),
             warnings=[],
         )
 
-    deterministic = _deterministic_scope(request.query, mentioned, works)
+    deterministic = _deterministic_scope(request.query, mentioned, all_works)
     if deterministic is not None:
         return deterministic, QueryScopeTrace(
             resolution="deterministic",
             mentioned_work_ids=sorted(mentioned),
         )
 
-    if llm is None or not works:
+    if llm is None or not all_works:
         return ResolvedQueryScope(), QueryScopeTrace(
             resolution="fallback_unscoped",
             mentioned_work_ids=sorted(mentioned),
@@ -164,27 +176,27 @@ async def resolve_query_scope_async(
     *,
     llm: LLMClient,
 ) -> tuple[ResolvedQueryScope, QueryScopeTrace]:
-    works = {
-        work.id: work
-        for work in scholarly_registry.list_works()
-        if work.id in corpus.document_ids_by_work
-    }
-    mentioned = _mention_work_ids(request.query, works, corpus)
+    all_works, ingested_works = _work_catalogs(scholarly_registry, corpus)
+    mentioned = _mention_work_ids(request.query, all_works, corpus)
 
     if request.scope is not None:
-        return _from_explicit(request.scope, set(works)), QueryScopeTrace(
+        return _from_explicit(
+            request.scope,
+            ingested_ids=set(ingested_works),
+            all_ids=set(all_works),
+        ), QueryScopeTrace(
             resolution="explicit",
             mentioned_work_ids=sorted(mentioned),
         )
 
-    deterministic = _deterministic_scope(request.query, mentioned, works)
+    deterministic = _deterministic_scope(request.query, mentioned, all_works)
     if deterministic is not None:
         return deterministic, QueryScopeTrace(
             resolution="deterministic",
             mentioned_work_ids=sorted(mentioned),
         )
 
-    catalog = _build_scope_catalog(works)
+    catalog = _build_scope_catalog(all_works)
     if not catalog["key_to_work_id"]:
         return ResolvedQueryScope(), QueryScopeTrace(
             resolution="fallback_unscoped",
@@ -215,12 +227,20 @@ async def resolve_query_scope_async(
     key_map: dict[str, str] = catalog["key_to_work_id"]
     try:
         resolved = ResolvedQueryScope(
-            source_work_ids=_map_keys(planned.source_work_keys, key_map),
+            source_work_ids=[
+                work_id
+                for work_id in _map_keys(planned.source_work_keys, key_map)
+                if work_id in ingested_works
+            ],
             exclude_source_work_ids=_map_keys(
                 planned.exclude_source_work_keys, key_map
             ),
             subject_work_ids=_map_keys(planned.subject_work_keys, key_map),
-            work_set_work_ids=_map_keys(planned.work_set_work_keys, key_map),
+            work_set_work_ids=[
+                work_id
+                for work_id in _map_keys(planned.work_set_work_keys, key_map)
+                if work_id in ingested_works
+            ],
             topic_queries=[
                 item.strip()
                 for item in planned.topic_queries
@@ -292,6 +312,109 @@ def filter_candidates_by_scope(
     return kept
 
 
+def filter_candidates_by_subject(
+    candidates: list[Any],
+    scope: ResolvedQueryScope,
+    mention_index: dict[str, tuple[str, ...]],
+) -> list[Any]:
+    """Keep only candidates with a provable link to the subject Work."""
+    if not scope.subject_work_ids:
+        return candidates
+    kept = []
+    for candidate in candidates:
+        proven = proven_subject_work_ids(
+            text=getattr(candidate, "text", "") or "",
+            structured_subject_ids=list(
+                getattr(candidate, "subject_work_ids", None) or []
+            ),
+            derived_from_ids=list(getattr(candidate, "derived_from_ids", None) or []),
+            subject_work_ids=scope.subject_work_ids,
+            mention_index=mention_index,
+        )
+        if not proven:
+            continue
+        updater = getattr(candidate, "model_copy", None)
+        if updater is not None:
+            merged = list(
+                dict.fromkeys(
+                    [
+                        *list(getattr(candidate, "subject_work_ids", None) or []),
+                        *proven,
+                    ]
+                )
+            )
+            kept.append(updater(update={"subject_work_ids": merged}))
+        else:
+            kept.append(candidate)
+    return kept
+
+
+def apply_scope_filters(
+    candidates: list[Any],
+    scope: ResolvedQueryScope,
+    mention_index: dict[str, tuple[str, ...]],
+) -> list[Any]:
+    """Apply source/exclude/work-set then subject-relevance filters."""
+    return filter_candidates_by_subject(
+        filter_candidates_by_scope(candidates, scope),
+        scope,
+        mention_index,
+    )
+
+
+def proven_subject_work_ids(
+    *,
+    text: str,
+    structured_subject_ids: list[str],
+    derived_from_ids: list[str],
+    subject_work_ids: list[str],
+    mention_index: dict[str, tuple[str, ...]],
+) -> list[str]:
+    """Return subject Work IDs that this evidence can actually prove."""
+    structured = set(structured_subject_ids)
+    derived = set(derived_from_ids)
+    normalized = _normalize(text)
+    proven: list[str] = []
+    for work_id in dict.fromkeys(subject_work_ids):
+        if work_id in structured or work_id in derived:
+            proven.append(work_id)
+            continue
+        if any(
+            _contains_phrase(normalized, phrase)
+            for phrase in mention_index.get(work_id, ())
+        ):
+            proven.append(work_id)
+    return proven
+
+
+def build_mention_index(
+    works: dict[str, ScholarlyWork],
+) -> dict[str, tuple[str, ...]]:
+    """Title plus globally unique aliases/DOI/arXiv for textual subject proof."""
+    alias_owners: dict[str, set[str]] = {}
+    for work_id, work in works.items():
+        for alias in _work_aliases(work):
+            if alias:
+                alias_owners.setdefault(alias, set()).add(work_id)
+        if work.doi:
+            alias_owners.setdefault(_normalize(work.doi), set()).add(work_id)
+        if work.arxiv_id:
+            alias_owners.setdefault(_normalize(work.arxiv_id), set()).add(work_id)
+    unique_aliases = {
+        alias: next(iter(owners))
+        for alias, owners in alias_owners.items()
+        if len(owners) == 1
+    }
+    index: dict[str, tuple[str, ...]] = {}
+    for work_id, work in works.items():
+        phrases = [_normalize(work.title)]
+        phrases.extend(
+            alias for alias, owner in unique_aliases.items() if owner == work_id
+        )
+        index[work_id] = tuple(dict.fromkeys(item for item in phrases if item))
+    return index
+
+
 def should_apply_explicit_document_scope(
     *,
     scope: ResolvedQueryScope,
@@ -309,22 +432,25 @@ def should_apply_explicit_document_scope(
 
 
 def _from_explicit(
-    scope: QueryScopeInput, valid_work_ids: set[str]
+    scope: QueryScopeInput,
+    *,
+    ingested_ids: set[str],
+    all_ids: set[str],
 ) -> ResolvedQueryScope:
-    def clean(values: list[str] | None) -> list[str]:
+    def clean(values: list[str] | None, allowed: set[str]) -> list[str]:
         if not values:
             return []
         return [
             item
             for item in dict.fromkeys(values)
-            if item in valid_work_ids or not valid_work_ids
+            if item in allowed or not allowed
         ]
 
     return ResolvedQueryScope(
-        source_work_ids=clean(scope.source_work_ids),
-        exclude_source_work_ids=clean(scope.exclude_source_work_ids),
-        subject_work_ids=clean(scope.subject_work_ids),
-        work_set_work_ids=clean(scope.work_set_work_ids),
+        source_work_ids=clean(scope.source_work_ids, ingested_ids),
+        exclude_source_work_ids=clean(scope.exclude_source_work_ids, all_ids),
+        subject_work_ids=clean(scope.subject_work_ids, all_ids),
+        work_set_work_ids=clean(scope.work_set_work_ids, ingested_ids),
         topic_queries=[
             item.strip()
             for item in (scope.topic_queries or [])
@@ -356,6 +482,12 @@ def _deterministic_scope(
             source_work_ids=[work_id],
             subject_work_ids=[work_id],
             topic_queries=topics_stripped or ["limitations"],
+        )
+
+    if any(cue in normalized for cue in _DISCUSSION_SUBJECT_CUES) and mentioned:
+        return ResolvedQueryScope(
+            subject_work_ids=sorted(mentioned),
+            topic_queries=topics_stripped or ["discussion"],
         )
 
     if any(cue in normalized for cue in _EXTERNAL_SUBJECT_CUES) and len(mentioned) == 1:
@@ -410,20 +542,42 @@ def _source_work_from_source_cue(
     return sorted(mentioned)[0] if len(mentioned) == 1 else None
 
 
+def _work_catalogs(
+    scholarly_registry: ScholarlyRegistry, corpus: CorpusView
+) -> tuple[dict[str, ScholarlyWork], dict[str, ScholarlyWork]]:
+    all_works = {work.id: work for work in scholarly_registry.list_works()}
+    ingested = {
+        work_id: work
+        for work_id, work in all_works.items()
+        if work_id in corpus.document_ids_by_work
+    }
+    return all_works, ingested
+
+
 def _mention_work_ids(
     query: str,
     works: dict[str, ScholarlyWork],
     corpus: CorpusView,
 ) -> set[str]:
     normalized_query = _normalize(query)
+    title_owners: dict[str, set[str]] = {}
     alias_owners: dict[str, set[str]] = {}
     for work_id, work in works.items():
-        aliases = [_normalize(work.title), *_work_aliases(work)]
-        for alias in aliases:
-            if not alias:
-                continue
-            alias_owners.setdefault(alias, set()).add(work_id)
+        title = _normalize(work.title)
+        if title:
+            title_owners.setdefault(title, set()).add(work_id)
+        for alias in _work_aliases(work):
+            if alias:
+                alias_owners.setdefault(alias, set()).add(work_id)
+        if work.doi:
+            alias_owners.setdefault(_normalize(work.doi), set()).add(work_id)
+        if work.arxiv_id:
+            alias_owners.setdefault(_normalize(work.arxiv_id), set()).add(work_id)
     matched: set[str] = set()
+    # Full titles may have duplicate identities; still treat the mention as real.
+    for title, owners in title_owners.items():
+        if _contains_phrase(normalized_query, title):
+            matched.update(owners)
     for alias, owners in alias_owners.items():
         if len(owners) != 1:
             continue

@@ -23,7 +23,9 @@ from paperos_core.retrieval.candidates import (
 from paperos_core.retrieval.corpus import CorpusView
 from paperos_core.retrieval.scope import (
     apply_scope_to_document_ids,
+    build_mention_index,
     filter_candidates_by_scope,
+    filter_candidates_by_subject,
     resolve_query_scope,
     should_apply_explicit_document_scope,
 )
@@ -54,15 +56,21 @@ def _work(work_id: str, title: str) -> ScholarlyWork:
     )
 
 
-def _corpus(works: list[ScholarlyWork]) -> CorpusView:
+def _corpus(
+    works: list[ScholarlyWork],
+    *,
+    ingested_ids: set[str] | None = None,
+) -> CorpusView:
+    selected = ingested_ids if ingested_ids is not None else {work.id for work in works}
     work_id_by_document = {}
     document_ids_by_work: dict[str, set[str]] = {}
-    work_titles = {}
+    work_titles = {work.id: work.title for work in works}
     for work in works:
+        if work.id not in selected:
+            continue
         document_id = f"doc_{work.id}"
         work_id_by_document[document_id] = work.id
         document_ids_by_work[work.id] = {document_id}
-        work_titles[work.id] = work.title
     return CorpusView(
         paths=build_data_paths(REPOSITORY_ROOT / "data"),
         bundles={},
@@ -75,7 +83,13 @@ def _corpus(works: list[ScholarlyWork]) -> CorpusView:
     )
 
 
-def _candidate(candidate_id: str, source_work_id: str) -> Candidate:
+def _candidate(
+    candidate_id: str,
+    source_work_id: str,
+    *,
+    text: str = "text",
+    subject_work_ids: list[str] | None = None,
+) -> Candidate:
     return Candidate(
         id=candidate_id,
         object_id=candidate_id,
@@ -85,9 +99,10 @@ def _candidate(candidate_id: str, source_work_id: str) -> Candidate:
         source_filename="paper.pdf",
         canonical_snapshot_id="snapshot",
         chunk_id=candidate_id,
-        text="text",
+        text=text,
         channels=["lexical"],
         source_work_id=source_work_id,
+        subject_work_ids=list(subject_work_ids or []),
     )
 
 
@@ -270,12 +285,112 @@ def compat_incoming_api_contract() -> dict[str, object]:
     return {"status": "passed"}
 
 
+def external_subject_without_document_contract() -> dict[str, object]:
+    ingested, _ids = _works()
+    external = ScholarlyWork(
+        id="work_nfgp",
+        title="Geometry Processing with Neural Fields",
+        normalized_title="geometry processing with neural fields",
+        identity_status=WorkIdentityStatus.PROVISIONAL,
+        identity_confidence=0.5,
+        year=2022,
+        authors=["Author"],
+    )
+    registry = _FakeRegistry([*ingested, external])
+    corpus = _corpus(ingested)
+    _require(
+        "work_nfgp" not in corpus.document_ids_by_work,
+        "external Work must not have a Document",
+    )
+    scope, trace = resolve_query_scope(
+        QueryRequest(
+            query="现有论文对 Geometry Processing with Neural Fields 有哪些评价或讨论？"
+        ),
+        corpus,
+        registry,
+    )
+    _require(trace.resolution == "deterministic", trace.resolution)
+    _require(scope.subject_work_ids == ["work_nfgp"], scope.subject_work_ids)
+    _require(not scope.source_work_ids, scope.source_work_ids)
+    explicit, explicit_trace = resolve_query_scope(
+        QueryRequest(
+            query="ignored because explicit scope wins",
+            scope=QueryScopeInput(subject_work_ids=["work_nfgp"]),
+        ),
+        corpus,
+        registry,
+    )
+    _require(explicit_trace.resolution == "explicit", explicit_trace.resolution)
+    _require(explicit.subject_work_ids == ["work_nfgp"], explicit.subject_work_ids)
+    return {
+        "status": "passed",
+        "subject_work_ids": scope.subject_work_ids,
+        "explicit_subject_work_ids": explicit.subject_work_ids,
+    }
+
+
+def subject_evidence_filter_contract() -> dict[str, object]:
+    works, _ids = _works()
+    mention_index = build_mention_index({work.id: work for work in works})
+    scope = ResolvedQueryScope(subject_work_ids=["work_nise"])
+    kept = filter_candidates_by_subject(
+        [
+            _candidate(
+                "about",
+                "work_adadiv",
+                text="A structured claim about NISE.",
+                subject_work_ids=["work_nise"],
+            ),
+            _candidate(
+                "mention",
+                "work_adadiv",
+                text="Neural Implicit Surface Evolution cannot preserve volume.",
+            ),
+            _candidate(
+                "unrelated",
+                "work_adadiv",
+                text="AdaDiv uses an adaptive divergence velocity field.",
+            ),
+        ],
+        scope,
+        mention_index,
+    )
+    _require(
+        [item.id for item in kept] == ["about", "mention"],
+        [item.id for item in kept],
+    )
+    return {"status": "passed", "kept": [item.id for item in kept]}
+
+
+def no_corpus_specific_ranking_contract() -> dict[str, object]:
+    source = (
+        REPOSITORY_ROOT / "paperos_core" / "retrieval" / "subject_claim.py"
+    ).read_text(encoding="utf-8")
+    forbidden = (
+        '"blob"',
+        "'blob'",
+        '"detach"',
+        "'detach'",
+        '"reattach"',
+        "'reattach'",
+        "handcrafted",
+        "adadiv",
+        "lipmlp",
+    )
+    hits = [token for token in forbidden if token in source.casefold()]
+    _require(not hits, f"corpus-specific ranking tokens in production: {hits}")
+    return {"status": "passed"}
+
+
 def main() -> None:
     report = {
         "deterministic_scope": deterministic_scope_contract(),
         "explicit_scope": explicit_scope_precedence_contract(),
         "unscoped_fallback": unscoped_fallback_contract(),
         "source_filter": source_filter_before_fusion_contract(),
+        "external_subject": external_subject_without_document_contract(),
+        "subject_filter": subject_evidence_filter_contract(),
+        "no_corpus_ranking_hardcode": no_corpus_specific_ranking_contract(),
         "compat_boundary": compat_incoming_api_contract(),
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
