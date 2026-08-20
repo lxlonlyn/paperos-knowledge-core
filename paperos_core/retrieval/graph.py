@@ -32,6 +32,15 @@ async def graph_retrieve(
     depth: int,
     document_ids: set[str],
 ) -> list[Candidate]:
+    from paperos_core.retrieval.ablation import current_ablation_policy
+
+    policy = current_ablation_policy()
+    seed_types = set(_SEED_TYPES)
+    if policy is not None and not policy.claim_seeds_allowed_in_graph:
+        seed_types.discard("ClaimDataPoint")
+    edge_types = {relation.value for relation in RelationType}
+    if policy is not None and not policy.about_edges_visible:
+        edge_types.discard(RelationType.ABOUT.value)
     hits = await search.graph_search(
         query,
         dataset=dataset_name,
@@ -39,7 +48,7 @@ async def graph_retrieve(
         search_type=search_type,
     )
     resolved = await compat.resolve_graph_nodes(
-        [hit.cognee_id for hit in hits if hit.object_type in _SEED_TYPES]
+        [hit.cognee_id for hit in hits if hit.object_type in seed_types]
     )
     seeds = [
         CogneeVectorHit(
@@ -61,7 +70,7 @@ async def graph_retrieve(
             canonical_snapshot_id=None,
         )
         for hit in hits
-        if hit.object_type in _SEED_TYPES
+        if hit.object_type in seed_types
     ]
     seeds = [seed for seed in seeds if seed.source_chunk_ids]
     allowed_seeds = [
@@ -76,7 +85,7 @@ async def graph_retrieve(
     traversed = await compat.typed_traverse(
         allowed_seeds,
         depth=depth,
-        edge_types={relation.value for relation in RelationType},
+        edge_types=edge_types,
     )
     candidates: dict[str, Candidate] = {}
     for seed in allowed_seeds:

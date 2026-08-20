@@ -52,13 +52,19 @@ async def entity_claim_retrieve(
     limit: int,
     document_ids: set[str],
 ) -> list[Candidate]:
+    from paperos_core.retrieval.ablation import current_ablation_policy
+
     hits = await search.graph_search(
         query,
         dataset=dataset_name,
         top_k=limit * 2,
         search_type=search_type,
     )
-    filtered = [hit for hit in hits if hit.object_type in _ENTITY_CLAIM_TYPES]
+    allowed_types = set(_ENTITY_CLAIM_TYPES)
+    policy = current_ablation_policy()
+    if policy is not None and not policy.claim_hits_allowed_in_entity_claim:
+        allowed_types.discard("ClaimDataPoint")
+    filtered = [hit for hit in hits if hit.object_type in allowed_types]
     return await _hits_to_candidates(
         filtered,
         compat,

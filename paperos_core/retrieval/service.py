@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 
 from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
 from paperos_core.adapters.cognee.llm import LLMClient
@@ -14,6 +15,12 @@ from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.registry import SourceRegistry
 from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
 from paperos_core.paths import DataPaths
+from paperos_core.retrieval.ablation import (
+    citation_anchor_retrieve,
+    current_ablation_policy,
+    current_ablation_trace,
+    expand_citation_source_scope,
+)
 from paperos_core.retrieval.cache import QueryCache
 from paperos_core.retrieval.candidates import (
     Candidate,
@@ -87,17 +94,29 @@ class RetrievalService:
             self.registry,
             self.scholarly_registry,
         )
+        policy = current_ablation_policy()
+        trace = current_ablation_trace()
         cache_key = self.cache.key(request, corpus)
-        cached = self.cache.get(cache_key)
-        if cached is not None:
-            return cached
+        if policy is None or not policy.bypass_query_cache:
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                return cached
         document_ids = corpus.filtered_document_ids(
             request.document_ids, dataset_name
         )
         plan = build_query_plan(request, self.config)
+        if policy is not None:
+            updates: dict[str, int] = {}
+            if policy.candidate_pool_size is not None:
+                updates["candidate_pool_size"] = policy.candidate_pool_size
+            if policy.final_top_k is not None:
+                updates["top_k"] = policy.final_top_k
+            if updates:
+                plan = plan.model_copy(update=updates)
         pool = plan.candidate_pool_size
         query = request.query
         stages = ["profile_mapping"]
+        retrieval_started = time.perf_counter()
         scope, scope_trace = await resolve_query_scope_async(
             request, corpus, self.scholarly_registry, llm=self.llm
         )
@@ -108,6 +127,16 @@ class RetrievalService:
             query, list(corpus.work_titles.values())
         )
         stages.append(f"scope_resolution:{scope_trace.resolution}")
+        if policy is not None and policy.citation_scope:
+            scope = await expand_citation_source_scope(
+                self.compat,
+                corpus,
+                scope,
+                dataset_name=dataset_name,
+            )
+            stages.append("citation_source_scope")
+            if trace is not None:
+                trace.citation_source_work_ids = list(scope.source_work_ids)
         explicit_document_ids = corpus.explicitly_mentioned_document_ids(query)
         comparative_query = (
             request.profile is not RetrievalProfile.TRUTH
@@ -131,8 +160,13 @@ class RetrievalService:
             update={"applied_document_ids": sorted(document_ids)}
         )
         channels: dict[str, list[Candidate]] = {}
+        run_broad = policy is None or policy.broad_chunk_rag
+        run_subject_claim = (
+            (policy is None or policy.subject_claim_enabled)
+            and bool(scope.subject_work_ids)
+        )
 
-        if "lexical" in plan.channels:
+        if run_broad and "lexical" in plan.channels:
             channels["lexical"] = apply_scope_filters(
                 lexical_retrieve(
                     self.index_manager.lexical,
@@ -145,7 +179,7 @@ class RetrievalService:
                 mention_index,
             )
             stages.append("lexical_retrieval")
-        if "semantic" in plan.channels:
+        if run_broad and "semantic" in plan.channels:
             channels["semantic"] = apply_scope_filters(
                 await semantic_retrieve(
                     self.search,
@@ -162,7 +196,7 @@ class RetrievalService:
                 mention_index,
             )
             stages.append("cognee_search")
-        if "entity_claim" in plan.channels:
+        if run_broad and "entity_claim" in plan.channels:
             channels["entity_claim"] = apply_scope_filters(
                 await entity_claim_retrieve(
                     self.search,
@@ -178,7 +212,7 @@ class RetrievalService:
                 mention_index,
             )
             stages.append("entity_claim_search")
-        if "graph" in plan.channels:
+        if run_broad and "graph" in plan.channels:
             channels["graph"] = apply_scope_filters(
                 await graph_retrieve(
                     self.search,
@@ -195,7 +229,7 @@ class RetrievalService:
                 mention_index,
             )
             stages.append("typed_traversal")
-        if scope.subject_work_ids:
+        if run_subject_claim:
             channels["subject_claim"] = apply_scope_filters(
                 await subject_claim_retrieve(
                     self.search,
@@ -210,7 +244,20 @@ class RetrievalService:
                 mention_index,
             )
             stages.append("subject_about_retrieval")
-        if "global_context" in plan.channels:
+        if policy is not None and policy.citation_anchor_expansion:
+            channels["citation_anchor"] = apply_scope_filters(
+                await citation_anchor_retrieve(
+                    self.compat,
+                    corpus,
+                    scope,
+                    dataset_name=dataset_name,
+                    limit=pool,
+                ),
+                scope,
+                mention_index,
+            )
+            stages.append("citation_anchor_expansion")
+        if run_broad and "global_context" in plan.channels:
             channels["global_context"] = apply_scope_filters(
                 await global_context_retrieve(
                     self.search,
@@ -226,7 +273,7 @@ class RetrievalService:
                 mention_index,
             )
             stages.append("global_context")
-        if "confirmed_knowledge" in plan.channels:
+        if run_broad and "confirmed_knowledge" in plan.channels:
             channels["confirmed_knowledge"] = apply_scope_filters(
                 confirmed_knowledge_retrieve(
                     self.feedback,
@@ -240,28 +287,59 @@ class RetrievalService:
             )
             stages.append("confirmed_knowledge_retrieval")
 
+        if trace is not None:
+            for name, items in channels.items():
+                trace.channel_candidate_ids[name] = [item.id for item in items]
+                trace.channel_candidate_chunk_ids[name] = [
+                    item.chunk_id for item in items
+                ]
+
+        weights = dict(plan.weights)
+        if "citation_anchor" in channels:
+            weights.setdefault(
+                "citation_anchor",
+                plan.weights.get("semantic", plan.weights.get("graph", 1.0)),
+            )
         fused = apply_scope_filters(
-            weighted_rrf(channels, plan.weights),
+            weighted_rrf(channels, weights),
             scope,
             mention_index,
         )
         about_order = [item.id for item in channels.get("subject_claim", [])]
-        if scope.subject_work_ids:
+        if scope.subject_work_ids and "subject_claim" in channels:
             fused = _prepend_subject_claims(fused, about_order, pool)
         else:
             fused = fused[:pool]
         stages.append("fusion")
+        retrieval_ms = (time.perf_counter() - retrieval_started) * 1000.0
+        if trace is not None:
+            trace.fused_before_rerank_candidate_ids = [item.id for item in fused]
+            trace.fused_before_rerank_chunk_ids = [item.chunk_id for item in fused]
+            trace.fused_candidate_channels = {
+                item.id: list(item.channels) for item in fused
+            }
+            trace.fused_candidate_ranks = {
+                item.id: index for index, item in enumerate(fused, start=1)
+            }
+            trace.retrieval_latency_ms = retrieval_ms
+
+        rerank_ms = 0.0
         if self.config.retrieval.rerank_enabled:
+            rerank_started = time.perf_counter()
             reranked = await rerank_candidates(
                 self.model_client,
                 query,
                 fused,
                 limit=pool,
             )
+            rerank_ms = (time.perf_counter() - rerank_started) * 1000.0
             stages.append("rerank")
         else:
             reranked = fused
-        if scope.subject_work_ids:
+        if trace is not None:
+            trace.rerank_latency_ms = rerank_ms
+            trace.reranked_chunk_ids = [item.chunk_id for item in reranked]
+        if scope.subject_work_ids and "subject_claim" in channels:
             reranked = apply_scope_filters(
                 _prepend_subject_claims(reranked, about_order, pool),
                 scope,
@@ -293,6 +371,8 @@ class RetrievalService:
             mention_index,
         )
         stages.append("diversification")
+        if trace is not None:
+            trace.selected_chunk_ids = [item.chunk_id for item in selected]
         evidence = format_evidence(selected, corpus.bundles)
         recall_context: list[str] | None = None
         disable_recall = (
@@ -300,7 +380,8 @@ class RetrievalService:
             and scope.has_hard_work_scope
         )
         if (
-            request.profile is RetrievalProfile.COMPREHENSIVE
+            run_broad
+            and request.profile is RetrievalProfile.COMPREHENSIVE
             and not disable_recall
         ):
             recall_hits = await self.search.recall_context(
@@ -316,22 +397,28 @@ class RetrievalService:
             scope_trace = scope_trace.model_copy(
                 update={"recall_context_disabled": True}
             )
-        answer = await synthesize_answer(
-            self.llm,
-            query=request.query,
-            profile=request.profile,
-            evidence=evidence,
-            recall_context=recall_context,
-            resolved_scope=scope,
-        )
-        stages.append("synthesis")
+        if policy is not None and policy.skip_synthesis:
+            answer = ""
+            answer_model = "skipped_for_ablation"
+            stages.append("synthesis_skipped")
+        else:
+            answer = await synthesize_answer(
+                self.llm,
+                query=request.query,
+                profile=request.profile,
+                evidence=evidence,
+                recall_context=recall_context,
+                resolved_scope=scope,
+            )
+            answer_model = self.llm.model
+            stages.append("synthesis")
         response = QueryResponse(
             id=cache_key,
             query=request.query,
             profile=request.profile,
             dataset=dataset_name,
             answer=answer,
-            answer_model=self.llm.model,
+            answer_model=answer_model,
             stages=stages,
             channels_used=list(channels),
             evidence=evidence,
@@ -347,7 +434,8 @@ class RetrievalService:
             resolved_scope=scope,
             scope_trace=scope_trace,
         )
-        self.cache.put(response)
+        if policy is None or not policy.bypass_query_cache:
+            self.cache.put(response)
         return response
 
 

@@ -25,17 +25,28 @@ class QueryCache:
         self.feedback = feedback
 
     def key(self, request: QueryRequest, corpus: CorpusView) -> str:
+        from paperos_core.retrieval.ablation import current_ablation_policy
+
         snapshot_ids = sorted(
             bundle.snapshot.id for bundle in corpus.bundles.values()
         )
         improvement_ids = sorted(
             item.id for item in self.feedback.confirmed_improvements()
         )
+        policy = current_ablation_policy()
+        ablation_parts: list[str] = []
+        if policy is not None:
+            ablation_parts = [
+                f"ablation:{policy.configuration_id}",
+                f"pool:{policy.candidate_pool_size or ''}",
+                f"topk:{policy.final_top_k or ''}",
+            ]
         return stable_id(
             "answer",
             request.model_dump_json(),
             *snapshot_ids,
             *improvement_ids,
+            *ablation_parts,
             id_version=QUERY_CACHE_VERSIONS[request.profile.value],
         )
 

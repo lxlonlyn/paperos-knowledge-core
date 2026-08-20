@@ -355,11 +355,15 @@ def apply_scope_filters(
     mention_index: dict[str, tuple[str, ...]],
 ) -> list[Any]:
     """Apply source/exclude/work-set then subject-relevance filters."""
-    return filter_candidates_by_subject(
-        filter_candidates_by_scope(candidates, scope),
-        scope,
-        mention_index,
-    )
+    from paperos_core.retrieval.ablation import current_ablation_policy
+
+    scoped = filter_candidates_by_scope(candidates, scope)
+    policy = current_ablation_policy()
+    if policy is not None and policy.relax_subject_mention_filter:
+        # Citation-scoped RAG admits Works via CITES; in-chunk subject mention
+        # must not be required or the baseline is artificially weakened.
+        return scoped
+    return filter_candidates_by_subject(scoped, scope, mention_index)
 
 
 def proven_subject_work_ids(
