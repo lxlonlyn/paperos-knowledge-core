@@ -40,6 +40,9 @@ class QueryCache:
                 f"ablation:{policy.configuration_id}",
                 f"pool:{policy.candidate_pool_size or ''}",
                 f"topk:{policy.final_top_k or ''}",
+                f"priv:{int(policy.subject_claim_privilege)}",
+                f"dedup:{int(policy.chunk_dedup_final)}",
+                f"blind:{int(policy.claim_blind)}",
             ]
         return stable_id(
             "answer",

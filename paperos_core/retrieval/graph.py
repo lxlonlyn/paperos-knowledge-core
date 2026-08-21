@@ -32,21 +32,54 @@ async def graph_retrieve(
     depth: int,
     document_ids: set[str],
 ) -> list[Candidate]:
-    from paperos_core.retrieval.ablation import current_ablation_policy
+    from paperos_core.retrieval.ablation import (
+        current_ablation_policy,
+        current_ablation_trace,
+        is_claim_object_type,
+        record_claim_leak,
+    )
 
     policy = current_ablation_policy()
+    trace = current_ablation_trace()
     seed_types = set(_SEED_TYPES)
-    if policy is not None and not policy.claim_seeds_allowed_in_graph:
+    if policy is not None and (
+        not policy.claim_seeds_allowed_in_graph or policy.claim_blind
+    ):
         seed_types.discard("ClaimDataPoint")
     edge_types = {relation.value for relation in RelationType}
-    if policy is not None and not policy.about_edges_visible:
+    if policy is not None and (
+        not policy.about_edges_visible or policy.claim_blind
+    ):
         edge_types.discard(RelationType.ABOUT.value)
+    exclude_node_types = (
+        {"ClaimDataPoint"} if policy is not None and policy.claim_blind else None
+    )
     hits = await search.graph_search(
         query,
         dataset=dataset_name,
         top_k=limit * 2,
         search_type=search_type,
     )
+    if trace is not None:
+        trace.raw_hits["graph"] = [
+            {
+                "object_id": hit.canonical_id,
+                "object_type": hit.object_type,
+                "score": hit.score,
+            }
+            for hit in hits
+        ]
+    for hit in hits:
+        if (
+            policy is not None
+            and policy.claim_blind
+            and is_claim_object_type(hit.object_type)
+        ):
+            record_claim_leak(
+                stage="graph_raw_hits_filtered",
+                object_id=hit.canonical_id,
+                object_type=hit.object_type,
+            )
     resolved = await compat.resolve_graph_nodes(
         [hit.cognee_id for hit in hits if hit.object_type in seed_types]
     )
@@ -82,13 +115,49 @@ async def graph_retrieve(
             for chunk_id in seed.source_chunk_ids
         )
     ]
+    if trace is not None:
+        trace.graph_seeds = [
+            {
+                "object_id": seed.canonical_id,
+                "object_type": seed.object_type,
+                "score": seed.score,
+            }
+            for seed in allowed_seeds
+        ]
     traversed = await compat.typed_traverse(
         allowed_seeds,
         depth=depth,
         edge_types=edge_types,
+        exclude_node_types=exclude_node_types,
     )
+    if trace is not None:
+        trace.graph_traversal = [
+            {
+                "source_canonical_id": relation.source_canonical_id,
+                "target_canonical_id": relation.target_canonical_id,
+                "relation_type": relation.relation_type,
+                "score": relation.score,
+            }
+            for relation in traversed
+        ]
+        for relation in traversed:
+            if relation.relation_type == RelationType.ABOUT.value:
+                record_claim_leak(
+                    stage="graph_traversal",
+                    object_id=relation.source_canonical_id,
+                    relation_type=relation.relation_type,
+                )
     candidates: dict[str, Candidate] = {}
     for seed in allowed_seeds:
+        if policy is not None and policy.claim_blind and is_claim_object_type(
+            seed.object_type
+        ):
+            record_claim_leak(
+                stage="graph_seed",
+                object_id=seed.canonical_id,
+                object_type=seed.object_type,
+            )
+            continue
         for chunk_id in seed.source_chunk_ids:
             chunk = corpus.chunks.get(chunk_id)
             if chunk is None or chunk.document_id not in document_ids:
@@ -106,6 +175,9 @@ async def graph_retrieve(
             if existing is None or seed.score > existing.channel_scores["graph"]:
                 candidates[chunk_id] = candidate
     for relation in traversed:
+        if policy is not None and policy.claim_blind:
+            if relation.relation_type == RelationType.ABOUT.value:
+                continue
         for chunk_id in relation.source_chunk_ids:
             chunk = corpus.chunks.get(chunk_id)
             if chunk is None or chunk.document_id not in document_ids:

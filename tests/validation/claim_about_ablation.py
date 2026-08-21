@@ -34,6 +34,7 @@ from paperos_core.errors import LocalInferenceUnavailableError
 from paperos_core.retrieval.ablation import (
     AblationTrace,
     ablation_policy_context,
+    is_claim_object_type,
     policy_from_spec,
 )
 from paperos_core.retrieval.candidates import (
@@ -53,6 +54,11 @@ GROUND_TRUTH = FIXTURE_ROOT / "reference_ground_truth.json"
 CORE_PAPERS = ("nise_2023", "adadiv_2025", "efis_2026", "lipmlp_2022")
 REPORT_NAME = "claim-about-ablation.json"
 REVIEW_NAME = "claim-about-manual-review.json"
+CASES_NAME = "claim-about-ablation-cases.jsonl"
+CLAIM_BLIND_CONFIGS = frozenset({"NO_CLAIM", "CITE_SCOPE_RAG", "CITE_ANCHOR_RAG"})
+PRIMARY_CLAIM_CONFIG = "FULL_CLAIM_NO_PRIVILEGE"
+EXCLUDED_PRIMARY_FAMILIES = frozenset({"negative_source_attribution"})
+HARD_FAMILIES = frozenset({"implicit_subject", "citation_only_multi_target"})
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -68,6 +74,20 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             json.dump(payload, stream, ensure_ascii=False, indent=2, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+def _atomic_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            for row in rows:
+                stream.write(json.dumps(row, ensure_ascii=False, sort_keys=True))
+                stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
@@ -222,6 +242,186 @@ def resolve_gold_chunks(
     }
 
 
+def _benign_leak_stage(stage: str) -> bool:
+    return "raw_hits_filtered" in stage or stage.endswith("_filtered")
+
+
+def _leak_failure_records(
+    *,
+    query_id: str,
+    configuration: str,
+    channels_used: list[str],
+    candidates: list[Any],
+    selected: list[dict[str, Any]],
+    trace: AblationTrace,
+) -> list[dict[str, Any]]:
+    """Hard-fail leakage for claim-blind configs; filtered raw hits are OK."""
+    failures: list[dict[str, Any]] = []
+
+    def add(
+        *,
+        stage: str,
+        object_id: str | None = None,
+        object_type: str | None = None,
+        relation_type: str | None = None,
+    ) -> None:
+        failures.append(
+            {
+                "query_id": query_id,
+                "configuration": configuration,
+                "stage": stage,
+                "object_id": object_id,
+                "object_type": object_type,
+                "relation_type": relation_type,
+            }
+        )
+
+    for event in trace.claim_leakage:
+        stage = str(event.get("stage") or "")
+        if _benign_leak_stage(stage):
+            continue
+        add(
+            stage=stage,
+            object_id=event.get("object_id"),
+            object_type=event.get("object_type"),
+            relation_type=event.get("relation_type"),
+        )
+
+    if "subject_claim" in channels_used:
+        add(stage="channels_used", object_type="subject_claim")
+
+    for candidate in candidates:
+        object_type = getattr(candidate, "object_type", None)
+        channels = list(getattr(candidate, "channels", []) or [])
+        if is_claim_object_type(object_type):
+            add(
+                stage="selected_candidates",
+                object_id=getattr(candidate, "object_id", None),
+                object_type=object_type,
+            )
+        if "subject_claim" in channels:
+            add(
+                stage="selected_candidates",
+                object_id=getattr(candidate, "object_id", None),
+                object_type=object_type,
+                relation_type="subject_claim_channel",
+            )
+
+    for item in selected:
+        object_type = item.get("object_type")
+        channels = list(item.get("channels") or [])
+        if is_claim_object_type(object_type if isinstance(object_type, str) else None):
+            add(
+                stage="final_candidates",
+                object_id=item.get("object_id"),
+                object_type=object_type if isinstance(object_type, str) else None,
+            )
+        if "subject_claim" in channels:
+            add(
+                stage="final_candidates",
+                object_id=item.get("object_id"),
+                object_type=object_type if isinstance(object_type, str) else None,
+                relation_type="subject_claim_channel",
+            )
+
+    for relation in trace.graph_traversal:
+        if relation.get("relation_type") == RelationType.ABOUT.value:
+            add(
+                stage="graph_traversal",
+                object_id=relation.get("source_canonical_id"),
+                relation_type=RelationType.ABOUT.value,
+            )
+
+    for seed in trace.graph_seeds:
+        object_type = seed.get("object_type")
+        if is_claim_object_type(object_type if isinstance(object_type, str) else None):
+            add(
+                stage="graph_seed",
+                object_id=seed.get("object_id"),
+                object_type=object_type if isinstance(object_type, str) else None,
+            )
+
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for item in failures:
+        key = tuple(sorted(item.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
+def _summarize_raw_hits(raw_hits: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for channel, hits in raw_hits.items():
+        summary[channel] = {
+            "count": len(hits),
+            "object_types": sorted(
+                {
+                    str(item.get("object_type"))
+                    for item in hits
+                    if item.get("object_type")
+                }
+            ),
+            "sample_object_ids": [
+                item.get("object_id") for item in hits[:8] if item.get("object_id")
+            ],
+        }
+    return summary
+
+
+def _evidence_metrics(
+    *,
+    candidates: list[Any],
+    selected_chunk_ids: list[str],
+    corpus: CorpusView,
+    channel_candidate_ids: dict[str, list[str]],
+    channels_used: list[str],
+) -> dict[str, Any]:
+    # Digest cost is measured on final selected evidence that carries Claim text,
+    # not the entire candidate pool (pool digests inflate no-privilege runs).
+    digest_items: list[Any] = []
+    for item in candidates:
+        object_type = getattr(item, "object_type", "") or ""
+        channels = list(getattr(item, "channels", []) or [])
+        if object_type in {"claim", "claim_about"} or "subject_claim" in channels:
+            digest_items.append(item)
+    claim_digest_count = len(digest_items)
+    claim_digest_char_count = sum(
+        len(getattr(item, "text", "") or "") for item in digest_items
+    )
+
+    unique_chunk_ids = list(dict.fromkeys(selected_chunk_ids))
+    canonical_chars = 0
+    for chunk_id in unique_chunk_ids:
+        chunk = corpus.chunks.get(chunk_id)
+        if chunk is not None:
+            canonical_chars += len(chunk.text or "")
+
+    digest_payload: dict[str, Any] = {
+        "digest_candidate_count": 0,
+        "canonical_chunks_materialized": len(unique_chunk_ids),
+        "canonical_chars_materialized": canonical_chars,
+        "digest_prefilter_ratio": None,
+    }
+    if "subject_claim" in channels_used or channel_candidate_ids.get("subject_claim"):
+        claim_ids = list(dict.fromkeys(channel_candidate_ids.get("subject_claim") or []))
+        digest_payload["digest_candidate_count"] = len(claim_ids)
+        if claim_ids:
+            digest_payload["digest_prefilter_ratio"] = len(unique_chunk_ids) / len(
+                claim_ids
+            )
+
+    return {
+        "claim_digest_count": claim_digest_count,
+        "claim_digest_char_count": claim_digest_char_count,
+        "canonical_evidence_chunk_count": len(unique_chunk_ids),
+        "canonical_evidence_char_count": canonical_chars,
+        "digest_prefilter": digest_payload,
+    }
+
+
 async def claim_coverage_report(
     application: Application,
     *,
@@ -229,11 +429,15 @@ async def claim_coverage_report(
     facts: list[dict[str, Any]],
     work_ids: dict[str, str],
     gold_by_fact: dict[str, dict[str, Any]],
+    corpus: CorpusView,
 ) -> dict[str, Any]:
     covered: list[str] = []
-    missing: list[str] = []
-    wrong_about: list[str] = []
-    wrong_source: list[str] = []
+    failures: dict[str, list[str]] = {
+        "NO_CLAIM_EXTRACTED": [],
+        "WRONG_ABOUT_TARGET": [],
+        "RIGHT_ABOUT_WRONG_PROVENANCE": [],
+        "CLAIM_EXISTS_BUT_SOURCE_CHUNK_MISSING": [],
+    }
     for fact in facts:
         fact_id = str(fact["id"])
         gold = gold_by_fact[fact_id]
@@ -247,33 +451,65 @@ async def claim_coverage_report(
             depth=1,
             limit=500,
         )
+        all_core_targets = [work_ids[key] for key in CORE_PAPERS]
+        broad = await application.services.retrieval.compat.incoming_typed_relations(
+            all_core_targets,
+            dataset_name=dataset,
+            relation_type=RelationType.ABOUT.value,
+            depth=1,
+            limit=500,
+        )
         matched_about = False
         matched_provenance = False
         wrong_target_hit = False
+        right_about_missing_chunks = False
+        right_about_wrong_chunks = False
         for relation in relations:
             if relation.source_work_id != source_work_id:
                 continue
             if relation.target_canonical_id not in target_ids:
-                wrong_target_hit = True
                 continue
             matched_about = True
-            if gold_chunks.intersection(relation.source_chunk_ids):
+            chunk_ids = list(relation.source_chunk_ids or [])
+            present = [chunk_id for chunk_id in chunk_ids if chunk_id in corpus.chunks]
+            missing = [
+                chunk_id for chunk_id in chunk_ids if chunk_id not in corpus.chunks
+            ]
+            if gold_chunks.intersection(present):
                 matched_provenance = True
                 break
+            if missing and not present:
+                right_about_missing_chunks = True
+            else:
+                right_about_wrong_chunks = True
+        if not matched_about:
+            for relation in broad:
+                if relation.source_work_id != source_work_id:
+                    continue
+                if relation.target_canonical_id not in target_ids:
+                    wrong_target_hit = True
+                    break
         if matched_provenance:
             covered.append(fact_id)
         elif not matched_about:
-            missing.append(fact_id)
-            if wrong_target_hit:
-                wrong_about.append(fact_id)
+            reason = "WRONG_ABOUT_TARGET" if wrong_target_hit else "NO_CLAIM_EXTRACTED"
+            failures[reason].append(fact_id)
+        elif right_about_missing_chunks and not right_about_wrong_chunks:
+            failures["CLAIM_EXISTS_BUT_SOURCE_CHUNK_MISSING"].append(fact_id)
         else:
-            wrong_source.append(fact_id)
+            failures["RIGHT_ABOUT_WRONG_PROVENANCE"].append(fact_id)
     total = len(facts)
     return {
         "covered_fact_ids": covered,
-        "missing_claim_fact_ids": missing,
-        "wrong_about_target_fact_ids": wrong_about,
-        "wrong_source_provenance_fact_ids": wrong_source,
+        "failure_reasons": failures,
+        "missing_claim_fact_ids": [
+            *failures["NO_CLAIM_EXTRACTED"],
+            *failures["WRONG_ABOUT_TARGET"],
+            *failures["RIGHT_ABOUT_WRONG_PROVENANCE"],
+            *failures["CLAIM_EXISTS_BUT_SOURCE_CHUNK_MISSING"],
+        ],
+        "wrong_about_target_fact_ids": failures["WRONG_ABOUT_TARGET"],
+        "wrong_source_provenance_fact_ids": failures["RIGHT_ABOUT_WRONG_PROVENANCE"],
         "claim_coverage": (len(covered) / total) if total else 0.0,
     }
 
@@ -283,9 +519,31 @@ async def export_manual_review(
     *,
     dataset: str,
     work_ids: dict[str, str],
-) -> list[dict[str, Any]]:
+    gold_by_fact: dict[str, dict[str, Any]],
+    facts: list[dict[str, Any]],
+) -> dict[str, Any]:
     core_ids = [work_ids[key] for key in CORE_PAPERS]
-    records: dict[str, dict[str, Any]] = {}
+    fixture_chunk_ids = {
+        chunk_id
+        for gold in gold_by_fact.values()
+        for chunk_id in gold.get("gold_chunk_ids") or []
+    }
+    fixture_pairs: set[tuple[str, str]] = set()
+    for fact in facts:
+        source = work_ids.get(str(fact["source_work"]))
+        if source is None:
+            continue
+        for target_key in _about_targets(fact):
+            target = work_ids.get(target_key)
+            if target is not None:
+                fixture_pairs.add((source, target))
+
+    edges: list[dict[str, Any]] = []
+    claim_ids: set[str] = set()
+    source_chunks: set[str] = set()
+    claims_by_chunk: dict[str, set[str]] = defaultdict(set)
+    edges_by_claim: dict[str, int] = defaultdict(int)
+
     for target_id in core_ids:
         relations = await application.services.retrieval.compat.incoming_typed_relations(
             [target_id],
@@ -298,19 +556,51 @@ async def export_manual_review(
             if relation.source_work_id not in core_ids:
                 continue
             claim_id = relation.source_canonical_id
-            current = records.get(claim_id)
-            subjects = list(current["subject_work_ids"] if current else [])
-            if target_id not in subjects:
-                subjects.append(target_id)
-            records[claim_id] = {
-                "claim_id": claim_id,
-                "claim_text": relation.text,
-                "source_work_id": relation.source_work_id,
-                "subject_work_ids": subjects,
-                "source_chunk_ids": list(relation.source_chunk_ids),
-                "roles": list(relation.roles),
-            }
-    return sorted(records.values(), key=lambda item: item["claim_id"])
+            claim_ids.add(claim_id)
+            edges_by_claim[claim_id] += 1
+            chunk_ids = list(relation.source_chunk_ids or [])
+            for chunk_id in chunk_ids:
+                source_chunks.add(chunk_id)
+                claims_by_chunk[chunk_id].add(claim_id)
+            in_fixture = (
+                (relation.source_work_id, relation.target_canonical_id) in fixture_pairs
+                and bool(set(chunk_ids).intersection(fixture_chunk_ids))
+            )
+            edges.append(
+                {
+                    "claim_id": claim_id,
+                    "claim_text": relation.text,
+                    "source_work_id": relation.source_work_id,
+                    "subject_work_id": relation.target_canonical_id,
+                    "source_chunk_ids": chunk_ids,
+                    "roles": list(relation.roles),
+                    "review_status": "FIXTURE_COVERED" if in_fixture else "UNREVIEWED",
+                }
+            )
+
+    claims_per_source_chunk = (
+        (sum(len(items) for items in claims_by_chunk.values()) / len(claims_by_chunk))
+        if claims_by_chunk
+        else 0.0
+    )
+    about_edges_per_claim = (
+        (sum(edges_by_claim.values()) / len(edges_by_claim)) if edges_by_claim else 0.0
+    )
+    return {
+        "unique_claim_count": len(claim_ids),
+        "unique_about_edge_count": len(edges),
+        "unique_source_chunk_count": len(source_chunks),
+        "claims_per_source_chunk": claims_per_source_chunk,
+        "about_edges_per_claim": about_edges_per_claim,
+        "edges": sorted(
+            edges,
+            key=lambda item: (
+                item["review_status"] != "UNREVIEWED",
+                item["claim_id"],
+                item["subject_work_id"],
+            ),
+        ),
+    }
 
 
 def _fact_hit(selected_chunk_ids: list[str], gold_chunk_ids: list[str]) -> bool:
@@ -354,13 +644,11 @@ def _score_case(
         for fact_id in forbidden
         if _fact_hit(selected_chunk_ids, gold_by_fact[fact_id]["gold_chunk_ids"])
     ]
+    required = len(expected)
+    fact_recall = (len(matched) / required) if required else 1.0
     if _case_is_min_coverage(case):
-        required = len(expected)
-        fact_recall = (len(matched) / required) if required else 1.0
         success = len(matched) >= required and not forbidden_hits
     else:
-        required = len(expected)
-        fact_recall = (len(matched) / required) if required else 1.0
         success = len(missed) == 0 and not forbidden_hits
 
     expected_sources = case.get("expected_source_works") or case.get(
@@ -373,10 +661,10 @@ def _score_case(
         if case.get("expected_source_works_min"):
             source_ok = mapped.issubset(observed)
         else:
-            source_ok = observed == mapped or mapped == observed
-            # Allow extra evidence from the same expected sources only.
-            source_ok = bool(observed) and observed.issubset(mapped) and mapped.issubset(
-                observed
+            source_ok = (
+                bool(observed)
+                and observed.issubset(mapped)
+                and mapped.issubset(observed)
             )
 
     return {
@@ -395,39 +683,462 @@ def _score_case(
     }
 
 
+def _primary_rows(
+    rows: list[dict[str, Any]], *, pool: int | None = None
+) -> list[dict[str, Any]]:
+    selected = []
+    for row in rows:
+        if row.get("family") in EXCLUDED_PRIMARY_FAMILIES:
+            continue
+        if pool is not None and row.get("candidate_pool") != pool:
+            continue
+        selected.append(row)
+    return selected
+
+
+def _rows_by_config(
+    rows: list[dict[str, Any]], *, pool: int
+) -> dict[str, list[dict[str, Any]]]:
+    by_config: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in _primary_rows(rows, pool=pool):
+        by_config[row["configuration"]].append(row)
+    return by_config
+
+
+def _mean(values: list[float]) -> float:
+    return (sum(values) / len(values)) if values else 0.0
+
+
+def _unique_rescue(
+    left_rows: dict[str, dict[str, Any]],
+    right_rows: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    rescued: list[str] = []
+    universe: set[str] = set()
+    for query_id, left in left_rows.items():
+        right = right_rows.get(query_id)
+        if right is None:
+            continue
+        left_matched = set(left["matched_fact_ids"])
+        right_matched = set(right["matched_fact_ids"])
+        universe.update(left["matched_fact_ids"])
+        universe.update(left["missed_fact_ids"])
+        rescued.extend(sorted(left_matched - right_matched))
+    unique_ids = sorted(set(rescued))
+    rate = (len(unique_ids) / len(universe)) if universe else 0.0
+    return {
+        "unique_claim_rescue_count": len(unique_ids),
+        "unique_claim_rescue_rate": rate,
+        "unique_claim_rescue_fact_ids": unique_ids,
+    }
+
+
+def _claim_redundancy(
+    claim_rows: dict[str, dict[str, Any]],
+    baseline_rows: dict[str, dict[str, Any]],
+    *,
+    gold_by_fact: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    claim_supported: set[str] = set()
+    also_baseline: set[str] = set()
+    for query_id, claim in claim_rows.items():
+        baseline = baseline_rows.get(query_id)
+        if baseline is None:
+            continue
+        subject_chunks = set(
+            claim.get("channel_candidate_chunk_ids", {}).get("subject_claim", [])
+        )
+        for fact_id in claim["matched_fact_ids"]:
+            gold_chunks = set(gold_by_fact.get(fact_id, {}).get("gold_chunk_ids") or [])
+            via_claim = bool(subject_chunks.intersection(gold_chunks))
+            if not via_claim and "subject_claim" not in (
+                claim.get("channels_used") or []
+            ):
+                # Still count matched facts under claim-enabled config when the
+                # subject_claim channel pool was empty/unavailable.
+                via_claim = not subject_chunks
+            if not via_claim:
+                continue
+            claim_supported.add(fact_id)
+            if fact_id in baseline["matched_fact_ids"]:
+                also_baseline.add(fact_id)
+    rate = (len(also_baseline) / len(claim_supported)) if claim_supported else 0.0
+    return {
+        "claim_supported_gold_facts": sorted(claim_supported),
+        "also_found_by_baseline": sorted(also_baseline),
+        "claim_redundancy_rate": rate,
+    }
+
+
+def _privilege_delta(
+    full_rows: dict[str, dict[str, Any]],
+    no_priv_rows: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    improved: list[dict[str, Any]] = []
+    regressed: list[dict[str, Any]] = []
+    unchanged: list[str] = []
+    for query_id, full in full_rows.items():
+        no_priv = no_priv_rows.get(query_id)
+        if no_priv is None:
+            continue
+        full_recall = float(full["fact_recall"])
+        no_priv_recall = float(no_priv["fact_recall"])
+        payload = {
+            "query_id": query_id,
+            "FULL_CURRENT_fact_recall": full_recall,
+            "FULL_CLAIM_NO_PRIVILEGE_fact_recall": no_priv_recall,
+            "FULL_CURRENT_matched_fact_ids": full["matched_fact_ids"],
+            "FULL_CLAIM_NO_PRIVILEGE_matched_fact_ids": no_priv["matched_fact_ids"],
+            "FULL_CURRENT_chunk_ids": full.get("final_selected_chunk_ids"),
+            "FULL_CLAIM_NO_PRIVILEGE_chunk_ids": no_priv.get(
+                "final_selected_chunk_ids"
+            ),
+            "claim_ids_no_privilege": sorted(
+                {
+                    claim_id
+                    for item in no_priv.get("rank_trace", {}).get("selected") or []
+                    for claim_id in (item.get("claim_ids") or [])
+                }
+            ),
+        }
+        if no_priv_recall > full_recall + 1e-9:
+            improved.append(payload)
+        elif no_priv_recall < full_recall - 1e-9:
+            regressed.append(payload)
+        else:
+            unchanged.append(query_id)
+    return {
+        "cases_improved_without_privilege": improved,
+        "cases_regressed_without_privilege": regressed,
+        "unchanged": unchanged,
+    }
+
+
+def _cite_equality(
+    scope_rows: dict[str, dict[str, Any]],
+    anchor_rows: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    candidate_equal = 0
+    final_equal = 0
+    recall_equal = 0
+    compared = 0
+    unique_rescue = _unique_rescue(anchor_rows, scope_rows)
+    for query_id, scope in scope_rows.items():
+        anchor = anchor_rows.get(query_id)
+        if anchor is None:
+            continue
+        compared += 1
+        if set(scope.get("candidate_chunk_ids_before_rerank") or []) == set(
+            anchor.get("candidate_chunk_ids_before_rerank") or []
+        ):
+            candidate_equal += 1
+        if set(scope.get("final_selected_chunk_ids") or []) == set(
+            anchor.get("final_selected_chunk_ids") or []
+        ):
+            final_equal += 1
+        if abs(float(scope["fact_recall"]) - float(anchor["fact_recall"])) < 1e-12:
+            recall_equal += 1
+    return {
+        "citation_anchor_unique_rescue": unique_rescue["unique_claim_rescue_count"],
+        "citation_anchor_unique_rescue_fact_ids": unique_rescue[
+            "unique_claim_rescue_fact_ids"
+        ],
+        "candidate_set_equality_rate": (
+            candidate_equal / compared if compared else 1.0
+        ),
+        "final_evidence_equality_rate": (final_equal / compared if compared else 1.0),
+        "fact_recall_equality_rate": (recall_equal / compared if compared else 1.0),
+        "cases_compared": compared,
+    }
+
+
 def _recommendation(
     *,
-    unique_rescue_rate: float,
-    claim_only_fraction: float,
-    recall_gap_pp: float,
-    evidence_reduction: float | None,
+    unique_rescue_vs_scope: float,
+    unique_rescue_count: int,
+    redundancy_vs_scope: float,
+    no_priv_recall: float,
+    cite_scope_recall: float,
+    full_current_recall: float,
+    claim_only_recall: float,
+    no_claim_recall: float,
+    cite_anchor_equal: bool,
     claim_coverage: float,
-    guidance: dict[str, Any],
-) -> str:
-    keep = guidance.get("keep_signal") or {}
-    remove = guidance.get("remove_from_retrieval_signal") or {}
-    short = guidance.get("claim_only_short_circuit_signal") or {}
-    if unique_rescue_rate * 100 >= float(
-        keep.get("unique_claim_rescue_percentage_points_gte", 10)
+) -> dict[str, Any]:
+    notes: list[str] = []
+    recall_gap = no_priv_recall - cite_scope_recall
+    if claim_only_recall + 1e-9 < min(no_priv_recall, cite_scope_recall) * 0.85:
+        notes.append(
+            "CLAIM_ONLY much lower than Claim/CITE baselines; Claim coverage "
+            "insufficient to short-circuit Chunk RAG."
+        )
+    if no_priv_recall > full_current_recall + 1e-9:
+        notes.append(
+            "FULL_CLAIM_NO_PRIVILEGE > FULL_CURRENT; privileged prepend may harm ranking."
+        )
+    if cite_anchor_equal:
+        notes.append(
+            "CITE_SCOPE_RAG == CITE_ANCHOR_RAG; citation_anchor_unique_rescue = 0."
+        )
+    if no_claim_recall + 0.05 < cite_scope_recall:
+        notes.append(
+            "NO_CLAIM << CITE_SCOPE_RAG; subject-aware source narrowing helps, "
+            "but is not itself proof of ABOUT necessity."
+        )
+
+    if unique_rescue_count > 0 and (
+        recall_gap >= 0.05 or unique_rescue_vs_scope >= 0.08
     ):
-        return "KEEP"
-    if evidence_reduction is not None and evidence_reduction * 100 >= float(
-        keep.get("or_evidence_token_reduction_percent_gte", 30)
+        decision = "KEEP"
+        notes.append(
+            "FULL_CLAIM_NO_PRIVILEGE clearly beats CITE_SCOPE_RAG with unique rescue."
+        )
+    elif unique_rescue_count == 0 and redundancy_vs_scope >= 0.8 and (
+        abs(recall_gap) <= 0.03 or no_priv_recall <= cite_scope_recall + 0.03
     ):
-        return "KEEP"
-    if claim_only_fraction >= float(
-        short.get("claim_only_fact_recall_fraction_of_full_gte", 0.97)
+        decision = "REMOVE_FROM_RETRIEVAL"
+        notes.append(
+            "No unique Claim rescue vs CITE_SCOPE, high redundancy, and "
+            "FULL_CLAIM_NO_PRIVILEGE does not beat CITE_SCOPE; Claim as recall "
+            "layer is not necessary (consider optional semantic cache later)."
+        )
+    elif (
+        no_priv_recall > no_claim_recall + 0.03
+        and unique_rescue_count == 0
+        and abs(recall_gap) <= 0.05
     ):
-        return "REDUCE"
-    if abs(recall_gap_pp) <= float(
-        remove.get("fact_recall_gap_vs_CITE_ANCHOR_RAG_percentage_points_lte", 2)
-    ) and (evidence_reduction is None or evidence_reduction < 0.1):
-        return "REMOVE_FROM_RETRIEVAL"
-    if claim_coverage < float(keep.get("claim_coverage_gte", 0.85)):
-        return "INSUFFICIENT_EVIDENCE"
-    if unique_rescue_rate > 0:
-        return "REDUCE"
-    return "INSUFFICIENT_EVIDENCE"
+        decision = "REDUCE"
+        notes.append("Claim helps vs NO_CLAIM but not vs CITE_SCOPE; prefer REDUCE.")
+    elif no_priv_recall > full_current_recall + 1e-9 and unique_rescue_count == 0:
+        decision = "REDUCE"
+        notes.append(
+            "Privilege appears harmful and Claim lacks unique rescue vs CITE_SCOPE."
+        )
+    elif claim_coverage < 0.7:
+        decision = "INSUFFICIENT_EVIDENCE"
+        notes.append("Claim coverage too low for a firm KEEP/REMOVE call.")
+    else:
+        decision = "INSUFFICIENT_EVIDENCE"
+        notes.append("Results are ambiguous under corrected fairness metrics.")
+
+    return {"recommendation": decision, "notes": notes}
+
+
+def _pool_saturation(rows: list[dict[str, Any]], pools: list[int]) -> bool:
+    if len(pools) < 2:
+        return False
+    by_config_pool: dict[str, dict[int, float]] = defaultdict(dict)
+    for row in _primary_rows(rows):
+        by_config_pool[row["configuration"]][int(row["candidate_pool"])] = float(
+            row["fact_recall"]
+        )
+    configs = sorted(by_config_pool)
+    if not configs:
+        return False
+    for config_id in configs:
+        recalls = [by_config_pool[config_id].get(pool) for pool in pools]
+        if any(value is None for value in recalls):
+            return False
+        if len({round(value, 12) for value in recalls if value is not None}) != 1:
+            return False
+    return True
+
+
+def _aggregate(
+    rows: list[dict[str, Any]],
+    *,
+    pools: list[int],
+    primary_pool: int,
+    fact_meta: dict[str, dict[str, Any]],
+    gold_by_fact: dict[str, dict[str, Any]],
+    claim_coverage: float,
+) -> dict[str, Any]:
+    by_pool: dict[int, dict[str, Any]] = {}
+    for pool in pools:
+        by_config = _rows_by_config(rows, pool=pool)
+        config_metrics: dict[str, Any] = {}
+        for config_id, items in by_config.items():
+            config_metrics[config_id] = {
+                "fact_recall_at_final_k": _mean(
+                    [float(item["fact_recall"]) for item in items]
+                ),
+                "gold_evidence_recall_at_candidate_pool": _mean(
+                    [
+                        float(item["gold_evidence_recall_at_candidate_pool"])
+                        for item in items
+                    ]
+                ),
+                "mean_canonical_evidence_chunk_count": _mean(
+                    [float(item["canonical_evidence_chunk_count"]) for item in items]
+                ),
+                "mean_canonical_evidence_char_count": _mean(
+                    [float(item["canonical_evidence_char_count"]) for item in items]
+                ),
+                "mean_claim_digest_count": _mean(
+                    [float(item["claim_digest_count"]) for item in items]
+                ),
+                "mean_claim_digest_char_count": _mean(
+                    [float(item["claim_digest_char_count"]) for item in items]
+                ),
+                "case_count": len(items),
+            }
+        by_pool[pool] = config_metrics
+
+    primary = _rows_by_config(rows, pool=primary_pool)
+    index = {
+        config_id: {row["query_id"]: row for row in items}
+        for config_id, items in primary.items()
+    }
+    claim_rows = index.get(PRIMARY_CLAIM_CONFIG, {})
+    cite_scope = index.get("CITE_SCOPE_RAG", {})
+    cite_anchor = index.get("CITE_ANCHOR_RAG", {})
+    full_current = index.get("FULL_CURRENT", {})
+    claim_only = index.get("CLAIM_ONLY", {})
+    no_claim = index.get("NO_CLAIM", {})
+
+    rescue_scope = _unique_rescue(claim_rows, cite_scope)
+    rescue_anchor = _unique_rescue(claim_rows, cite_anchor)
+    redundancy_scope = _claim_redundancy(
+        claim_rows, cite_scope, gold_by_fact=gold_by_fact
+    )
+    redundancy_anchor = _claim_redundancy(
+        claim_rows, cite_anchor, gold_by_fact=gold_by_fact
+    )
+    privilege = _privilege_delta(full_current, claim_rows)
+    cite_eq = _cite_equality(cite_scope, cite_anchor)
+
+    by_family: dict[str, Any] = {}
+    families = sorted(
+        {
+            row["family"]
+            for items in primary.values()
+            for row in items
+            if row.get("family")
+        }
+    )
+    for family in families:
+        family_metrics: dict[str, Any] = {"case_count": 0}
+        for config_id, items in primary.items():
+            subset = [row for row in items if row["family"] == family]
+            if config_id == PRIMARY_CLAIM_CONFIG:
+                family_metrics["case_count"] = len(subset)
+            family_metrics[config_id] = {
+                "fact_recall": _mean([float(row["fact_recall"]) for row in subset]),
+                "gold_evidence_recall_at_candidate_pool": _mean(
+                    [
+                        float(row["gold_evidence_recall_at_candidate_pool"])
+                        for row in subset
+                    ]
+                ),
+                "mean_canonical_evidence_char_count": _mean(
+                    [float(row["canonical_evidence_char_count"]) for row in subset]
+                ),
+            }
+        by_family[family] = family_metrics
+
+    hard_family_focus = {
+        family: by_family[family] for family in HARD_FAMILIES if family in by_family
+    }
+
+    expected_universe = sorted(
+        {
+            fact_id
+            for row in claim_rows.values()
+            for fact_id in row["matched_fact_ids"] + row["missed_fact_ids"]
+        }
+    )
+    by_mention: dict[str, Any] = defaultdict(lambda: {"rescued": 0, "facts": 0})
+    by_priority: dict[str, Any] = defaultdict(lambda: {"rescued": 0, "facts": 0})
+    rescued_ids = set(rescue_scope["unique_claim_rescue_fact_ids"])
+    for fact_id in expected_universe:
+        meta = fact_meta.get(fact_id) or {}
+        mention = str(meta.get("target_mention_mode") or "unknown")
+        priority = str(meta.get("necessity_priority") or "unknown")
+        by_mention[mention]["facts"] += 1
+        by_priority[priority]["facts"] += 1
+        if fact_id in rescued_ids:
+            by_mention[mention]["rescued"] += 1
+            by_priority[priority]["rescued"] += 1
+
+    primary_metrics = by_pool.get(primary_pool, {})
+    no_priv_recall = primary_metrics.get(PRIMARY_CLAIM_CONFIG, {}).get(
+        "fact_recall_at_final_k", 0.0
+    )
+    cite_scope_recall = primary_metrics.get("CITE_SCOPE_RAG", {}).get(
+        "fact_recall_at_final_k", 0.0
+    )
+    full_recall = primary_metrics.get("FULL_CURRENT", {}).get(
+        "fact_recall_at_final_k", 0.0
+    )
+    claim_only_recall = primary_metrics.get("CLAIM_ONLY", {}).get(
+        "fact_recall_at_final_k", 0.0
+    )
+    no_claim_recall = primary_metrics.get("NO_CLAIM", {}).get(
+        "fact_recall_at_final_k", 0.0
+    )
+    recommendation = _recommendation(
+        unique_rescue_vs_scope=float(rescue_scope["unique_claim_rescue_rate"]),
+        unique_rescue_count=int(rescue_scope["unique_claim_rescue_count"]),
+        redundancy_vs_scope=float(redundancy_scope["claim_redundancy_rate"]),
+        no_priv_recall=float(no_priv_recall),
+        cite_scope_recall=float(cite_scope_recall),
+        full_current_recall=float(full_recall),
+        claim_only_recall=float(claim_only_recall),
+        no_claim_recall=float(no_claim_recall),
+        cite_anchor_equal=(
+            cite_eq["citation_anchor_unique_rescue"] == 0
+            and cite_eq["fact_recall_equality_rate"] >= 0.999
+        ),
+        claim_coverage=claim_coverage,
+    )
+
+    return {
+        "by_configuration_by_pool": {
+            str(pool): metrics for pool, metrics in by_pool.items()
+        },
+        "by_configuration": primary_metrics,
+        "by_family": by_family,
+        "hard_family_focus": hard_family_focus,
+        "by_target_mention_mode": dict(by_mention),
+        "by_necessity_priority": dict(by_priority),
+        "unique_claim_rescue_vs_cite_scope": rescue_scope,
+        "unique_claim_rescue_vs_cite_anchor": rescue_anchor,
+        "claim_redundancy_vs_cite_scope": redundancy_scope,
+        "claim_redundancy_vs_cite_anchor": redundancy_anchor,
+        "privilege_comparison": privilege,
+        "cite_scope_vs_cite_anchor": cite_eq,
+        "candidate_pool_saturation_observed": _pool_saturation(rows, pools),
+        "evidence_input": {
+            config_id: {
+                "mean_claim_digest_char_count": metrics.get(
+                    "mean_claim_digest_char_count", 0.0
+                ),
+                "mean_canonical_evidence_chunk_count": metrics.get(
+                    "mean_canonical_evidence_chunk_count", 0.0
+                ),
+                "mean_canonical_evidence_char_count": metrics.get(
+                    "mean_canonical_evidence_char_count", 0.0
+                ),
+            }
+            for config_id, metrics in primary_metrics.items()
+        },
+        "recommendation": recommendation["recommendation"],
+        "recommendation_notes": recommendation["notes"],
+        "recommendation_inputs": {
+            "FULL_CLAIM_NO_PRIVILEGE_fact_recall": no_priv_recall,
+            "CITE_SCOPE_RAG_fact_recall": cite_scope_recall,
+            "FULL_CURRENT_fact_recall": full_recall,
+            "CLAIM_ONLY_fact_recall": claim_only_recall,
+            "NO_CLAIM_fact_recall": no_claim_recall,
+            "unique_claim_rescue_rate_vs_cite_scope": rescue_scope[
+                "unique_claim_rescue_rate"
+            ],
+            "claim_redundancy_rate_vs_cite_scope": redundancy_scope[
+                "claim_redundancy_rate"
+            ],
+            "claim_coverage": claim_coverage,
+        },
+    }
 
 
 async def _run_one(
@@ -440,6 +1151,7 @@ async def _run_one(
     top_k: int,
     work_ids: dict[str, str],
     gold_by_fact: dict[str, dict[str, Any]],
+    corpus: CorpusView,
     with_synthesis: bool,
 ) -> dict[str, Any]:
     policy = policy_from_spec(
@@ -458,7 +1170,10 @@ async def _run_one(
     )
     with ablation_policy_context(policy) as trace:
         response = await application.services.retrieval.query(request)
-    selected_chunk_ids = [item.chunk_id for item in response.evidence]
+
+    selected_chunk_ids = list(trace.selected_chunk_ids) or [
+        item.chunk_id for item in response.evidence
+    ]
     pool_chunk_ids = list(trace.fused_before_rerank_chunk_ids)
     source_work_ids = [
         item.source_work_id for item in response.evidence if item.source_work_id
@@ -471,19 +1186,41 @@ async def _run_one(
         source_work_ids=source_work_ids,
         work_ids=work_ids,
     )
-    leak_errors: list[str] = []
-    if config["id"] == "NO_CLAIM":
-        if "subject_claim" in response.channels_used:
-            leak_errors.append("NO_CLAIM leaked subject_claim channel")
-        if "subject_about_retrieval" in response.stages:
-            leak_errors.append("NO_CLAIM ran subject_about_retrieval")
-        for candidate in response.candidates:
-            if candidate.object_type == "claim" or "claim_about" in candidate.object_type:
-                leak_errors.append(
-                    f"NO_CLAIM leaked claim object_type={candidate.object_type}"
-                )
-                break
-    evidence_chars = sum(len(item.text or "") for item in response.evidence)
+    evidence_metrics = _evidence_metrics(
+        candidates=list(response.candidates),
+        selected_chunk_ids=selected_chunk_ids,
+        corpus=corpus,
+        channel_candidate_ids=dict(trace.channel_candidate_ids),
+        channels_used=list(response.channels_used),
+    )
+    claim_leakage: list[dict[str, Any]] = []
+    if config["id"] in CLAIM_BLIND_CONFIGS:
+        claim_leakage = _leak_failure_records(
+            query_id=str(case["id"]),
+            configuration=str(config["id"]),
+            channels_used=list(response.channels_used),
+            candidates=list(response.candidates),
+            selected=list(trace.selected_candidates),
+            trace=trace,
+        )
+
+    rank_trace = {
+        "raw_hits": _summarize_raw_hits(dict(trace.raw_hits)),
+        "raw_hits_full": dict(trace.raw_hits),
+        "channel_candidate_ids": dict(trace.channel_candidate_ids),
+        "channel_candidate_chunk_ids": dict(trace.channel_candidate_chunk_ids),
+        "fused_candidates": list(trace.fused_candidates),
+        "post_dedup_chunk_ids": list(trace.post_dedup_chunk_ids),
+        "duplicate_chunk_candidates_before_dedup": (
+            trace.duplicate_chunk_candidates_before_dedup
+        ),
+        "unique_chunks_after_dedup": trace.unique_chunks_after_dedup,
+        "reranked_chunk_ids": list(trace.reranked_chunk_ids),
+        "selected": list(trace.selected_candidates),
+        "graph_seeds": list(trace.graph_seeds),
+        "graph_traversal": list(trace.graph_traversal),
+        "claim_leakage_events": list(trace.claim_leakage),
+    }
     return {
         "configuration": config["id"],
         "candidate_pool": pool,
@@ -498,208 +1235,51 @@ async def _run_one(
         "candidate_channels": trace.fused_candidate_channels,
         "candidate_ranks": trace.fused_candidate_ranks,
         "channel_candidate_chunk_ids": trace.channel_candidate_chunk_ids,
+        "channel_candidate_ids": trace.channel_candidate_ids,
         "reranked_chunk_ids": list(trace.reranked_chunk_ids),
         "final_selected_chunk_ids": selected_chunk_ids,
         "source_work_ids": source_work_ids,
-        "chunk_count": len(response.evidence),
-        "total_text_chars": evidence_chars,
         "retrieval_latency_ms": trace.retrieval_latency_ms,
         "rerank_latency_ms": trace.rerank_latency_ms,
         "provenance_complete": response.provenance_complete,
         "citation_source_work_ids": list(trace.citation_source_work_ids),
-        "no_claim_leak_errors": leak_errors,
+        "claim_leakage": claim_leakage,
+        "rank_trace": rank_trace,
+        **evidence_metrics,
         **score,
     }
 
 
-def _aggregate(
-    rows: list[dict[str, Any]],
-    *,
-    fact_meta: dict[str, dict[str, Any]],
-    gold_by_fact: dict[str, dict[str, Any]],
-    guidance: dict[str, Any],
-    claim_coverage: float,
-) -> dict[str, Any]:
-    primary_pool = 40
-    by_config: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
-        if (
-            row["candidate_pool"] == primary_pool
-            and row.get("family") != "negative_source_attribution"
-            and row.get("family") != "planner"
-        ):
-            by_config[row["configuration"]].append(row)
-
-    def mean_recall(items: list[dict[str, Any]]) -> float:
-        if not items:
-            return 0.0
-        return sum(float(item["fact_recall"]) for item in items) / len(items)
-
-    config_metrics = {
-        config_id: {
-            "fact_recall_at_final_k": mean_recall(items),
-            "gold_evidence_recall_at_candidate_pool": (
-                sum(float(item["gold_evidence_recall_at_candidate_pool"]) for item in items)
-                / len(items)
-                if items
-                else 0.0
-            ),
-            "mean_chunk_count": (
-                sum(item["chunk_count"] for item in items) / len(items) if items else 0.0
-            ),
-            "mean_text_chars": (
-                sum(item["total_text_chars"] for item in items) / len(items)
-                if items
-                else 0.0
-            ),
-            "case_count": len(items),
-        }
-        for config_id, items in by_config.items()
+def _reranker_state(settings: Any, runtime: dict[str, Any]) -> dict[str, Any]:
+    enabled = bool(settings.retrieval.rerank_enabled)
+    local_health = (
+        (runtime.get("local_inference") or {}).get("health")
+        if isinstance(runtime.get("local_inference"), dict)
+        else None
+    )
+    payload: dict[str, Any] = {
+        "reranker_enabled": enabled,
+        "production_reranker_configured": enabled,
+        "reranker_provider": "local_inference" if enabled else None,
+        "reranker_model": (
+            str(settings.local_inference.reranker_model_path) if enabled else None
+        ),
+        "local_inference_health": local_health,
+        "reranker_loaded": None,
+        "blocked_reranker": False,
     }
-
-    full_rows = {row["query_id"]: row for row in by_config.get("FULL_CURRENT", [])}
-    cite_rows = {row["query_id"]: row for row in by_config.get("CITE_ANCHOR_RAG", [])}
-    claim_only_rows = {
-        row["query_id"]: row for row in by_config.get("CLAIM_ONLY", [])
-    }
-
-    rescue_ids: list[str] = []
-    claim_supported: set[str] = set()
-    also_cite: set[str] = set()
-    for query_id, full in full_rows.items():
-        cite = cite_rows.get(query_id)
-        if cite is None:
-            continue
-        full_matched = set(full["matched_fact_ids"])
-        cite_matched = set(cite["matched_fact_ids"])
-        for fact_id in full_matched - cite_matched:
-            rescue_ids.append(fact_id)
-        claim_channels = full.get("channel_candidate_chunk_ids", {}).get(
-            "subject_claim", []
-        )
-        selected = set(full["final_selected_chunk_ids"])
-        # Facts matched by FULL and present via subject_claim channel pool.
-        for fact_id in full_matched:
-            claim_supported.add(fact_id)
-            if fact_id in cite_matched:
-                also_cite.add(fact_id)
-        _ = claim_channels
-        _ = selected
-
-    # Redefine claim_supported using subject_claim channel contribution when available.
-    claim_supported = set()
-    also_cite = set()
-    for query_id, full in full_rows.items():
-        cite = cite_rows.get(query_id)
-        if cite is None:
-            continue
-        subject_chunks = set(
-            full.get("channel_candidate_chunk_ids", {}).get("subject_claim", [])
-        )
-        for fact_id in full["matched_fact_ids"]:
-            gold_chunks = set(gold_by_fact.get(fact_id, {}).get("gold_chunk_ids") or [])
-            if subject_chunks and gold_chunks.intersection(subject_chunks):
-                claim_supported.add(fact_id)
-                if fact_id in cite["matched_fact_ids"]:
-                    also_cite.add(fact_id)
-
-    unique_ids = sorted(set(rescue_ids))
-    expected_fact_universe = sorted(
-        {
-            fact_id
-            for row in full_rows.values()
-            for fact_id in row["matched_fact_ids"] + row["missed_fact_ids"]
-        }
-    )
-    unique_rate = (
-        len(unique_ids) / len(expected_fact_universe) if expected_fact_universe else 0.0
-    )
-    redundancy = (
-        len(also_cite) / len(claim_supported) if claim_supported else 0.0
-    )
-
-    by_family: dict[str, Any] = {}
-    for family in sorted({row["family"] for row in by_config.get("FULL_CURRENT", [])}):
-        full_f = [row for row in by_config.get("FULL_CURRENT", []) if row["family"] == family]
-        cite_f = [
-            row for row in by_config.get("CITE_ANCHOR_RAG", []) if row["family"] == family
-        ]
-        by_family[family] = {
-            "FULL_CURRENT_fact_recall": mean_recall(full_f),
-            "CITE_ANCHOR_RAG_fact_recall": mean_recall(cite_f),
-            "case_count": len(full_f),
-        }
-
-    by_mention: dict[str, Any] = defaultdict(lambda: {"rescued": 0, "facts": 0})
-    by_priority: dict[str, Any] = defaultdict(lambda: {"rescued": 0, "facts": 0})
-    for fact_id in expected_fact_universe:
-        meta = fact_meta.get(fact_id) or {}
-        mention = str(meta.get("target_mention_mode") or "unknown")
-        priority = str(meta.get("necessity_priority") or "unknown")
-        by_mention[mention]["facts"] += 1
-        by_priority[priority]["facts"] += 1
-        if fact_id in unique_ids:
-            by_mention[mention]["rescued"] += 1
-            by_priority[priority]["rescued"] += 1
-
-    full_recall = config_metrics.get("FULL_CURRENT", {}).get("fact_recall_at_final_k", 0.0)
-    cite_recall = config_metrics.get("CITE_ANCHOR_RAG", {}).get(
-        "fact_recall_at_final_k", 0.0
-    )
-    claim_only_recall = config_metrics.get("CLAIM_ONLY", {}).get(
-        "fact_recall_at_final_k", 0.0
-    )
-    full_chars = config_metrics.get("FULL_CURRENT", {}).get("mean_text_chars", 0.0)
-    cite_chars = config_metrics.get("CITE_ANCHOR_RAG", {}).get("mean_text_chars", 0.0)
-    claim_chars = config_metrics.get("CLAIM_ONLY", {}).get("mean_text_chars", 0.0)
-    evidence_reduction = None
-    if full_chars and cite_chars and abs(full_recall - cite_recall) < 0.05:
-        # Compare CLAIM_ONLY vs FULL when recalls are comparable; else FULL vs CITE.
-        if abs(claim_only_recall - full_recall) < 0.05 and claim_chars:
-            evidence_reduction = max(0.0, (full_chars - claim_chars) / full_chars)
-        else:
-            evidence_reduction = max(0.0, (cite_chars - full_chars) / cite_chars)
-
-    recommendation = _recommendation(
-        unique_rescue_rate=unique_rate,
-        claim_only_fraction=(claim_only_recall / full_recall) if full_recall else 0.0,
-        recall_gap_pp=(full_recall - cite_recall) * 100,
-        evidence_reduction=evidence_reduction,
-        claim_coverage=claim_coverage,
-        guidance=guidance,
-    )
-    return {
-        "by_configuration": config_metrics,
-        "by_family": by_family,
-        "by_target_mention_mode": dict(by_mention),
-        "by_necessity_priority": dict(by_priority),
-        "unique_claim_rescue": {
-            "unique_claim_rescue_count": len(unique_ids),
-            "unique_claim_rescue_rate": unique_rate,
-            "unique_claim_rescue_fact_ids": unique_ids,
-        },
-        "claim_redundancy": {
-            "claim_supported_gold_facts": sorted(claim_supported),
-            "also_found_by_cite_anchor_rag": sorted(also_cite),
-            "claim_redundancy_rate": redundancy,
-        },
-        "evidence_input": {
-            "FULL_CURRENT_mean_chars": full_chars,
-            "CITE_ANCHOR_RAG_mean_chars": cite_chars,
-            "CLAIM_ONLY_mean_chars": claim_chars,
-            "estimated_evidence_reduction_vs_baseline": evidence_reduction,
-        },
-        "recommendation": recommendation,
-        "recommendation_inputs": {
-            "full_fact_recall": full_recall,
-            "cite_anchor_fact_recall": cite_recall,
-            "claim_only_fact_recall": claim_only_recall,
-            "unique_claim_rescue_rate": unique_rate,
-            "claim_redundancy_rate": redundancy,
-            "claim_coverage": claim_coverage,
-            "evidence_reduction": evidence_reduction,
-        },
-    }
+    if not enabled:
+        return payload
+    if isinstance(local_health, dict):
+        loaded = local_health.get("reranker_loaded")
+        if loaded is None:
+            loaded = local_health.get("reranker")
+        if isinstance(loaded, dict):
+            loaded = loaded.get("loaded")
+        payload["reranker_loaded"] = loaded
+        if loaded is False:
+            payload["blocked_reranker"] = True
+    return payload
 
 
 async def run(
@@ -731,6 +1311,24 @@ async def run(
     )
     application = create_application(settings)
     runtime = await _ensure_runtime(application)
+    reranker = _reranker_state(settings, runtime)
+    if reranker.get("blocked_reranker"):
+        report = {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "benchmark_status": "BLOCKED_RERANKER",
+            "run_metadata": {
+                "run_root": str(run_root.resolve()),
+                "dataset": dataset,
+                "runtime": runtime,
+                **reranker,
+            },
+            "hard_failures": ["production reranker enabled but not loaded"],
+        }
+        report_path = run_root / "logs" / "contracts" / REPORT_NAME
+        _atomic_json(report_path, report)
+        await application.aclose()
+        return report
+
     work_ids = _paper_work_ids(application)
     missing_papers = [key for key in CORE_PAPERS if key not in work_ids]
     if missing_papers:
@@ -767,10 +1365,12 @@ async def run(
         in {
             fact_id
             for case in queries["cases"]
-            for fact_id in _case_expected_facts(case) + list(case.get("forbidden_fact_ids") or [])
+            for fact_id in _case_expected_facts(case)
+            + list(case.get("forbidden_fact_ids") or [])
         }
     ]
     hard_failures: list[str] = []
+    claim_leakage_failures: list[dict[str, Any]] = []
     if unresolved:
         hard_failures.append(
             f"fixture_resolution_failure: unresolved gold chunks for {unresolved}"
@@ -782,13 +1382,19 @@ async def run(
         facts=[fact_by_id[fact_id] for fact_id in fact_meta],
         work_ids=work_ids,
         gold_by_fact=gold_by_fact,
+        corpus=corpus,
     )
     manual_review = await export_manual_review(
-        application, dataset=dataset, work_ids=work_ids
+        application,
+        dataset=dataset,
+        work_ids=work_ids,
+        gold_by_fact=gold_by_fact,
+        facts=[fact_by_id[fact_id] for fact_id in fact_meta],
     )
 
     report_path = run_root / "logs" / "contracts" / REPORT_NAME
     review_path = run_root / "logs" / "contracts" / REVIEW_NAME
+    cases_path = run_root / "logs" / "contracts" / CASES_NAME
     existing_rows: list[dict[str, Any]] = []
     if resume and report_path.is_file():
         previous = _load_json(report_path)
@@ -798,10 +1404,17 @@ async def run(
         for row in existing_rows
     }
 
-    pool_sizes = pools or list(spec["candidate_pool_sizes"])
+    pool_sizes = [int(item) for item in (pools or list(spec["candidate_pool_sizes"]))]
+    # Aggregation always covers every pool present in retained rows so resume
+    # with a subset (e.g. --pools 80 160) does not drop primary-pool metrics.
     top_k = int(spec["final_top_k"])
+    primary_pool = int(spec["primary_candidate_pool_size"])
     rows = list(existing_rows)
     warnings: list[str] = []
+    if not reranker["production_reranker_configured"]:
+        warnings.append(
+            "production_reranker_configured=false; results are no-reranker condition."
+        )
 
     try:
         for pool in pool_sizes:
@@ -823,13 +1436,20 @@ async def run(
                         top_k=top_k,
                         work_ids=work_ids,
                         gold_by_fact=gold_by_fact,
+                        corpus=corpus,
                         with_synthesis=with_synthesis,
                     )
-                    if row["no_claim_leak_errors"]:
-                        hard_failures.extend(row["no_claim_leak_errors"])
+                    if row["claim_leakage"]:
+                        claim_leakage_failures.extend(row["claim_leakage"])
+                        hard_failures.append(
+                            "claim_leakage:"
+                            f"{row['configuration']}:{row['query_id']}:"
+                            f"{len(row['claim_leakage'])}"
+                        )
                     if row["hard_error"]:
                         hard_failures.append(
-                            f"negative_control_violation:{case['id']}:{row['forbidden_fact_hits']}"
+                            "negative_control_violation:"
+                            f"{case['id']}:{row['forbidden_fact_hits']}"
                         )
                     if not row["provenance_complete"]:
                         hard_failures.append(f"provenance_incomplete:{case['id']}")
@@ -841,8 +1461,10 @@ async def run(
                             "partial": True,
                             "per_case_results": rows,
                             "hard_failures": hard_failures,
+                            "claim_leakage": claim_leakage_failures,
                         },
                     )
+                    _atomic_jsonl(cases_path, rows)
 
         planner_results: list[dict[str, Any]] = []
         for item in queries.get("planner_diagnostics") or []:
@@ -851,7 +1473,7 @@ async def run(
                 profile=RetrievalProfile.COMPREHENSIVE,
                 dataset=dataset,
             )
-            scope, trace = await resolve_query_scope_async(
+            scope, scope_trace = await resolve_query_scope_async(
                 request,
                 corpus,
                 application.scholarly_registry,
@@ -864,8 +1486,8 @@ async def run(
                     "query": item["query"],
                     "expected_subject_work_ids": expected,
                     "resolved_subject_work_ids": list(scope.subject_work_ids),
-                    "resolution": trace.resolution,
-                    "warnings": list(trace.warnings),
+                    "resolution": scope_trace.resolution,
+                    "warnings": list(scope_trace.warnings),
                 }
             )
 
@@ -873,17 +1495,28 @@ async def run(
             row
             for row in rows
             if row["family"] == "negative_source_attribution"
-            and row["candidate_pool"] == int(spec["primary_candidate_pool_size"])
-            and row["configuration"] == "FULL_CURRENT"
+            and row["candidate_pool"] == primary_pool
         ]
         aggregates = _aggregate(
             rows,
+            pools=sorted(
+                {
+                    *pool_sizes,
+                    *[int(row["candidate_pool"]) for row in rows],
+                    primary_pool,
+                }
+            ),
+            primary_pool=primary_pool,
             fact_meta=fact_meta,
             gold_by_fact=gold_by_fact,
-            guidance=spec.get("decision_guidance") or {},
             claim_coverage=float(coverage["claim_coverage"]),
         )
-        benchmark_status = "FAIL" if hard_failures else "PASS"
+        if unresolved and not rows:
+            benchmark_status = "INSUFFICIENT_DATA"
+        elif hard_failures or claim_leakage_failures:
+            benchmark_status = "FAIL"
+        else:
+            benchmark_status = "PASS"
         report = {
             "generated_at": datetime.now(UTC).isoformat(),
             "benchmark_status": benchmark_status,
@@ -895,11 +1528,11 @@ async def run(
                 "corpus_chunk_count": len(corpus.chunks),
                 "core_work_count": len(CORE_PAPERS),
                 "candidate_pool_sizes": pool_sizes,
-                "primary_candidate_pool_size": spec["primary_candidate_pool_size"],
+                "primary_candidate_pool_size": primary_pool,
                 "final_top_k": top_k,
-                "reranker_enabled": bool(settings.retrieval.rerank_enabled),
                 "runtime": runtime,
                 "paper_work_ids": work_ids,
+                **reranker,
             },
             "fixture_resolution": {
                 "gold_by_fact": gold_by_fact,
@@ -909,13 +1542,32 @@ async def run(
             "configurations": spec["configurations"],
             "per_case_results": rows,
             "per_family_results": aggregates["by_family"],
+            "hard_family_focus": aggregates["hard_family_focus"],
             "aggregate_metrics": aggregates["by_configuration"],
-            "unique_claim_rescue": aggregates["unique_claim_rescue"],
-            "claim_redundancy": aggregates["claim_redundancy"],
+            "aggregate_metrics_by_pool": aggregates["by_configuration_by_pool"],
+            "unique_claim_rescue_vs_cite_scope": aggregates[
+                "unique_claim_rescue_vs_cite_scope"
+            ],
+            "unique_claim_rescue_vs_cite_anchor": aggregates[
+                "unique_claim_rescue_vs_cite_anchor"
+            ],
+            "claim_redundancy_vs_cite_scope": aggregates[
+                "claim_redundancy_vs_cite_scope"
+            ],
+            "claim_redundancy_vs_cite_anchor": aggregates[
+                "claim_redundancy_vs_cite_anchor"
+            ],
+            "privilege_comparison": aggregates["privilege_comparison"],
+            "cite_scope_vs_cite_anchor": aggregates["cite_scope_vs_cite_anchor"],
+            "candidate_pool_saturation_observed": aggregates[
+                "candidate_pool_saturation_observed"
+            ],
             "evidence_input": aggregates["evidence_input"],
             "negative_controls": negative,
             "planner_diagnostics": planner_results,
+            "claim_leakage": claim_leakage_failures,
             "recommendation_inputs": aggregates["recommendation_inputs"],
+            "recommendation_notes": aggregates["recommendation_notes"],
             "recommendation": aggregates["recommendation"],
             "hard_failures": hard_failures,
             "warnings": warnings,
@@ -925,7 +1577,8 @@ async def run(
             },
         }
         _atomic_json(report_path, report)
-        _atomic_json(review_path, {"claims": manual_review})
+        _atomic_json(review_path, manual_review)
+        _atomic_jsonl(cases_path, rows)
         return report
     finally:
         await application.aclose()
@@ -958,24 +1611,56 @@ def main() -> None:
             pools=args.pools,
         )
     )
+    privilege = report.get("privilege_comparison") or {}
     summary = {
         "benchmark_status": report["benchmark_status"],
-        "recommendation": report["recommendation"],
-        "aggregate_metrics": report["aggregate_metrics"],
-        "unique_claim_rescue": report["unique_claim_rescue"],
-        "claim_redundancy": report["claim_redundancy"],
-        "claim_coverage": report["claim_coverage"]["claim_coverage"],
-        "evidence_input": report["evidence_input"],
-        "hard_failures": report["hard_failures"],
+        "recommendation": report.get("recommendation"),
+        "recommendation_notes": report.get("recommendation_notes"),
+        "aggregate_metrics": report.get("aggregate_metrics"),
+        "aggregate_metrics_by_pool": report.get("aggregate_metrics_by_pool"),
+        "unique_claim_rescue_vs_cite_scope": report.get(
+            "unique_claim_rescue_vs_cite_scope"
+        ),
+        "unique_claim_rescue_vs_cite_anchor": report.get(
+            "unique_claim_rescue_vs_cite_anchor"
+        ),
+        "claim_redundancy_vs_cite_scope": report.get("claim_redundancy_vs_cite_scope"),
+        "claim_redundancy_vs_cite_anchor": report.get(
+            "claim_redundancy_vs_cite_anchor"
+        ),
+        "privilege_comparison": {
+            "cases_improved_without_privilege": len(
+                privilege.get("cases_improved_without_privilege") or []
+            ),
+            "cases_regressed_without_privilege": len(
+                privilege.get("cases_regressed_without_privilege") or []
+            ),
+            "unchanged": len(privilege.get("unchanged") or []),
+        },
+        "cite_scope_vs_cite_anchor": report.get("cite_scope_vs_cite_anchor"),
+        "candidate_pool_saturation_observed": report.get(
+            "candidate_pool_saturation_observed"
+        ),
+        "claim_coverage": (report.get("claim_coverage") or {}).get("claim_coverage"),
+        "claim_coverage_failure_reasons": (report.get("claim_coverage") or {}).get(
+            "failure_reasons"
+        ),
+        "evidence_input": report.get("evidence_input"),
+        "production_reranker_configured": (report.get("run_metadata") or {}).get(
+            "production_reranker_configured"
+        ),
+        "hard_failures": report.get("hard_failures"),
+        "claim_leakage_count": len(report.get("claim_leakage") or []),
         "report_path": str(
             args.run_root.resolve() / "logs" / "contracts" / REPORT_NAME
         ),
         "review_path": str(
             args.run_root.resolve() / "logs" / "contracts" / REVIEW_NAME
         ),
+        "cases_path": str(args.run_root.resolve() / "logs" / "contracts" / CASES_NAME),
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    if report["benchmark_status"] != "PASS":
+    if report["benchmark_status"] not in {"PASS"}:
         raise SystemExit(1)
 
 

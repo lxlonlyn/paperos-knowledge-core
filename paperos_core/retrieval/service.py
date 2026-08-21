@@ -16,10 +16,14 @@ from paperos_core.ingestion.registry import SourceRegistry
 from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
 from paperos_core.paths import DataPaths
 from paperos_core.retrieval.ablation import (
+    candidate_trace_record,
     citation_anchor_retrieve,
     current_ablation_policy,
     current_ablation_trace,
+    deduplicate_candidates_by_chunk,
     expand_citation_source_scope,
+    is_claim_object_type,
+    record_claim_leak,
 )
 from paperos_core.retrieval.cache import QueryCache
 from paperos_core.retrieval.candidates import (
@@ -306,11 +310,27 @@ class RetrievalService:
             mention_index,
         )
         about_order = [item.id for item in channels.get("subject_claim", [])]
-        if scope.subject_work_ids and "subject_claim" in channels:
+        privilege = policy is None or policy.subject_claim_privilege
+        if (
+            privilege
+            and scope.subject_work_ids
+            and "subject_claim" in channels
+        ):
             fused = _prepend_subject_claims(fused, about_order, pool)
         else:
             fused = fused[:pool]
         stages.append("fusion")
+        if policy is not None and policy.chunk_dedup_final:
+            fused, dedup_stats = deduplicate_candidates_by_chunk(fused)
+            stages.append("chunk_dedup")
+            if trace is not None:
+                trace.duplicate_chunk_candidates_before_dedup = dedup_stats[
+                    "duplicate_chunk_candidates_before_dedup"
+                ]
+                trace.unique_chunks_after_dedup = dedup_stats[
+                    "unique_chunks_after_dedup"
+                ]
+                trace.post_dedup_chunk_ids = [item.chunk_id for item in fused]
         retrieval_ms = (time.perf_counter() - retrieval_started) * 1000.0
         if trace is not None:
             trace.fused_before_rerank_candidate_ids = [item.id for item in fused]
@@ -321,7 +341,18 @@ class RetrievalService:
             trace.fused_candidate_ranks = {
                 item.id: index for index, item in enumerate(fused, start=1)
             }
+            trace.fused_candidates = [candidate_trace_record(item) for item in fused]
             trace.retrieval_latency_ms = retrieval_ms
+            for item in fused:
+                if policy is not None and policy.claim_blind and (
+                    is_claim_object_type(item.object_type)
+                    or "subject_claim" in item.channels
+                ):
+                    record_claim_leak(
+                        stage="fusion_candidates",
+                        object_id=item.object_id,
+                        object_type=item.object_type,
+                    )
 
         rerank_ms = 0.0
         if self.config.retrieval.rerank_enabled:
@@ -339,7 +370,11 @@ class RetrievalService:
         if trace is not None:
             trace.rerank_latency_ms = rerank_ms
             trace.reranked_chunk_ids = [item.chunk_id for item in reranked]
-        if scope.subject_work_ids and "subject_claim" in channels:
+        if (
+            privilege
+            and scope.subject_work_ids
+            and "subject_claim" in channels
+        ):
             reranked = apply_scope_filters(
                 _prepend_subject_claims(reranked, about_order, pool),
                 scope,
@@ -371,8 +406,31 @@ class RetrievalService:
             mention_index,
         )
         stages.append("diversification")
+        if policy is not None and policy.chunk_dedup_final:
+            selected, dedup_stats = deduplicate_candidates_by_chunk(selected)
+            if trace is not None and not trace.post_dedup_chunk_ids:
+                trace.duplicate_chunk_candidates_before_dedup = dedup_stats[
+                    "duplicate_chunk_candidates_before_dedup"
+                ]
+                trace.unique_chunks_after_dedup = dedup_stats[
+                    "unique_chunks_after_dedup"
+                ]
+                trace.post_dedup_chunk_ids = [item.chunk_id for item in selected]
         if trace is not None:
             trace.selected_chunk_ids = [item.chunk_id for item in selected]
+            trace.selected_candidates = [
+                candidate_trace_record(item) for item in selected
+            ]
+            for item in selected:
+                if policy is not None and policy.claim_blind and (
+                    is_claim_object_type(item.object_type)
+                    or "subject_claim" in item.channels
+                ):
+                    record_claim_leak(
+                        stage="final_candidates",
+                        object_id=item.object_id,
+                        object_type=item.object_type,
+                    )
         evidence = format_evidence(selected, corpus.bundles)
         recall_context: list[str] | None = None
         disable_recall = (

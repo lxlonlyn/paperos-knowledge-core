@@ -1,126 +1,101 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "benchmark_name": "claim-about-necessity-ablation",
   "primary_profile": "comprehensive",
-  "candidate_pool_sizes": [
-    40,
-    80,
-    160
-  ],
+  "candidate_pool_sizes": [40, 80, 160],
   "final_top_k": 12,
   "primary_candidate_pool_size": 40,
   "configurations": [
     {
       "id": "FULL_CURRENT",
-      "description": "Unmodified current production retrieval.",
+      "description": "Unmodified current production retrieval, including Claim privileged prepend.",
       "claim_nodes_visible": true,
       "about_edges_visible": true,
       "subject_claim_enabled": true,
       "claim_hits_allowed_in_entity_claim": true,
       "claim_seeds_allowed_in_graph": true,
+      "subject_claim_privilege": true,
+      "chunk_dedup_final": false,
+      "broad_chunk_rag": true,
+      "citation_scope": false,
+      "citation_anchor_expansion": false
+    },
+    {
+      "id": "FULL_CLAIM_NO_PRIVILEGE",
+      "description": "All Claim/ABOUT channels remain, but Claim candidates compete normally without prepend privilege; final evidence deduped by chunk_id.",
+      "claim_nodes_visible": true,
+      "about_edges_visible": true,
+      "subject_claim_enabled": true,
+      "claim_hits_allowed_in_entity_claim": true,
+      "claim_seeds_allowed_in_graph": true,
+      "subject_claim_privilege": false,
+      "chunk_dedup_final": true,
       "broad_chunk_rag": true,
       "citation_scope": false,
       "citation_anchor_expansion": false
     },
     {
       "id": "NO_CLAIM",
-      "description": "Claim-blind retrieval while retaining all non-Claim current capabilities.",
+      "description": "Strict Claim-blind retrieval while retaining non-Claim capabilities.",
       "claim_nodes_visible": false,
       "about_edges_visible": false,
       "subject_claim_enabled": false,
       "claim_hits_allowed_in_entity_claim": false,
       "claim_seeds_allowed_in_graph": false,
+      "subject_claim_privilege": false,
+      "chunk_dedup_final": true,
       "broad_chunk_rag": true,
       "citation_scope": false,
       "citation_anchor_expansion": false
     },
     {
       "id": "CITE_SCOPE_RAG",
-      "description": "No Claim/ABOUT. For subject-scoped queries, narrow source Works using incoming CITES, then run ordinary chunk retrieval/rerank inside those Works.",
+      "description": "Strict Claim-blind. Narrow source Works via incoming CITES, then ordinary Chunk RAG.",
       "claim_nodes_visible": false,
       "about_edges_visible": false,
       "subject_claim_enabled": false,
       "claim_hits_allowed_in_entity_claim": false,
       "claim_seeds_allowed_in_graph": false,
+      "subject_claim_privilege": false,
+      "chunk_dedup_final": true,
       "broad_chunk_rag": true,
       "citation_scope": true,
       "citation_anchor_expansion": false
     },
     {
       "id": "CITE_ANCHOR_RAG",
-      "description": "CITE_SCOPE_RAG plus citation source_chunk anchors and immediate local context expansion before rerank.",
+      "description": "CITE_SCOPE_RAG plus CITES source_chunk anchors and local neighbors.",
       "claim_nodes_visible": false,
       "about_edges_visible": false,
       "subject_claim_enabled": false,
       "claim_hits_allowed_in_entity_claim": false,
       "claim_seeds_allowed_in_graph": false,
+      "subject_claim_privilege": false,
+      "chunk_dedup_final": true,
       "broad_chunk_rag": true,
       "citation_scope": true,
       "citation_anchor_expansion": true
     },
     {
       "id": "CLAIM_ONLY",
-      "description": "Use subject Claim/ABOUT as the primary retrieval cache; return to source chunks for evidence; do not run broad chunk RAG.",
+      "description": "Subject ABOUT Claim semantic cache only; evidence evaluated via source_chunk_ids.",
       "claim_nodes_visible": true,
       "about_edges_visible": true,
       "subject_claim_enabled": true,
       "claim_hits_allowed_in_entity_claim": false,
       "claim_seeds_allowed_in_graph": false,
+      "subject_claim_privilege": false,
+      "chunk_dedup_final": true,
       "broad_chunk_rag": false,
       "citation_scope": false,
       "citation_anchor_expansion": false
     }
   ],
-  "metrics": [
-    "fact_recall_at_final_k",
-    "gold_evidence_recall_at_candidate_pool",
-    "gold_evidence_recall_at_final_k",
-    "unique_claim_rescue_rate_vs_CITE_ANCHOR_RAG",
-    "claim_redundancy_rate_vs_CITE_ANCHOR_RAG",
-    "claim_coverage",
-    "benchmark_about_attribution_precision",
-    "source_attribution_precision",
-    "final_evidence_chunk_count",
-    "final_evidence_char_count",
-    "optional_final_evidence_token_count",
-    "retrieval_latency_ms",
-    "rerank_latency_ms"
-  ],
-  "required_breakdowns": [
-    "query_family",
-    "target_mention_mode",
-    "necessity_priority",
-    "candidate_pool_size"
-  ],
-  "decision_guidance": {
-    "keep_signal": {
-      "unique_claim_rescue_percentage_points_gte": 10,
-      "or_evidence_token_reduction_percent_gte": 30,
-      "about_attribution_precision_gte": 0.95,
-      "claim_coverage_gte": 0.85
-    },
-    "remove_from_retrieval_signal": {
-      "fact_recall_gap_vs_CITE_ANCHOR_RAG_percentage_points_lte": 2,
-      "and_no_material_token_reduction": true
-    },
-    "claim_only_short_circuit_signal": {
-      "claim_only_fact_recall_fraction_of_full_gte": 0.97
-    }
-  },
   "fairness_constraints": [
-    "Use the same retained ingested corpus and the same generated Claim data for every configuration; hide structures at query time rather than re-ingesting.",
-    "Do not change production retrieval weights, prompts, chunking, embedding model, or reranker between configurations.",
-    "NO_CLAIM must remove ClaimDataPoint from entity_claim and graph seeds, not merely disable subject_claim.",
-    "CITE_SCOPE_RAG must not require the selected chunk itself to contain the subject Work name once the source Work has been admitted by a real CITES edge.",
-    "Final correctness is grounded in source chunks; Claim text alone is never counted as final evidence.",
-    "Planner diagnostics are reported separately from retrieval ablation."
-  ],
-  "required_run_metadata": [
-    "corpus_work_count",
-    "corpus_chunk_count",
-    "core_work_count",
-    "candidate_pool_size",
-    "final_top_k",
-    "reranker_enabled"
+    "Use the same retained ingested corpus for every configuration.",
+    "NO_CLAIM/CITE_* must filter ClaimDataPoint before chunk materialization in semantic/entity/graph paths.",
+    "FULL_CURRENT keeps production Claim privilege; experimental configs may disable privilege and dedup by chunk_id.",
+    "Fact Recall uses canonical chunk_id intersection only; Claim digest chars are reported separately.",
+    "Planner diagnostics are reported separately from Claim-vs-RAG metrics."
   ]
 }

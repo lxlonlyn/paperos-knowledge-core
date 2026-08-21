@@ -1044,11 +1044,14 @@ class CogneeCompatibilityAdapter:
         *,
         depth: int,
         edge_types: set[str],
+        exclude_node_types: set[str] | None = None,
     ) -> list[CogneeTraversalEvidence]:
         """Return typed edge provenance absent from Cognee 1.4.0 public context.
 
         Live contract capability: typed_graph_traversal. The traversal is
         finite-depth and restricted to caller-approved relation types.
+        Optional ``exclude_node_types`` skips Claim (or other) nodes as
+        intermediates/results without changing the default production path.
         """
         if not seeds or depth <= 0:
             return []
@@ -1072,14 +1075,23 @@ class CogneeCompatibilityAdapter:
             raise CogneeStorageError(
                 f"Cognee graph traversal failed: {exc}", affected=self.paths.cognee
             ) from exc
+        excluded = set(exclude_node_types or ())
         node_properties = {
             str(node_id): _flatten_node(dict(properties))
             for node_id, properties in nodes
+        }
+        blocked_nodes = {
+            node_id
+            for node_id, properties in node_properties.items()
+            if str(properties.get("type") or properties.get("object_type") or "")
+            in excluded
         }
         adjacency: dict[str, set[str]] = {}
         for source_id, target_id, _relation_type, _properties in edges:
             source_key = str(source_id)
             target_key = str(target_id)
+            if source_key in blocked_nodes or target_key in blocked_nodes:
+                continue
             adjacency.setdefault(source_key, set()).add(target_key)
             adjacency.setdefault(target_key, set()).add(source_key)
         node_scores = {seed.cognee_id: seed.score for seed in seeds}
@@ -1087,8 +1099,12 @@ class CogneeCompatibilityAdapter:
         for _hop in range(depth):
             next_frontier: dict[str, float] = {}
             for node_id, score in frontier.items():
+                if node_id in blocked_nodes:
+                    continue
                 propagated = score * 0.85
                 for neighbor_id in adjacency.get(node_id, set()):
+                    if neighbor_id in blocked_nodes:
+                        continue
                     if propagated <= node_scores.get(neighbor_id, 0.0):
                         continue
                     node_scores[neighbor_id] = propagated
@@ -1101,11 +1117,15 @@ class CogneeCompatibilityAdapter:
             relation = str(relation_type)
             if relation not in edge_types:
                 continue
+            source_key = str(source_id)
+            target_key = str(target_id)
+            if source_key in blocked_nodes or target_key in blocked_nodes:
+                continue
             properties = (
                 dict(raw_properties) if isinstance(raw_properties, dict) else {}
             )
-            source = node_properties.get(str(source_id), {})
-            target = node_properties.get(str(target_id), {})
+            source = node_properties.get(source_key, {})
+            target = node_properties.get(target_key, {})
             chunk_ids = list(
                 dict.fromkeys(
                     [
@@ -1143,8 +1163,8 @@ class CogneeCompatibilityAdapter:
                         )
                     ),
                     score=max(
-                        node_scores.get(str(source_id), 0.0),
-                        node_scores.get(str(target_id), 0.0),
+                        node_scores.get(source_key, 0.0),
+                        node_scores.get(target_key, 0.0),
                     ),
                 )
             )
