@@ -67,6 +67,7 @@ async def academic_chunk_task(
     *,
     repository: CanonicalRepository,
     chunk_target_tokens: int,
+    chunk_hard_max_tokens: int,
     chunk_overlap_tokens: int,
 ) -> list[ChunkedBundle]:
     """Produce canonical chunks from sections/elements and persist them."""
@@ -74,12 +75,14 @@ async def academic_chunk_task(
     results: list[ChunkedBundle] = []
     for item in data:
         bundle = getattr(item, "bundle", item)
-        chunks = build_chunks(
-            document_id=bundle.document.id,
+        chunks, _mentions = build_chunks(
+            document=bundle.document,
             snapshot_id=bundle.snapshot.id,
             sections=bundle.sections,
             elements=bundle.elements,
+            references=bundle.references,
             target_tokens=chunk_target_tokens,
+            hard_max_tokens=chunk_hard_max_tokens,
             overlap_tokens=chunk_overlap_tokens,
             tokenizer=tokenizer,
         )
@@ -217,6 +220,7 @@ def configure_pipeline_tasks(
     enrichment_root: Path,
     graph_root: Path,
     chunk_target_tokens: int,
+    chunk_hard_max_tokens: int,
     chunk_overlap_tokens: int,
     graph_results: list[DataPointGraph],
     reuse_existing_enrichment: bool,
@@ -229,6 +233,7 @@ def configure_pipeline_tasks(
             batch_size=1,
             repository=repository,
             chunk_target_tokens=chunk_target_tokens,
+            chunk_hard_max_tokens=chunk_hard_max_tokens,
             chunk_overlap_tokens=chunk_overlap_tokens,
         ).task,
         task(

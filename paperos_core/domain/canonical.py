@@ -139,14 +139,38 @@ class Chunk(DomainModel):
     spans: list[ChunkSpan] = Field(default_factory=list)
     section_id: str | None = None
     section_path: str | None = None
+    major_section_id: str | None = None
+    major_section_title: str | None = None
     page_start: int | None = Field(default=None, ge=1)
     page_end: int | None = Field(default=None, ge=1)
     bounding_box: tuple[float, float, float, float] | None = None
     token_count: int | None = Field(default=None, ge=1)
+    retrieval_text: str | None = None
+    citation_mention_ids: list[str] = Field(default_factory=list)
     previous_chunk_id: str | None = None
     next_chunk_id: str | None = None
     overlap_source_chunk_ids: list[str] = Field(default_factory=list)
     overlap_element_span_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CitationMention(DomainModel):
+    """Inline citation surface form attached to a canonical element / chunk."""
+
+    id: str
+    document_id: str
+    canonical_snapshot_id: str
+    surface_text: str
+    normalized_keys: list[str] = Field(default_factory=list)
+    element_id: str
+    chunk_id: str | None = None
+    character_start: int = Field(ge=0)
+    character_end: int = Field(ge=0)
+    reference_entry_id: str | None = None
+    resolved_work_id: str | None = None
+    resolution_status: str = "unresolved"
+    schema_version: str = CANONICAL_SCHEMA_VERSION
+    id_version: str = CANONICAL_ID_VERSION
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -170,6 +194,7 @@ class ReferenceEntry(DomainModel):
     issue: str | None = None
     pages: str | None = None
     source_element_id: str | None = None
+    citation_label: str | None = None
     resolved_document_id: str | None = None
     resolution_status: ReferenceResolutionStatus = ReferenceResolutionStatus.UNRESOLVED
     resolution_confidence: float | None = Field(default=None, ge=0, le=1)

@@ -141,6 +141,7 @@ def _validate_real_ingestion(
     bundle: Any,
     projection: Any,
     chunk_target_tokens: int,
+    chunk_hard_max_tokens: int,
     cognee_manifest_path: Path,
     index_manifest_path: Path,
 ) -> dict[str, Any]:
@@ -223,7 +224,7 @@ def _validate_real_ingestion(
     for chunk in projection.chunks:
         _require(chunk.token_count is not None, f"Chunk token count absent: {chunk.id}")
         _require(
-            chunk.token_count <= chunk_target_tokens,
+            chunk.token_count <= hard_max_tokens,
             f"Chunk exceeds token target: {chunk.id} / {chunk.token_count}",
         )
         _require(chunk.spans, f"Chunk spans absent: {chunk.id}")
@@ -509,6 +510,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                             bundle=bundle,
                             projection=projection,
                             chunk_target_tokens=settings.ingestion.chunk_target_tokens,
+                            chunk_hard_max_tokens=settings.ingestion.chunk_hard_max_tokens,
                             cognee_manifest_path=cognee_manifest,
                             index_manifest_path=index_manifest,
                         )
@@ -579,6 +581,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     bundle=current_bundle,
                     projection=projection,
                     chunk_target_tokens=settings.ingestion.chunk_target_tokens,
+                    chunk_hard_max_tokens=settings.ingestion.chunk_hard_max_tokens,
                     cognee_manifest_path=application.paths.cognee
                     / "manifests"
                     / f"{snapshot_id}.json",

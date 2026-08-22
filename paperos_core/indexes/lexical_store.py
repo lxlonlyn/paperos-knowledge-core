@@ -9,6 +9,7 @@ from pathlib import Path
 from paperos_core.domain.canonical import CanonicalBundle, Chunk
 from paperos_core.errors import IndexStorageError
 from paperos_core.indexes.manifest import LEXICAL_INDEX_VERSION
+from paperos_core.ingestion.retrieval_text import effective_index_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +155,7 @@ def _records_for_bundle(
             field_name="text",
             section_id=chunk.section_id,
             section_path=chunk.section_path,
-            text=chunk.text,
+            text=effective_index_text(chunk),
         )
         for chunk in chunks
     )

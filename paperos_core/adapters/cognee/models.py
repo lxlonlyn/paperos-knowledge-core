@@ -19,7 +19,7 @@ from paperos_core.adapters.cognee.datapoints import (
     SummaryDataPoint,
     TripletDataPoint,
 )
-from paperos_core.domain.canonical import CanonicalBundle, Chunk
+from paperos_core.ingestion.retrieval_text import effective_index_text
 from paperos_core.domain.ids import knowledge_triplet_id
 from paperos_core.domain.knowledge import SemanticEnrichment
 from paperos_core.domain.provenance import RelationRecord, RelationType
@@ -112,7 +112,7 @@ def canonical_to_datapoints(
             document_id=document.id,
             section_id=chunk.section_id,
             section_path=chunk.section_path,
-            text=chunk.text,
+            text=effective_index_text(chunk),
             page_start=chunk.page_start,
             page_end=chunk.page_end,
             source_chunk_ids=[chunk.id],

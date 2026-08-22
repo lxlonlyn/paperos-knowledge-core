@@ -120,6 +120,7 @@ class CogneePipelineAdapter:
             enrichment_root=self.paths.cognee / "enrichment",
             graph_root=self.paths.cognee / "graphs",
             chunk_target_tokens=self.ingestion.chunk_target_tokens,
+            chunk_hard_max_tokens=self.ingestion.chunk_hard_max_tokens,
             chunk_overlap_tokens=self.ingestion.chunk_overlap_tokens,
             graph_results=graph_results,
             reuse_existing_enrichment=reuse_existing_enrichment,
