@@ -122,7 +122,7 @@ class IngestionSettings(StrictSettings):
     max_file_mb: int = Field(default=200, gt=0)
     chunk_target_tokens: int = Field(default=900, gt=0)
     chunk_hard_max_tokens: int = Field(default=1200, gt=0)
-    chunk_overlap_tokens: int = Field(default=135, ge=0)
+    chunk_overlap_tokens: int = Field(default=0, ge=0)
 
 
 class LocalInferenceSettings(StrictSettings):

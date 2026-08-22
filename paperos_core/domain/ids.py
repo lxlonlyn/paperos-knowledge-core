@@ -17,7 +17,7 @@ CANONICAL_ID_VERSION = "1"
 CANONICAL_PIPELINE_VERSION = "gate3.2"
 CLEANING_VERSION = "1"
 CLASSIFICATION_VERSION = "1"
-CHUNKING_VERSION = "3"
+CHUNKING_VERSION = "4"
 REFERENCE_PROCESSING_VERSION = "1"
 KNOWLEDGE_TRIPLET_ID_VERSION = "1"
 SCHOLARLY_WORK_SCHEMA_VERSION = "1.0"
@@ -182,11 +182,30 @@ def reference_entry_id(
     )
 
 
+def citation_span_id(
+    document_id_value: str,
+    element_id: str,
+    character_start: int,
+    character_end: int,
+    *,
+    id_version: str = CANONICAL_ID_VERSION,
+) -> str:
+    return stable_id(
+        "cite_span",
+        document_id_value,
+        element_id,
+        str(character_start),
+        str(character_end),
+        id_version=id_version,
+    )
+
+
 def citation_mention_id(
     document_id_value: str,
     element_id: str,
-    surface_text: str,
-    character_start: int,
+    citation_span_id_value: str,
+    atomic_key: str,
+    group_index: int,
     *,
     id_version: str = CANONICAL_ID_VERSION,
 ) -> str:
@@ -194,8 +213,9 @@ def citation_mention_id(
         "cite_mention",
         document_id_value,
         element_id,
-        surface_text,
-        str(character_start),
+        citation_span_id_value,
+        atomic_key,
+        str(group_index),
         id_version=id_version,
     )
 

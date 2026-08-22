@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from paperos_core.domain.canonical import Element, Section
 from paperos_core.domain.enums import ElementType
 
 _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?。！？；;])\s+")
+
+SplitType = Literal[
+    "NORMAL",
+    "EMERGENCY_WHITESPACE",
+    "EMERGENCY_TOKEN_SAFE",
+    "EMERGENCY_FORCED",
+    "TABLE_PART",
+]
 
 
 class Tokenizer(Protocol):
@@ -34,11 +42,17 @@ class SentenceUnit:
     paragraph_end: bool
     subsection_end: bool
     unit_kind: str = "sentence"
-    emergency_split: bool = False
+    split_type: SplitType = "NORMAL"
+    display_text: str | None = None
+    paragraph_id: str | None = None
 
     @property
     def span_id(self) -> str:
         return f"{self.element_id}:{self.span_key}"
+
+    @property
+    def emergency_split(self) -> bool:
+        return self.split_type != "NORMAL"
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +60,7 @@ class _TextRange:
     text: str
     start: int
     end: int
+    split_type: SplitType = "NORMAL"
 
 
 _PROSE_TYPES = {
@@ -100,6 +115,7 @@ def units_for_element(
                 paragraph_end=True,
                 subsection_end=subsection_end,
                 unit_kind="formula",
+                paragraph_id=f"{element.id}:0",
             )
         ]
     ranges = _sentence_ranges(text, count, hard_max_tokens)
@@ -116,7 +132,7 @@ def units_for_element(
                 paragraph_end=paragraph_end,
                 subsection_end=subsection_end and index == len(ranges) - 1,
                 unit_kind="sentence",
-                emergency_split=_count(count, unit_range.text) > hard_max_tokens,
+                paragraph_id=_paragraph_id_for_offset(text, unit_range.start),
             )
         )
     return units
@@ -127,26 +143,34 @@ def _sentence_ranges(text: str, count: Any, hard_max_tokens: int) -> list[_TextR
     ranges: list[_TextRange] = []
     for paragraph_start, paragraph_end in paragraphs:
         paragraph = text[paragraph_start:paragraph_end]
-        if _count(count, paragraph) <= hard_max_tokens:
-            ranges.append(_TextRange(text=paragraph, start=paragraph_start, end=paragraph_end))
-            continue
         cursor = paragraph_start
+        boundaries = [paragraph_start]
         for match in _SENTENCE_SPLIT.finditer(paragraph):
-            boundary = paragraph_start + match.end()
-            if boundary > cursor:
-                piece = text[cursor:boundary]
-                ranges.extend(
-                    _emergency_split(text, cursor, boundary, count, hard_max_tokens)
-                    if _count(count, piece) > hard_max_tokens
-                    else [_TextRange(text=piece, start=cursor, end=boundary)]
-                )
-                cursor = boundary
-        if cursor < paragraph_end:
-            piece = text[cursor:paragraph_end]
+            boundaries.append(paragraph_start + match.end())
+        if boundaries[-1] < paragraph_end:
+            boundaries.append(paragraph_end)
+        if len(boundaries) <= 2 and paragraph.strip():
+            piece = text[paragraph_start:paragraph_end]
             ranges.extend(
-                _emergency_split(text, cursor, paragraph_end, count, hard_max_tokens)
+                _emergency_split(text, paragraph_start, paragraph_end, count, hard_max_tokens)
                 if _count(count, piece) > hard_max_tokens
-                else [_TextRange(text=piece, start=cursor, end=paragraph_end)]
+                else [
+                    _TextRange(
+                        text=piece,
+                        start=paragraph_start,
+                        end=paragraph_end,
+                    )
+                ]
+            )
+            continue
+        for start_offset, end_offset in zip(boundaries, boundaries[1:], strict=False):
+            if end_offset <= start_offset:
+                continue
+            piece = text[start_offset:end_offset]
+            ranges.extend(
+                _emergency_split(text, start_offset, end_offset, count, hard_max_tokens)
+                if _count(count, piece) > hard_max_tokens
+                else [_TextRange(text=piece, start=start_offset, end=end_offset)]
             )
     return ranges
 
@@ -160,12 +184,69 @@ def _emergency_split(
 ) -> list[_TextRange]:
     value = source[start:end]
     if _count(count, value) <= hard_max_tokens:
-        return [_TextRange(text=value, start=start, end=end)]
-    midpoint = start + max(1, (end - start) // 2)
-    return [
-        *_emergency_split(source, start, midpoint, count, hard_max_tokens),
-        *_emergency_split(source, midpoint, end, count, hard_max_tokens),
-    ]
+        return [_TextRange(text=value, start=start, end=end, split_type="EMERGENCY_FORCED")]
+
+    midpoint = _nearest_whitespace_split(source, start, end, count, hard_max_tokens)
+    if midpoint is not None and midpoint > start and midpoint < end:
+        left = _emergency_split(source, start, midpoint, count, hard_max_tokens)
+        right = _emergency_split(source, midpoint, end, count, hard_max_tokens)
+        if left:
+            last = left[-1]
+            left[-1] = _TextRange(
+                text=last.text,
+                start=last.start,
+                end=last.end,
+                split_type="EMERGENCY_WHITESPACE",
+            )
+        if right:
+            first = right[0]
+            right[0] = _TextRange(
+                text=first.text,
+                start=first.start,
+                end=first.end,
+                split_type="EMERGENCY_WHITESPACE",
+            )
+        return [*left, *right]
+
+    forced_mid = start + max(1, (end - start) // 2)
+    left = _emergency_split(source, start, forced_mid, count, hard_max_tokens)
+    right = _emergency_split(source, forced_mid, end, count, hard_max_tokens)
+    if left:
+        last = left[-1]
+        left[-1] = _TextRange(
+            text=last.text,
+            start=last.start,
+            end=last.end,
+            split_type="EMERGENCY_FORCED",
+        )
+    if right:
+        first = right[0]
+        right[0] = _TextRange(
+            text=first.text,
+            start=first.start,
+            end=first.end,
+            split_type="EMERGENCY_FORCED",
+        )
+    return [*left, *right]
+
+
+def _nearest_whitespace_split(
+    source: str,
+    start: int,
+    end: int,
+    count: Any,
+    hard_max_tokens: int,
+) -> int | None:
+    target = start + (end - start) // 2
+    best: int | None = None
+    for index in range(target, end):
+        if source[index].isspace() and _count(count, source[start:index]) <= hard_max_tokens:
+            best = index
+            break
+    for index in range(target, start, -1):
+        if source[index - 1].isspace() and _count(count, source[start:index]) <= hard_max_tokens:
+            return index
+    return best
 
 
 def _table_units(
@@ -182,7 +263,7 @@ def _table_units(
         return [
             _unit_from_range(
                 element,
-                _TextRange(text=text, start=0, end=len(text)),
+                _TextRange(text=text, start=0, end=len(text), split_type="TABLE_PART"),
                 count=count,
                 section_id=section_id,
                 section_path=section_path,
@@ -193,44 +274,76 @@ def _table_units(
         ]
     lines = text.splitlines()
     if len(lines) <= 2:
-        return _sentence_ranges(text, count, hard_max_tokens)  # fallback
+        ranges = _sentence_ranges(text, count, hard_max_tokens)
+        return [
+            _unit_from_range(
+                element,
+                item,
+                count=count,
+                section_id=section_id,
+                section_path=section_path,
+                paragraph_end=index == len(ranges) - 1,
+                subsection_end=subsection_end and index == len(ranges) - 1,
+                unit_kind="table_part",
+            )
+            for index, item in enumerate(ranges)
+        ]
     header = lines[:2]
     body = lines[2:]
     units: list[SentenceUnit] = []
     batch: list[str] = list(header)
-    cursor = 0
+    source_cursor = 0
     for row in body:
         candidate = "\n".join([*batch, row])
         if batch and _count(count, candidate) > hard_max_tokens:
             block = "\n".join(batch)
+            block_start = source_cursor
+            block_end = block_start + len(block)
             units.append(
                 _unit_from_range(
                     element,
-                    _TextRange(text=block, start=cursor, end=cursor + len(block)),
+                    _TextRange(
+                        text=block,
+                        start=block_start,
+                        end=block_end,
+                        split_type="TABLE_PART",
+                    ),
                     count=count,
                     section_id=section_id,
                     section_path=section_path,
                     paragraph_end=False,
                     subsection_end=False,
                     unit_kind="table_part",
+                    display_text=None if not units else "\n".join([*header, block]),
                 )
             )
-            cursor += len(block) + 1
+            source_cursor = block_end + 1
             batch = [*header, row]
         else:
             batch.append(row)
     if batch:
         block = "\n".join(batch)
+        body_only = "\n".join(batch[2:]) if len(batch) > 2 else block
+        block_start = text.find(body_only, source_cursor) if len(units) > 0 else 0
+        if block_start < 0:
+            block_start = source_cursor
+        block_end = block_start + len(body_only)
         units.append(
             _unit_from_range(
                 element,
-                _TextRange(text=block, start=cursor, end=cursor + len(block)),
+                _TextRange(
+                    text=body_only if len(units) > 0 else block,
+                    start=block_start,
+                    end=block_end,
+                    split_type="TABLE_PART",
+                ),
                 count=count,
                 section_id=section_id,
                 section_path=section_path,
                 paragraph_end=True,
                 subsection_end=subsection_end,
                 unit_kind="table_part",
+                display_text="\n".join(batch) if len(units) > 0 else None,
             )
         )
     return units
@@ -246,12 +359,13 @@ def _unit_from_range(
     paragraph_end: bool,
     subsection_end: bool,
     unit_kind: str,
-    emergency_split: bool = False,
+    paragraph_id: str | None = None,
+    display_text: str | None = None,
 ) -> SentenceUnit:
     full_text = element_text(element)
     return SentenceUnit(
         text=unit_range.text,
-        tokens=_count(count, unit_range.text),
+        tokens=_count(count, display_text or unit_range.text),
         element_id=element.id,
         span_key=f"{unit_range.start}:{unit_range.end}",
         character_start_in_element=unit_range.start,
@@ -265,7 +379,9 @@ def _unit_from_range(
         paragraph_end=paragraph_end,
         subsection_end=subsection_end,
         unit_kind=unit_kind,
-        emergency_split=emergency_split,
+        split_type=unit_range.split_type,
+        display_text=display_text,
+        paragraph_id=paragraph_id,
     )
 
 
@@ -285,6 +401,15 @@ def _split_paragraphs(text: str) -> list[tuple[int, int]]:
 def _ends_paragraph(text: str, end: int) -> bool:
     tail = text[end:].lstrip()
     return not tail or tail.startswith("\n\n")
+
+
+def _paragraph_id_for_offset(text: str, offset: int) -> str:
+    paragraph_index = 0
+    for paragraph_start, paragraph_end in _split_paragraphs(text):
+        if paragraph_start <= offset < paragraph_end:
+            return f"p{paragraph_index}"
+        paragraph_index += 1
+    return f"p{paragraph_index}"
 
 
 def _count(count: Any, text: str) -> int:

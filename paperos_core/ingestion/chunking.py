@@ -25,9 +25,10 @@ from paperos_core.domain.ids import chunk_id
 from paperos_core.ingestion.chunk_dp import partition_units
 from paperos_core.ingestion.citations import (
     attach_mentions_to_chunks,
-    build_reference_indexes,
+    build_scoped_reference_indexes,
     extract_citation_mentions_from_text,
 )
+from paperos_core.ingestion.bibliography_scope import resolve_element_region, scopes_for_region
 from paperos_core.ingestion.retrieval_text import build_retrieval_text
 from paperos_core.ingestion.sentence_units import (
     SentenceUnit,
@@ -58,7 +59,11 @@ def build_chunks(
     count = tokenizer.count_tokens
     elements = list(elements)
     section_by_id = {section.id: section for section in sections}
-    reference_indexes = build_reference_indexes(references)
+    reference_indexes = build_scoped_reference_indexes(
+        references=references,
+        elements=list(elements),
+        sections=sections,
+    )
     references_by_id = {reference.id: reference for reference in references}
 
     eligible = [
@@ -107,6 +112,7 @@ def build_chunks(
             )
             prose = element_text(element)
             if prose and element.element_type in _PROSE_TYPES:
+                region = resolve_element_region(element.section_id, section_by_id)
                 all_mentions.extend(
                     extract_citation_mentions_from_text(
                         document_id=document.id,
@@ -114,6 +120,10 @@ def build_chunks(
                         element_id=element.id,
                         text=prose,
                         reference_index=reference_indexes,
+                        document_region=region,
+                        bibliography_scope_ids=scopes_for_region(
+                            region, reference_indexes
+                        ),
                     )
                 )
         ranges = partition_units(
@@ -134,15 +144,12 @@ def build_chunks(
             count=count,
             overlap_tokens=overlap_tokens,
             start_order=order,
+            section_by_id=section_by_id,
         )
         built.extend(section_chunks)
         order += len(section_chunks)
 
-    element_to_chunk: dict[str, str] = {}
-    for chunk in built:
-        for element_id in chunk.element_ids:
-            element_to_chunk.setdefault(element_id, chunk.id)
-    all_mentions = attach_mentions_to_chunks(all_mentions, element_to_chunk=element_to_chunk)
+    all_mentions = attach_mentions_to_chunks(all_mentions, chunks=built)
 
     mentions_by_chunk: dict[str, list[CitationMention]] = {}
     for mention in all_mentions:
@@ -220,6 +227,7 @@ def _chunks_from_ranges(
     count: Any,
     overlap_tokens: int,
     start_order: int,
+    section_by_id: dict[str, Section],
 ) -> list[Chunk]:
     built: list[Chunk] = []
     overlap_tail: list[SentenceUnit] = []
@@ -245,6 +253,7 @@ def _chunks_from_ranges(
             count=count,
             overlap_source_chunk_ids=[built[-1].id] if overlap_tail and built else [],
             overlap_spans=overlap_tail,
+            section_by_id=section_by_id,
         )
         built.append(chunk)
         overlap_tail = _overlap_tail_units(chunk_units, count, overlap_tokens)
@@ -282,6 +291,7 @@ def _make_chunk(
     count: Any,
     overlap_source_chunk_ids: list[str],
     overlap_spans: list[SentenceUnit],
+    section_by_id: dict[str, Section],
 ) -> Chunk:
     text = _join_unit_text(units)
     pages = [unit.page for unit in units if unit.page is not None]
@@ -291,6 +301,10 @@ def _make_chunk(
     span_ids = [unit.span_id for unit in units]
     identifier = chunk_id(document_id, order, span_ids)
     emergency_splits = sum(1 for unit in units if unit.emergency_split)
+    section_ids = [unit.section_id for unit in units if unit.section_id]
+    document_region = (
+        resolve_element_region(section_ids[0], section_by_id) if section_ids else None
+    )
     end_boundary = "sentence"
     if units and units[-1].subsection_end:
         end_boundary = "subsection"
@@ -326,6 +340,7 @@ def _make_chunk(
             [unit.bounding_box for unit in units if unit.bounding_box is not None]
         ),
         token_count=_unit_tokens(units, count),
+        document_region=document_region,
         overlap_source_chunk_ids=overlap_source_chunk_ids,
         overlap_element_span_ids=[unit.span_id for unit in overlap_spans],
         metadata={

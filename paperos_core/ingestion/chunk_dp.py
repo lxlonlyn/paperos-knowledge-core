@@ -7,6 +7,7 @@ from typing import Any
 from paperos_core.ingestion.sentence_units import SentenceUnit
 
 TINY_TOKEN_THRESHOLD = 250
+FINAL_TINY_WEIGHT = 0.75
 
 
 def partition_units(
@@ -23,25 +24,33 @@ def partition_units(
     if n == 1:
         return [(0, 1)]
 
-    prefix = [0]
+    prefix_tokens = [0]
+    prefix_emergency = [0]
     for unit in units:
-        prefix.append(prefix[-1] + unit.tokens)
+        prefix_tokens.append(prefix_tokens[-1] + unit.tokens)
+        prefix_emergency.append(
+            prefix_emergency[-1] + (1 if unit.emergency_split else 0)
+        )
 
     def span_tokens(start: int, end: int) -> int:
-        return prefix[end] - prefix[start]
+        return prefix_tokens[end] - prefix_tokens[start]
+
+    def span_emergency(start: int, end: int) -> int:
+        return prefix_emergency[end] - prefix_emergency[start]
 
     inf = float("inf")
     costs = [inf] * (n + 1)
     prev = [-1] * (n + 1)
     costs[0] = 0.0
     for end in range(1, n + 1):
-        for start in range(end):
+        for start in range(end - 1, -1, -1):
             tokens = span_tokens(start, end)
             if tokens > hard_max_tokens:
-                continue
+                break
             edge = _edge_cost(
                 units[start:end],
                 tokens=tokens,
+                emergency_count=span_emergency(start, end),
                 target_tokens=target_tokens,
                 is_final=(end == n),
             )
@@ -60,7 +69,6 @@ def partition_units(
                 ):
                     prev[end] = start
     if prev[n] < 0:
-        # Fallback: one unit per chunk (each must fit hard_max)
         return [(index, index + 1) for index in range(n)]
 
     ranges: list[tuple[int, int]] = []
@@ -79,6 +87,7 @@ def _edge_cost(
     units: list[SentenceUnit],
     *,
     tokens: int,
+    emergency_count: int,
     target_tokens: int,
     is_final: bool,
 ) -> float:
@@ -92,10 +101,10 @@ def _edge_cost(
     else:
         boundary_cost = 0.35
     tiny_cost = 0.0
-    if tokens < TINY_TOKEN_THRESHOLD and not is_final:
-        tiny_cost = ((TINY_TOKEN_THRESHOLD - tokens) / TINY_TOKEN_THRESHOLD) ** 2
-    emergency = sum(1 for unit in units if unit.emergency_split)
-    return size_cost + boundary_cost + tiny_cost + emergency * 0.5
+    if tokens < TINY_TOKEN_THRESHOLD:
+        weight = FINAL_TINY_WEIGHT if is_final else 1.0
+        tiny_cost = weight * ((TINY_TOKEN_THRESHOLD - tokens) / TINY_TOKEN_THRESHOLD) ** 2
+    return size_cost + boundary_cost + tiny_cost + emergency_count * 0.5
 
 
 def _better_tie_break(

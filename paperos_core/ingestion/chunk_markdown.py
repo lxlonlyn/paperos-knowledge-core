@@ -26,6 +26,7 @@ def render_chunk_review_markdown(
     hard_max_tokens: int,
     overlap_tokens: int,
     invariants: dict[str, Any] | None = None,
+    citation_stats: dict[str, Any] | None = None,
 ) -> str:
     references_by_id = {reference.id: reference for reference in bundle.references}
     mentions_by_chunk: dict[str, list[CitationMention]] = {}
@@ -43,6 +44,7 @@ def render_chunk_review_markdown(
     )
     resolved_refs = sum(1 for mention in mentions if mention.reference_entry_id)
     resolved_works = sum(1 for mention in mentions if mention.resolved_work_id)
+    span_count = len({mention.citation_span_id for mention in mentions})
 
     lines = [
         "# Chunk Review",
@@ -63,11 +65,26 @@ def render_chunk_review_markdown(
         f"- Max tokens: {max(token_counts) if token_counts else 0}",
         f"- Tiny chunks (<{TINY_TOKEN_THRESHOLD}): {tiny}",
         f"- Emergency oversized sentence splits: {emergency}",
-        f"- Citation mentions: {len(mentions)}",
-        f"- ReferenceEntry resolved: {resolved_refs}",
-        f"- Work resolved: {resolved_works}",
+        f"- Citation spans: {span_count}",
+        f"- Atomic citation targets: {len(mentions)}",
+        f"- ReferenceEntry resolved (atomic): {resolved_refs}",
+        f"- Work resolved (atomic): {resolved_works}",
         "",
     ]
+    if citation_stats:
+        lines.extend(
+            [
+                f"- Fully resolved spans: {citation_stats.get('fully_resolved_span_count', 0)}",
+                f"- Partially resolved spans: {citation_stats.get('partially_resolved_span_count', 0)}",
+                f"- Unresolved spans: {citation_stats.get('unresolved_span_count', 0)}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+        ]
+    )
     if invariants:
         lines.extend(["## Invariants", ""])
         for key, value in invariants.items():
@@ -122,7 +139,10 @@ def _render_chunk_block(
                 if mention.reference_entry_id
                 else None
             )
-            lines.append(f"- `{mention.surface_text}`")
+            lines.append(
+                f"- `{mention.surface_text}` → atomic `{mention.atomic_key}` "
+                f"({mention.resolution_status}, span={mention.span_resolution_status})"
+            )
             lines.append(
                 f"  - ReferenceEntry: {reference.raw_text[:120] + '...' if reference and len(reference.raw_text) > 120 else (reference.raw_text if reference else 'unresolved')}"
             )

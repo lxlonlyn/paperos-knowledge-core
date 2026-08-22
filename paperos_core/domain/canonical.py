@@ -146,6 +146,7 @@ class Chunk(DomainModel):
     bounding_box: tuple[float, float, float, float] | None = None
     token_count: int | None = Field(default=None, ge=1)
     retrieval_text: str | None = None
+    document_region: str | None = None
     citation_mention_ids: list[str] = Field(default_factory=list)
     previous_chunk_id: str | None = None
     next_chunk_id: str | None = None
@@ -155,20 +156,28 @@ class Chunk(DomainModel):
 
 
 class CitationMention(DomainModel):
-    """Inline citation surface form attached to a canonical element / chunk."""
+    """Atomic citation target within one inline citation span."""
 
     id: str
     document_id: str
     canonical_snapshot_id: str
+    citation_span_id: str
     surface_text: str
+    atomic_key: str
     normalized_keys: list[str] = Field(default_factory=list)
     element_id: str
     chunk_id: str | None = None
     character_start: int = Field(ge=0)
     character_end: int = Field(ge=0)
+    group_index: int = Field(ge=0)
+    group_size: int = Field(ge=1)
+    bibliography_scope_id: str | None = None
+    document_region: str | None = None
     reference_entry_id: str | None = None
     resolved_work_id: str | None = None
     resolution_status: str = "unresolved"
+    span_resolution_status: str = "unresolved"
+    failure_reason: str | None = None
     schema_version: str = CANONICAL_SCHEMA_VERSION
     id_version: str = CANONICAL_ID_VERSION
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -195,6 +204,7 @@ class ReferenceEntry(DomainModel):
     pages: str | None = None
     source_element_id: str | None = None
     citation_label: str | None = None
+    bibliography_scope_id: str | None = None
     resolved_document_id: str | None = None
     resolution_status: ReferenceResolutionStatus = ReferenceResolutionStatus.UNRESOLVED
     resolution_confidence: float | None = Field(default=None, ge=0, le=1)
