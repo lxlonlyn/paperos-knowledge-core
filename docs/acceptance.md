@@ -71,6 +71,36 @@ Each of `truth`, `associative`, and `comprehensive` must still execute at least
 one genuine query and its expected channels/stages. This verifies code-path
 coverage rather than a model-specific answer.
 
+## Six-paper chunk and Citation Gold v3 acceptance
+
+The canonical-to-chunk boundary has a focused retained-real-data acceptance:
+
+```bash
+python tests/validation/build_citation_gold_v3.py
+python tests/validation/run_chunk_acceptance.py \
+  --run-dir data/validation/runs/chunk \
+  --corpus-dir data/validation/corpus/chunk \
+  --rebuild-canonical
+```
+
+Gold v3 is independently anchored to raw MinerU source item, domain,
+subindex, and character offsets. Its builder does not import the production
+citation detector or resolver. The unified runner exposes four gates:
+
+1. Source: MinerU→Canonical provenance loss, Gold source survival, chunk holes,
+   and overlaps are all zero.
+2. Structure: all six PDFs pass; wrong region/namespace, hard-max, and empty
+   chunk counts are zero.
+3. Citation Gold v3: missing/extra occurrences, wrong targets/namespaces,
+   unresolved expected targets, unattached targets, source mapping failures,
+   unexpected used references, and missed expected-used references are zero.
+4. Determinism: a second rebuild produces identical complete Chunk/Citation
+   projections and identical source-anchor digests.
+
+The runner records the committed Git SHA and Gold hash, writes the component
+reports, and packages the manifest, Gold/audit, six JSON/Markdown projections,
+contract log, and reports as `data/validation/runs/chunk/result.zip`.
+
 ## Permanent direct-run contracts
 
 These scripts are retained across Cognee upgrades and do not use pytest:

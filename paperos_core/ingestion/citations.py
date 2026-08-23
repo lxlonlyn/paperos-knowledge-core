@@ -9,6 +9,7 @@ from difflib import SequenceMatcher
 
 from paperos_core.domain.canonical import Chunk, CitationMention, ReferenceEntry, Section
 from paperos_core.domain.ids import citation_mention_id, citation_span_id
+from paperos_core.ingestion.citation_candidates import detect_citation_candidates
 from paperos_core.ingestion.inline_domains import (
     bracket_inner,
     iter_bracket_scopes,
@@ -21,9 +22,8 @@ from paperos_core.ingestion.bibliography_scope import (
     REGION_SUPPLEMENT,
     ScopedBibliography,
     assign_bibliography_scopes,
+    FAILURE_NAMESPACE_NOT_ASSIGNED,
     repair_numeric_label_sequence,
-    scope_for_element,
-    scopes_for_region,
 )
 from paperos_core.ingestion.normalization import plain_text
 
@@ -99,6 +99,7 @@ class ReferenceIndexes:
     )
     references: list[ReferenceEntry] = field(default_factory=list)
     scope_id: str | None = None
+    failure_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -186,7 +187,12 @@ def build_scoped_reference_indexes(
     references_by_id = {reference.id: reference for reference in repaired}
     for reference in repaired:
         scope_id = reference_scope.get(reference.id, "default")
-        reference = reference.model_copy(update={"bibliography_scope_id": scope_id})
+        reference = reference.model_copy(
+            update={
+                "bibliography_scope_id": scope_id,
+                "citation_namespace_id": scope_id,
+            }
+        )
         references_by_id[reference.id] = reference
     repaired = [references_by_id[reference.id] for reference in repaired]
 
@@ -203,7 +209,10 @@ def build_scoped_reference_indexes(
         scope_indexes[scope_id] = _indexes_for_references(scoped_refs, scope_id=scope_id)
         existing = assigned_scopes.get(scope_id)
         scopes[scope_id] = BibliographyScope(
-            scope_id=scope_id,
+            namespace_id=scope_id,
+            bibliography_region_id=(
+                existing.bibliography_region_id if existing else None
+            ),
             parent_region=existing.parent_region if existing else REGION_MAIN,
             owner_body_region_id=existing.owner_body_region_id if existing else None,
             reference_ids=[reference.id for reference in scoped_refs],
@@ -315,81 +324,53 @@ def extract_citation_mentions_from_text(
     document_region: str | None = None,
     bibliography_scope_ids: list[str] | None = None,
     bibliography_scope_id: str | None = None,
+    citation_namespace_id: str | None = None,
     region_instance_id: str | None = None,
 ) -> list[CitationMention]:
     scoped, indexes = _resolve_reference_context(
         reference_index,
         document_region=document_region,
         bibliography_scope_ids=bibliography_scope_ids,
-        bibliography_scope_id=bibliography_scope_id,
+        bibliography_scope_id=citation_namespace_id or bibliography_scope_id,
     )
     mentions: list[CitationMention] = []
-    working = text
-    inline_domains = scan_inline_domains(text)
-
-    for bracket in iter_bracket_scopes(text, inline_domains):
-        inner = bracket_inner(text, bracket).strip()
-        surface = text[bracket.start : bracket.end]
-        if _is_negative_bracket_domain(inner, text, bracket.start):
-            continue
-        left_context = text[max(0, bracket.start - 240) : bracket.start]
-        if _YEAR_ONLY_BRACKET_RE.fullmatch(inner):
-            author = _left_author_phrase(text, bracket.start)
-            if author is None:
+    for candidate in detect_citation_candidates(text):
+        if candidate.kind == "bracket":
+            inner = candidate.metadata.get("inner", "")
+            bracket_start = candidate.bracket_start or candidate.start
+            if _is_negative_bracket_domain(inner, text, bracket_start):
                 continue
-            inner = f"{author} {inner}"
-        emitted = _emit_bracket_mentions(
-            inner=inner,
-            surface=surface,
-            indexes=indexes,
-            document_id=document_id,
-            snapshot_id=snapshot_id,
-            element_id=element_id,
-            start=bracket.start,
-            end=bracket.end,
-            document_region=document_region,
-            region_instance_id=region_instance_id,
-            left_context=left_context,
-            mentions=mentions,
-        )
-        if emitted:
-            working = _mask_span(working, bracket.start, bracket.end)
-
-    for match in _AUTHOR_YEAR_PAREN_RE.finditer(working):
-        if _is_venue_false_positive(text, match.start(), match.group(0)):
-            continue
-        mentions.extend(
-            _author_year_mentions(
-                author=match.group("author"),
-                year=match.group("year"),
+            if "author" in candidate.metadata:
+                inner = f"{candidate.metadata['author']} {candidate.metadata['year']}"
+            _emit_bracket_mentions(
+                inner=inner,
+                surface=candidate.surface,
                 indexes=indexes,
                 document_id=document_id,
                 snapshot_id=snapshot_id,
                 element_id=element_id,
-                surface=match.group(0),
-                start=match.start(),
-                end=match.end(),
-                match_kind="author_year_paren",
+                start=candidate.start,
+                end=candidate.end,
                 document_region=document_region,
+                region_instance_id=region_instance_id,
+                left_context=text[max(0, candidate.start - 240) : candidate.start],
+                mentions=mentions,
             )
-        )
-        working = _mask_span(working, match.start(), match.end())
-
-    for match in _AUTHOR_YEAR_INLINE_RE.finditer(working):
-        if _is_venue_false_positive(text, match.start(), match.group(0)):
+            continue
+        if _is_venue_false_positive(text, candidate.start, candidate.surface):
             continue
         mentions.extend(
             _author_year_mentions(
-                author=match.group("author"),
-                year=match.group("year"),
+                author=candidate.metadata["author"],
+                year=candidate.metadata["year"],
                 indexes=indexes,
                 document_id=document_id,
                 snapshot_id=snapshot_id,
                 element_id=element_id,
-                surface=match.group(0),
-                start=match.start(),
-                end=match.end(),
-                match_kind="author_year_inline",
+                surface=candidate.surface,
+                start=candidate.start,
+                end=candidate.end,
+                match_kind=candidate.kind,
                 document_region=document_region,
             )
         )
@@ -557,25 +538,13 @@ def _resolve_reference_context(
     if isinstance(reference_index, ScopedBibliography):
         scoped = reference_index
         scope_id = bibliography_scope_id
-        if scope_id is None and bibliography_scope_ids:
-            if len(bibliography_scope_ids) == 1:
-                scope_id = bibliography_scope_ids[0]
-        if scope_id is None and document_region is not None:
-            candidates = scopes_for_region(document_region, scoped)
-            if len(candidates) == 1:
-                scope_id = candidates[0]
         if scope_id and scope_id in scoped.scope_indexes:
             return scoped, scoped.scope_indexes[scope_id]
-        if document_region is not None:
-            candidates = scopes_for_region(document_region, scoped)
-            if len(candidates) > 1:
-                return scoped, ReferenceIndexes(scope_id=None)
-            if len(candidates) == 1:
-                return scoped, scoped.scope_indexes[candidates[0]]
-        if len(scoped.scope_indexes) == 1:
-            only = next(iter(scoped.scope_indexes.values()))
-            return scoped, only
-        return scoped, ReferenceIndexes(scope_id=None)
+        _ = (document_region, bibliography_scope_ids)
+        return scoped, ReferenceIndexes(
+            scope_id=scope_id,
+            failure_reason=FAILURE_NAMESPACE_NOT_ASSIGNED,
+        )
     if isinstance(reference_index, ReferenceIndexes):
         return None, reference_index
     return None, _legacy_index_to_indexes(reference_index)
@@ -663,7 +632,11 @@ def _resolve_atomic_keys(
                     atomic_key=key,
                     reference=None,
                     resolution_status="unresolved",
-                    failure_reason=failure or FAILURE_MISSING_REFERENCE_ENTRY,
+                    failure_reason=(
+                        indexes.failure_reason
+                        or failure
+                        or FAILURE_MISSING_REFERENCE_ENTRY
+                    ),
                     resolution_kind=None,
                     bibliography_scope_id=indexes.scope_id,
                 )
@@ -844,7 +817,11 @@ def _resolve_author_year_text(
                 atomic_key=normalized,
                 reference=None,
                 resolution_status="unresolved",
-                failure_reason=failure or FAILURE_AMBIGUOUS_AUTHOR_YEAR,
+                failure_reason=(
+                    indexes.failure_reason
+                    or failure
+                    or FAILURE_AMBIGUOUS_AUTHOR_YEAR
+                ),
                 resolution_kind=None,
                 bibliography_scope_id=indexes.scope_id,
             )
@@ -879,11 +856,6 @@ def _bibliography_author_year_keys(
     first = _normalize_author_key(surnames[0])
     keys.add((first, year_token))
     keys.add((_normalize_author_key(f"{surnames[0]} et al"), year_token))
-    first_segment = re.split(r"\band\b|&", authors_text, maxsplit=1)[0].strip()
-    name_tokens = [t for t in re.split(r"[\s,]+", first_segment) if t]
-    if len(name_tokens) >= 2:
-        given = _normalize_author_key(name_tokens[0])
-        keys.add((f"{given} et al", year_token))
     if len(surnames) >= 2:
         keys.add(
             (
@@ -937,7 +909,7 @@ def _fuzzy_author_year_match(
     if not first_author:
         return None
     year_base = re.sub(r"[a-z]$", "", year, flags=re.IGNORECASE)
-    candidates: list[ReferenceEntry] = []
+    scored: list[tuple[int, ReferenceEntry]] = []
     for reference in references:
         if not _reference_matches_year(reference, year, year_base):
             continue
@@ -945,19 +917,25 @@ def _fuzzy_author_year_match(
             plain_text(reference.raw_text).split(str(reference.year or year_base))[0]
         )
         bib_first = _first_author_surname_from_reference(reference, year)
-        bib_tokens = _author_surname_tokens_from_reference(reference, year)
-        if not bib_authors and not bib_first and not bib_tokens:
+        if not bib_authors and not bib_first:
             continue
         first_surname = bib_first or (
             _normalize_author_key(bib_authors[0]) if bib_authors else ""
         )
-        if second_author is None and " and " not in author.casefold() and " et al" not in author.casefold():
-            if any(_fuzzy_surname_match(first_author, token) for token in bib_tokens):
-                candidates.append(reference)
-                continue
-        if first_surname != first_author:
-            if not _fuzzy_surname_match(first_author, first_surname):
-                continue
+        score = 0
+        if first_surname == first_author:
+            score = 4
+        elif _fuzzy_surname_match(first_author, first_surname):
+            score = 3
+        elif " et al" in author.casefold():
+            first_given = _first_author_given_name(reference, year)
+            if first_given == first_author:
+                # Some source papers cite the first author's given name (for
+                # example, ``Elena et al.``).  This is still constrained to
+                # the first-author role and loses to a surname match.
+                score = 1
+        if score == 0:
+            continue
         if second_author is not None:
             if len(bib_authors) < 2:
                 continue
@@ -966,14 +944,30 @@ def _fuzzy_author_year_match(
                 second_author, bib_authors[1]
             ):
                 continue
-            if _fuzzy_surname_match(first_author, first_surname):
-                candidates.append(reference)
-                continue
-        if not _fuzzy_surname_match(first_author, first_surname):
-            continue
-        candidates.append(reference)
-    resolved, _ = _resolve_unique(candidates, "fuzzy")
+        scored.append((score, reference))
+    if not scored:
+        return None
+    best = max(score for score, _ in scored)
+    candidates = [reference for score, reference in scored if score == best]
+    resolved, _ = _resolve_unique(candidates, "first_author_fuzzy")
     return resolved
+
+
+def _first_author_given_name(reference: ReferenceEntry, year: str) -> str:
+    raw = plain_text(reference.raw_text)
+    year_base = re.sub(r"[a-z]$", "", year, flags=re.IGNORECASE)
+    authors_text = raw
+    for token in (year, year_base):
+        if token and token in authors_text:
+            authors_text = authors_text.split(token, 1)[0]
+            break
+    first_chunk = re.split(r",|\sand\s|\s&\s", authors_text.strip(), maxsplit=1)[0]
+    tokens = [
+        token
+        for token in re.split(r"\s+", first_chunk)
+        if token and not re.fullmatch(r"[A-Z]\.?", token)
+    ]
+    return _normalize_author_key(tokens[0]) if len(tokens) >= 2 else ""
 
 
 def _fuzzy_surname_match(citation_token: str, bibliography_token: str) -> bool:
@@ -1098,12 +1092,16 @@ def _work_identity(reference: ReferenceEntry) -> str:
         return f"arxiv:{reference.arxiv_id.casefold()}"
     raw = plain_text(reference.raw_text)
     year_match = _YEAR_RE.search(raw)
-    title_text = raw
-    if year_match is not None:
+    title_text = plain_text(
+        reference.title or str(reference.parsed_fields.get("title") or "")
+    )
+    if not title_text and year_match is not None:
         after_year = raw[year_match.end() :].strip().lstrip(".,; ")
         if after_year:
             title_text = after_year
-    title = re.sub(r"\s+", " ", title_text).strip().casefold()[:200]
+    if not title_text:
+        title_text = raw
+    title = re.sub(r"\s+", " ", title_text).strip().casefold()
     year = reference.year if reference.year is not None else ""
     if year_match is not None and not year:
         year = year_match.group(1)
@@ -1188,6 +1186,7 @@ def _mentions_from_atomic_resolutions(
                 group_index=index,
                 group_size=len(resolutions),
                 bibliography_scope_id=item.bibliography_scope_id,
+                citation_namespace_id=item.bibliography_scope_id,
                 document_region=document_region,
                 reference_entry_id=item.reference.id if item.reference else None,
                 resolution_status=item.resolution_status,
@@ -1300,6 +1299,11 @@ def _is_negative_bracket_domain(inner: str, text: str, start: int) -> bool:
         return True
     if "," in inner and not re.search(r"\d\s*[-–−—]\s*\d", inner):
         parts = [part.strip() for part in inner.split(",")]
+        if len(parts) > 1 and all(part.isdigit() for part in parts):
+            # Tensor/image shapes such as [64, 64] and [256, 256, 256]
+            # are structured dimensions, not grouped citation labels.
+            if len(set(parts)) == 1:
+                return True
         if len(parts) == 2 and parts[0].isdigit():
             if parts[0] == "0" and parts[1].casefold() in {"1", "t"}:
                 return True
@@ -1329,18 +1333,25 @@ def _is_numeric_citation_part(part: str) -> bool:
     return False
 
 
-def _left_author_phrase(text: str, bracket_start: int) -> str | None:
+def _left_author_match(text: str, bracket_start: int) -> tuple[str, int] | None:
     prefix = text[max(0, bracket_start - 120) : bracket_start]
     patterns = (
         r"(?P<author>[A-ZÀ-ÖØ-Þ][\w''\u00C0-\u024F\-]+(?:\s+et\s+al\.?)?(?:\s+and\s+[A-ZÀ-ÖØ-Þ][\w''\u00C0-\u024F\-]+)?)\s*$",
         r"(?P<author>[A-ZÀ-ÖØ-Þ][\w''\u00C0-\u024F\-]+)\s*$",
     )
-    stripped = prefix.strip()
+    stripped = prefix.rstrip()
     for pattern in patterns:
         match = re.search(pattern, stripped)
         if match is not None:
-            return match.group("author").strip()
+            author = match.group("author").strip()
+            absolute_start = max(0, bracket_start - 120) + match.start("author")
+            return author, absolute_start
     return None
+
+
+def _left_author_phrase(text: str, bracket_start: int) -> str | None:
+    match = _left_author_match(text, bracket_start)
+    return match[0] if match is not None else None
 
 
 def _split_ocred_symbolic_group(inner: str) -> list[str] | None:

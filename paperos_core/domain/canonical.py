@@ -25,6 +25,10 @@ from paperos_core.domain.parsing import ParsedIngestionResult
 class SourceSpan(DomainModel):
     artifact_id: str
     item_index: int = Field(ge=0)
+    source_domain: str = "text"
+    source_subindex: int | None = Field(default=None, ge=0)
+    character_start: int | None = Field(default=None, ge=0)
+    character_end: int | None = Field(default=None, ge=0)
     page: int | None = Field(default=None, ge=1)
     bounding_box: tuple[float, float, float, float] | None = None
 
@@ -147,6 +151,7 @@ class Chunk(DomainModel):
     token_count: int | None = Field(default=None, ge=1)
     retrieval_text: str | None = None
     document_region: str | None = None
+    citation_namespace_id: str | None = None
     citation_mention_ids: list[str] = Field(default_factory=list)
     previous_chunk_id: str | None = None
     next_chunk_id: str | None = None
@@ -172,6 +177,7 @@ class CitationMention(DomainModel):
     group_index: int = Field(ge=0)
     group_size: int = Field(ge=1)
     bibliography_scope_id: str | None = None
+    citation_namespace_id: str | None = None
     document_region: str | None = None
     reference_entry_id: str | None = None
     resolved_work_id: str | None = None
@@ -205,6 +211,7 @@ class ReferenceEntry(DomainModel):
     source_element_id: str | None = None
     citation_label: str | None = None
     bibliography_scope_id: str | None = None
+    citation_namespace_id: str | None = None
     resolved_document_id: str | None = None
     resolution_status: ReferenceResolutionStatus = ReferenceResolutionStatus.UNRESOLVED
     resolution_confidence: float | None = Field(default=None, ge=0, le=1)

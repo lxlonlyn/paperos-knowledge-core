@@ -14,6 +14,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from paperos_core.ingestion.chunk_eligibility import classify_chunk_eligibility
+from paperos_core.ingestion.document_regions import build_document_regions
+from paperos_core.ingestion.sentence_units import element_text
 from tests.validation.chunk_corpus_review import _load_bundle_from_snapshot_dir, _guess_pdf_for_bundle
 
 
@@ -34,11 +36,19 @@ def _git_commit() -> str | None:
 def validate_paper(*, bundle, chunks_json: dict) -> dict:
     chunks = chunks_json["chunks"]
     section_by_id = {section.id: section for section in bundle.sections}
+    _, element_regions = build_document_regions(
+        elements=bundle.elements, sections=bundle.sections
+    )
     eligible = []
     excluded = []
     exclusion_stats: Counter[str] = Counter()
     for element in bundle.elements:
-        eligibility = classify_chunk_eligibility(element, section_by_id=section_by_id)
+        region_info = element_regions.get(element.id)
+        eligibility = classify_chunk_eligibility(
+            element,
+            section_by_id=section_by_id,
+            region_type=region_info.region_type if region_info else None,
+        )
         if not eligibility.eligible:
             excluded.append(
                 {
@@ -55,7 +65,7 @@ def validate_paper(*, bundle, chunks_json: dict) -> dict:
     holes = 0
     overlaps = 0
     for element in eligible:
-        source = element.text or element.markdown or ""
+        source = element_text(element)
         spans = []
         for chunk in chunks:
             for span in chunk.get("spans", []):

@@ -174,6 +174,38 @@ MinerU -> Canonical Document / Section / Element / Reference
        -> add_data_points
 ```
 
+Inside `AcademicChunkTask`, source structure is resolved before citation
+resolution:
+
+```text
+MinerU source item/domain/offset
+-> Canonical Element + SourceSpan
+-> ordered DocumentRegion state machine
+-> CitationNamespace assignment
+-> inline-domain segmentation and CitationCandidate detection
+-> atomic citation resolution in the preassigned namespace
+-> ChunkProjection and citation-to-chunk span attachment
+```
+
+One actual `REFERENCES` region instance creates exactly one
+`CitationNamespace`; gaps between Reference elements never create namespace
+boundaries. After the complete region stream exists, each body region binds to
+the nearest following bibliography, or to the nearest preceding bibliography
+when none follows. This gives main and supplement independent namespaces when
+both have bibliographies, while an appendix after the main bibliography
+inherits that bibliography. The resolver does not retry another namespace: a
+missing binding is retained as `NAMESPACE_NOT_ASSIGNED`.
+
+Reference regions feed `ReferenceEntry` and citation resolution only. They are
+excluded from ordinary knowledge chunks and citation scanning. Appendix and
+supplement bodies, tables, figure/table captions, and footnotes remain eligible
+source evidence. Inline/display math is segmented before bracket scanning, so
+brackets inside math are not prose citation candidates.
+
+`Chunk.text` contains only authoritative source-derived evidence. Rebuildable
+context such as paper title, section breadcrumb, and resolved referenced-work
+identity belongs in `retrieval_text`, which is the lexical/vector projection.
+
 PaperOS decides the academic chunking and scholarly identity rules; Cognee
 executes the pipeline, provides the injected tokenizer, and owns the final
 DataPoint write. A permanent random Work ID is allocated once in

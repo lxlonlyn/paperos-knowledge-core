@@ -100,12 +100,6 @@ def iter_bracket_scopes(text: str, domains: list[InlineDomain]) -> list[InlineDo
     while index < length:
         inside_math = any(start <= index < end for start, end in math_spans)
         if inside_math:
-            if text[index] == "[":
-                end = _scan_balanced(text, index + 1, "]")
-                if end is not None and _is_prose_numeric_citation(text, index, end):
-                    brackets.append(InlineDomain(InlineDomainKind.BRACKET_SCOPE, index, end))
-                    index = end
-                    continue
             index += 1
             continue
         if text[index] != "[":

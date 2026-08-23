@@ -368,6 +368,15 @@ Optional fields:
 
 The section path must be deterministic within the same canonical schema and processing version.
 
+## SourceSpan
+
+Traces Canonical evidence to its upstream MinerU source field. Required fields
+are `artifact_id`, `item_index`, and `source_domain`. Optional
+`source_subindex` identifies a caption/footnote entry, while
+`character_start` and `character_end` delimit the source field. Page and
+bounding box remain physical provenance. These coordinates make source
+survival auditable without normalized-text substring matching.
+
 ## Element
 
 Represents one typed document element.
@@ -420,6 +429,19 @@ Element-specific fields should be represented through typed optional fields or a
 
 The implementation must not assume that every element contains plain text.
 
+## DocumentRegion and CitationNamespace
+
+`DocumentRegion` is a deterministic derived partition of the ordered Element
+tape into `abstract`, `main`, `references`, and `supplement` instances.
+Appendix is a supplement subtype. Each Element receives one `region_id` and
+`region_type`.
+
+Each real references-region instance creates one `CitationNamespace` with a
+stable run-local `citation_namespace_id`. Body regions receive a namespace only
+after the complete region stream is built: nearest following bibliography
+first, nearest preceding bibliography otherwise. Reference order gaps, label
+counts, citation success, and bibliography size are never namespace signals.
+
 ## Chunk
 
 Represents one retrieval unit derived from canonical sections and elements.
@@ -442,6 +464,10 @@ Optional fields:
 * `page_start`
 * `page_end`
 * `token_count`
+* `retrieval_text`
+* `document_region`
+* `citation_namespace_id`
+* `citation_mention_ids`
 * exact element-local spans with `character_start_in_element`,
   `character_end_in_element`, `token_start`, and `token_end`
 * `previous_chunk_id`
@@ -449,9 +475,13 @@ Optional fields:
 * `overlap_source_chunk_ids`
 * `metadata`
 
-A Chunk must retain references to its canonical elements.
+A Chunk must retain references to its canonical elements. References-region
+elements are not eligible for ordinary knowledge chunks; supplement and
+appendix evidence is eligible.
 
-Chunk text is a retrieval representation, not a replacement for the underlying elements.
+`Chunk.text` is authoritative source evidence, not synthetic retrieval
+context. `retrieval_text` is the rebuildable representation used by lexical and
+embedding indexes and may add paper/section and resolved-work context.
 
 Changing chunking rules may create new Chunk IDs under a new chunking or ID version.
 
@@ -482,6 +512,8 @@ Optional fields:
 * `issue`
 * `pages`
 * `source_element_id`
+* `bibliography_scope_id` (compatibility name)
+* `citation_namespace_id`
 * `resolved_document_id`
 * `resolution_status`
 * `resolution_confidence`
@@ -502,6 +534,17 @@ resolution is the `reference_work_links` record and
 `ReferenceDataPoint.resolved_work_id`.
 
 A failed or ambiguous Work resolution must not create a false CITES relation.
+
+## CitationMention
+
+Represents one atomic target inside one source citation span. A grouped surface
+such as `[2–4]` therefore produces three CitationMention records that share a
+`citation_span_id`, source surface, and character range. Each record preserves
+its `atomic_key`, group position/size, `citation_namespace_id`,
+`reference_entry_id`, resolution status/diagnostic, and owning `chunk_id`.
+Partial resolution is retained atom by atom. Candidate detection does not know
+about references or chunks, and resolution is restricted to the namespace
+assigned during the DocumentRegion phase.
 
 ## Semantic knowledge model
 

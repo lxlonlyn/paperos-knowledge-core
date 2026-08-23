@@ -28,9 +28,13 @@ from paperos_core.ingestion.citations import (
     build_scoped_reference_indexes,
     extract_citation_mentions_from_text,
 )
-from paperos_core.ingestion.bibliography_scope import scope_for_element
+from paperos_core.ingestion.bibliography_scope import (
+    FAILURE_NAMESPACE_NOT_ASSIGNED,
+    REGION_REFERENCES,
+)
 from paperos_core.ingestion.document_regions import (
     build_document_regions,
+    citation_namespace_for_element,
     region_for_element,
     region_id_for_element,
 )
@@ -77,7 +81,12 @@ def build_chunks(
 
     eligible: list[Element] = []
     for element in elements:
-        eligibility = classify_chunk_eligibility(element, section_by_id=section_by_id)
+        region_info = element_regions.get(element.id)
+        eligibility = classify_chunk_eligibility(
+            element,
+            section_by_id=section_by_id,
+            region_type=region_info.region_type if region_info else None,
+        )
         if not eligibility.eligible:
             continue
         eligible.append(element)
@@ -121,12 +130,14 @@ def build_chunks(
             ):
                 region = region_for_element(element.id, element_regions)
                 region_info = element_regions.get(element.id)
+                if region_info and region_info.region_type == REGION_REFERENCES:
+                    continue
                 region_id = region_info.region_id if region_info else None
-                scope_id, scope_diag = scope_for_element(
-                    element.id,
-                    element_regions,
-                    reference_indexes,
-                    document_regions,
+                scope_id = citation_namespace_for_element(element.id, element_regions)
+                scope_diag = (
+                    None
+                    if scope_id in reference_indexes.scope_indexes
+                    else FAILURE_NAMESPACE_NOT_ASSIGNED
                 )
                 extracted = extract_citation_mentions_from_text(
                     document_id=document.id,
@@ -135,7 +146,7 @@ def build_chunks(
                     text=prose,
                     reference_index=reference_indexes,
                     document_region=region,
-                    bibliography_scope_id=scope_id,
+                    citation_namespace_id=scope_id,
                     region_instance_id=region_id,
                 )
                 if scope_diag:
@@ -411,6 +422,11 @@ def _make_chunk(
         ),
         token_count=_unit_tokens(units, count),
         document_region=document_region,
+        citation_namespace_id=(
+            citation_namespace_for_element(first_element_id, element_regions)
+            if first_element_id
+            else None
+        ),
         overlap_source_chunk_ids=overlap_source_chunk_ids,
         overlap_element_span_ids=[unit.span_id for unit in overlap_spans],
         metadata={

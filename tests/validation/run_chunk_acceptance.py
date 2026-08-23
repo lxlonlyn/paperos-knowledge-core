@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified chunk/citation acceptance runner with failure ledger."""
+"""Run the four authoritative six-paper chunk/citation acceptance gates."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -31,275 +32,297 @@ def _git_commit() -> str | None:
         return None
 
 
-def _gold_hash(path: Path) -> str | None:
+def _load_json(path: Path) -> Any:
     if not path.exists():
-        return None
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _run_py(script: str, *script_args: str) -> int:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPOSITORY_ROOT)
-    return subprocess.call([sys.executable, script, *script_args], cwd=REPOSITORY_ROOT, env=env)
+    return subprocess.call(
+        [sys.executable, script, *script_args],
+        cwd=REPOSITORY_ROOT,
+        env=env,
+    )
 
 
-def _gate_result(*, exit_code: int | None, failures: int = 0, **metrics: Any) -> dict[str, Any]:
-    if exit_code is None:
-        return {"status": "NOT_CHECKED", "failures": failures, **metrics}
-    status = "PASS" if exit_code == 0 and failures == 0 else "FAIL"
-    return {"status": status, "failures": failures, **metrics}
+def _gate(status: bool, failures: int, **metrics: Any) -> dict[str, Any]:
+    return {"status": "PASS" if status and failures == 0 else "FAIL", "failures": failures, **metrics}
 
 
-def _load_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+def _projection_hashes(run_dir: Path) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for path in sorted(run_dir.glob("*.chunks.json")):
+        payload = _load_json(path)
+        deterministic_projection = {
+            "snapshot_id": payload.get("snapshot_id"),
+            "chunking_version": payload.get("chunking_version"),
+            "chunks": payload.get("chunks", []),
+            "citation_mentions": payload.get("citation_mentions", []),
+        }
+        hashes[path.name] = hashlib.sha256(
+            json.dumps(
+                deterministic_projection,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    return hashes
+
+
+def _source_anchor_hashes(gold_report: dict[str, Any]) -> dict[str, str | None]:
+    return {
+        paper: result.get("source_anchor_digest")
+        for paper, result in sorted(gold_report.get("papers", {}).items())
+    }
+
+
+def _chunk_structure_metrics(run_dir: Path, hard_max: int) -> tuple[int, int]:
+    hard_max_violations = 0
+    empty_chunks = 0
+    for path in run_dir.glob("*.chunks.json"):
+        for chunk in _load_json(path).get("chunks", []):
+            hard_max_violations += int((chunk.get("token_count") or 0) > hard_max)
+            empty_chunks += int(not (chunk.get("text") or "").strip())
+    return hard_max_violations, empty_chunks
+
+
+def _write_result_package(
+    *,
+    run_dir: Path,
+    gold: Path,
+    summary: dict[str, Any],
+) -> Path:
+    candidates = [
+        run_dir / "acceptance-summary.json",
+        run_dir / "canonical-source-survival.json",
+        run_dir / "chunk-source-coverage.json",
+        run_dir / "chunk-regions-scopes.json",
+        run_dir / "citation-gold-v3-validation.json",
+        run_dir / "reference-usage.json",
+        run_dir / "chunk-corpus-review.json",
+        run_dir / "failure-ledger.json",
+        run_dir / "logs" / "contracts" / CONTRACT_REPORT_NAME,
+        gold,
+        gold.with_name("gold-v3-audit.json"),
+        gold.with_name("gold-v3-audit.md"),
+        *sorted(run_dir.glob("*.chunks.json")),
+        *sorted(run_dir.glob("*.chunks.md")),
+        *sorted((run_dir / "logs").rglob("*")),
+    ]
+    files = sorted({path.resolve() for path in candidates if path.is_file()})
+    manifest_path = run_dir / "result-manifest.json"
+    manifest = {
+        "git_commit": summary["git_commit"],
+        "gold_version": summary["gold_version"],
+        "gold_hash": summary["gold_hash"],
+        "overall_status": summary["overall_status"],
+        "files": [
+            {
+                "path": (
+                    str(path.relative_to(REPOSITORY_ROOT))
+                    if path.is_relative_to(REPOSITORY_ROOT)
+                    else path.name
+                ),
+                "sha256": _sha256(path),
+                "bytes": path.stat().st_size,
+            }
+            for path in files
+        ],
+    }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    files.append(manifest_path.resolve())
+    package = run_dir / "result.zip"
+    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(files):
+            if path.is_relative_to(run_dir.resolve()):
+                arcname = path.relative_to(run_dir.resolve())
+            elif path.is_relative_to(REPOSITORY_ROOT):
+                arcname = Path("repository") / path.relative_to(REPOSITORY_ROOT)
+            else:
+                arcname = Path(path.name)
+            archive.write(path, arcname.as_posix())
+    return package
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, default=Path("data/validation/runs/chunk"))
     parser.add_argument("--corpus-dir", type=Path, default=Path("data/validation/corpus/chunk"))
-    parser.add_argument("--gold", type=Path, default=Path("tests/fixtures/chunk/citation_gold_v2.json"))
+    parser.add_argument("--gold", type=Path, default=Path("tests/fixtures/chunk/citation_gold_v3.json"))
     parser.add_argument("--iteration", type=int, default=None)
     parser.add_argument("--rebuild-canonical", action="store_true")
     parser.add_argument("--skip-determinism", action="store_true")
     args = parser.parse_args()
-
-    ledger_path = args.run_dir / "failure-ledger.json"
-    ledger: list[dict] = _load_json(ledger_path) if ledger_path.exists() else []
-    if not isinstance(ledger, list):
-        ledger = []
-    iteration = args.iteration if args.iteration is not None else len(ledger) + 1
+    args.run_dir = args.run_dir.resolve()
+    args.corpus_dir = args.corpus_dir.resolve()
+    args.gold = args.gold.resolve()
+    args.run_dir.mkdir(parents=True, exist_ok=True)
 
     chunk_args = [
         "tests/validation/chunk_corpus_review.py",
-        "--run-dir",
-        str(args.run_dir),
-        "--corpus-dir",
-        str(args.corpus_dir),
-        "--overlap-tokens",
-        "0",
+        "--run-dir", str(args.run_dir),
+        "--corpus-dir", str(args.corpus_dir),
+        "--overlap-tokens", "0",
         "--rechunk-canonical",
     ]
     if args.rebuild_canonical:
         chunk_args.append("--rebuild-canonical")
-    structure_code = _run_py(*chunk_args)
 
+    structure_code = _run_py(*chunk_args)
     survival_code = _run_py(
         "tests/validation/validate_canonical_source_survival.py",
-        "--run-dir",
-        str(args.run_dir),
-        "--corpus-dir",
-        str(args.corpus_dir),
-        "--gold",
-        str(args.gold),
+        "--run-dir", str(args.run_dir),
+        "--corpus-dir", str(args.corpus_dir),
+        "--gold", str(args.gold),
     )
-
     coverage_code = _run_py(
         "tests/validation/validate_chunk_source_coverage.py",
-        "--run-dir",
-        str(args.run_dir),
-        "--corpus-dir",
-        str(args.corpus_dir),
+        "--run-dir", str(args.run_dir),
+        "--corpus-dir", str(args.corpus_dir),
     )
-
     regions_code = _run_py(
         "tests/validation/validate_chunk_regions_scopes.py",
-        "--run-dir",
-        str(args.run_dir),
-        "--corpus-dir",
-        str(args.corpus_dir),
+        "--run-dir", str(args.run_dir),
+        "--corpus-dir", str(args.corpus_dir),
     )
-
-    reference_usage_code = _run_py(
+    gold_code = _run_py(
+        "tests/validation/validate_citation_gold_v3.py",
+        "--gold", str(args.gold),
+        "--run-dir", str(args.run_dir),
+    )
+    reference_code = _run_py(
         "tests/validation/validate_reference_usage.py",
-        "--run-dir",
-        str(args.run_dir),
-        "--corpus-dir",
-        str(args.corpus_dir),
+        "--gold", str(args.gold),
+        "--run-dir", str(args.run_dir),
+        "--corpus-dir", str(args.corpus_dir),
     )
-
-    negative_code = _run_py(
-        "tests/validation/validate_negative_citations.py",
-        "--run-dir",
-        str(args.run_dir),
-    )
-
-    gold_code = 2
-    if args.gold.exists():
-        gold_code = _run_py(
-            "tests/validation/validate_citation_gold_v2.py",
-            "--gold",
-            str(args.gold),
-            "--run-dir",
-            str(args.run_dir),
-        )
 
     chunk_report = _load_json(args.run_dir / "chunk-corpus-review.json")
     survival_report = _load_json(args.run_dir / "canonical-source-survival.json")
     coverage_report = _load_json(args.run_dir / "chunk-source-coverage.json")
     regions_report = _load_json(args.run_dir / "chunk-regions-scopes.json")
-    reference_usage_report = _load_json(args.run_dir / "reference-usage.json")
-    negative_report = _load_json(args.run_dir / "negative-citations.json")
-    gold_report = _load_json(args.run_dir / "citation-gold-v2-validation.json")
+    gold_report = _load_json(args.run_dir / "citation-gold-v3-validation.json")
+    reference_report = _load_json(args.run_dir / "reference-usage.json")
 
-    structure_failures = chunk_report.get("pdf_count", 0) - chunk_report.get("pass_count", 0)
-    canonical_source_loss = survival_report.get("failure_count", 0)
-    chunk_source_holes = coverage_report.get("chunk_source_holes", 0)
-    chunk_source_overlaps = coverage_report.get("chunk_source_overlaps", 0)
-    wrong_regions = regions_report.get("wrong_regions", 0)
-    wrong_scopes = regions_report.get("wrong_bibliography_scopes", 0)
-    citation_missing = gold_report.get("missing_occurrences", 0)
-    citation_extra = gold_report.get("extra_occurrences", 0)
-    citation_wrong_targets = gold_report.get("wrong_targets", 0)
-    citation_unresolved_expected = gold_report.get("unresolved_expected_targets", 0)
-    unattached_targets = gold_report.get("unattached_targets", 0)
-    missed_used_references = reference_usage_report.get("missed_used_references")
-    unexpected_used_references = reference_usage_report.get("unexpected_used_references", 0)
-    negative_false_positives = negative_report.get("negative_false_positives", 0)
+    hard_max = int(chunk_report.get("chunk_hard_max_tokens", 0))
+    hard_max_violations, empty_chunks = _chunk_structure_metrics(args.run_dir, hard_max)
+    structure_failures = int(chunk_report.get("pdf_count", 0)) - int(chunk_report.get("pass_count", 0))
+    wrong_regions = int(regions_report.get("wrong_regions", 0))
+    wrong_namespaces = int(regions_report.get("wrong_namespaces", 0))
+    source_failures = int(survival_report.get("failure_count", 0))
+    holes = int(coverage_report.get("chunk_source_holes", 0))
+    overlaps = int(coverage_report.get("chunk_source_overlaps", 0))
+    citation_metrics = {
+        "missing_occurrences": int(gold_report.get("missing_occurrences", 0)),
+        "extra_occurrences": int(gold_report.get("extra_occurrences", 0)),
+        "wrong_targets": int(gold_report.get("wrong_targets", 0)),
+        "unresolved_expected_targets": int(gold_report.get("unresolved_expected_targets", 0)),
+        "unattached_targets": int(gold_report.get("unattached_targets", 0)),
+        "wrong_namespaces": int(gold_report.get("wrong_namespaces", 0)),
+        "source_mapping_failures": int(gold_report.get("source_mapping_failures", 0)),
+        "unexpected_used_references": int(reference_report.get("unexpected_used_references", 0)),
+        "missed_expected_used_references": int(reference_report.get("missed_used_references", 0)),
+    }
 
+    source_failure_count = source_failures + holes + overlaps
+    structure_failure_count = structure_failures + wrong_regions + wrong_namespaces + hard_max_violations + empty_chunks
+    citation_failure_count = sum(citation_metrics.values())
     gates: dict[str, dict[str, Any]] = {
-        "structure": _gate_result(
-            exit_code=structure_code,
-            failures=structure_failures,
-            structure_only_status=chunk_report.get("overall_status"),
-        ),
-        "canonical_source_survival": _gate_result(
-            exit_code=survival_code,
-            failures=canonical_source_loss,
+        "source": _gate(
+            survival_code == 0 and coverage_code == 0,
+            source_failure_count,
             canonical_source_loss=survival_report.get("canonical_source_loss", 0),
             gold_canonical_source_loss=survival_report.get("gold_canonical_source_loss", 0),
+            chunk_holes=holes,
+            chunk_overlaps=overlaps,
         ),
-        "source_coverage": _gate_result(
-            exit_code=coverage_code,
-            failures=chunk_source_holes + chunk_source_overlaps,
-            holes=chunk_source_holes,
-            overlaps=chunk_source_overlaps,
+        "structure": _gate(
+            structure_code == 0 and regions_code == 0,
+            structure_failure_count,
+            pdf_failures=structure_failures,
+            wrong_regions=wrong_regions,
+            wrong_namespaces=wrong_namespaces,
+            hard_max_violations=hard_max_violations,
+            empty_chunks=empty_chunks,
         ),
-        "citation_occurrence": _gate_result(
-            exit_code=0 if (citation_missing + citation_extra) == 0 and args.gold.exists() else (1 if args.gold.exists() else None),
-            failures=citation_missing + citation_extra,
-            missing=citation_missing,
-            extra=citation_extra,
+        "citation_gold_v3": _gate(
+            gold_code == 0 and reference_code == 0,
+            citation_failure_count,
+            **citation_metrics,
         ),
-        "citation_targets": _gate_result(
-            exit_code=0 if (citation_wrong_targets + citation_unresolved_expected) == 0 and args.gold.exists() else (1 if args.gold.exists() and (citation_wrong_targets + citation_unresolved_expected) > 0 else (0 if args.gold.exists() else None)),
-            failures=citation_wrong_targets + citation_unresolved_expected,
-            wrong=citation_wrong_targets,
-            unresolved_expected=citation_unresolved_expected,
-        ),
-        "citation_attachment": _gate_result(
-            exit_code=0 if unattached_targets == 0 and args.gold.exists() else (1 if args.gold.exists() and unattached_targets > 0 else (0 if args.gold.exists() else None)),
-            failures=unattached_targets,
-            unattached=unattached_targets,
-        ),
-        "regions": _gate_result(exit_code=0 if wrong_regions == 0 else 1, failures=wrong_regions, wrong=wrong_regions),
-        "bibliography_scopes": _gate_result(
-            exit_code=0 if wrong_scopes == 0 else 1,
-            failures=wrong_scopes,
-            wrong=wrong_scopes,
-        ),
-        "reference_usage": _gate_result(
-            exit_code=0 if unexpected_used_references == 0 else 1,
-            failures=unexpected_used_references,
-            unexpected=unexpected_used_references,
-            missed=missed_used_references,
-            missed_gate=reference_usage_report.get("missed_gate", "NOT_CHECKED"),
-        ),
-        "negative_cases": _gate_result(
-            exit_code=0 if negative_false_positives == 0 else 1,
-            failures=negative_false_positives,
-            false_positive=negative_false_positives,
-        ),
-        "determinism": _gate_result(exit_code=None, failures=0),
+        "determinism": {"status": "NOT_CHECKED", "failures": 0},
     }
 
     determinism_failures = 0
-    if not args.skip_determinism and all(
-        gate["status"] == "PASS" for gate in gates.values() if gate["status"] != "NOT_CHECKED"
-    ):
-        first_summary = json.dumps(
-            {
-                "gates": gates,
-                "chunk_source_holes": chunk_source_holes,
-                "citation_missing": citation_missing,
-            },
-            sort_keys=True,
-        )
+    first_projection_hashes = _projection_hashes(args.run_dir)
+    first_anchor_hashes = _source_anchor_hashes(gold_report)
+    if not args.skip_determinism and all(gate["status"] == "PASS" for name, gate in gates.items() if name != "determinism"):
         second_structure = _run_py(*chunk_args)
         second_gold = _run_py(
-            "tests/validation/validate_citation_gold_v2.py",
-            "--gold",
-            str(args.gold),
-            "--run-dir",
-            str(args.run_dir),
+            "tests/validation/validate_citation_gold_v3.py",
+            "--gold", str(args.gold),
+            "--run-dir", str(args.run_dir),
         )
-        second_chunk = _load_json(args.run_dir / "chunk-corpus-review.json")
-        second_gold_report = _load_json(args.run_dir / "citation-gold-v2-validation.json")
-        second_summary = json.dumps(
-            {
-                "structure_code": second_structure,
-                "gold_code": second_gold,
-                "pass_count": second_chunk.get("pass_count"),
-                "missing": second_gold_report.get("missing_occurrences"),
-                "extra": second_gold_report.get("extra_occurrences"),
-            },
-            sort_keys=True,
+        second_gold_report = _load_json(args.run_dir / "citation-gold-v3-validation.json")
+        second_projection_hashes = _projection_hashes(args.run_dir)
+        second_anchor_hashes = _source_anchor_hashes(second_gold_report)
+        deterministic = (
+            second_structure == 0
+            and second_gold == 0
+            and first_projection_hashes == second_projection_hashes
+            and first_anchor_hashes == second_anchor_hashes
         )
-        if second_structure != 0 or second_gold != 0 or first_summary != second_summary:
-            determinism_failures = 1
-        gates["determinism"] = _gate_result(exit_code=0 if determinism_failures == 0 else 1, failures=determinism_failures)
+        determinism_failures = 0 if deterministic else 1
+        gates["determinism"] = _gate(
+            deterministic,
+            determinism_failures,
+            projection_hashes=second_projection_hashes,
+            source_anchor_hashes=second_anchor_hashes,
+        )
 
     overall_pass = all(gate["status"] == "PASS" for gate in gates.values())
     summary = {
         "overall_status": "PASS" if overall_pass else "FAIL",
         "git_commit": _git_commit(),
-        "gold_version": "citation-gold-v2" if args.gold.exists() else "missing",
-        "gold_hash": _gold_hash(args.gold),
-        "overlap_tokens": chunk_report.get("overlap_tokens", 0),
+        "gold_version": "citation-gold-v3",
+        "gold_hash": _sha256(args.gold),
         "pdf_count": chunk_report.get("pdf_count", 0),
-        "structure_failures": structure_failures,
-        "canonical_source_loss": canonical_source_loss,
-        "chunk_source_holes": chunk_source_holes,
-        "chunk_source_overlaps": chunk_source_overlaps,
-        "citation_missing_occurrences": citation_missing,
-        "citation_extra_occurrences": citation_extra,
-        "citation_wrong_targets": citation_wrong_targets,
-        "citation_unresolved_expected_targets": citation_unresolved_expected,
-        "citation_unattached_targets": unattached_targets,
+        "overlap_tokens": chunk_report.get("overlap_tokens", 0),
+        "canonical_source_loss": survival_report.get("canonical_source_loss", 0),
+        "gold_canonical_source_loss": survival_report.get("gold_canonical_source_loss", 0),
+        "chunk_source_holes": holes,
+        "chunk_source_overlaps": overlaps,
         "wrong_regions": wrong_regions,
-        "wrong_bibliography_scopes": wrong_scopes,
-        "missed_used_references": missed_used_references,
-        "unexpected_used_references": unexpected_used_references,
-        "negative_false_positives": negative_false_positives,
+        "wrong_namespaces": wrong_namespaces,
+        "hard_max_violations": hard_max_violations,
+        "empty_chunks": empty_chunks,
+        **citation_metrics,
         "determinism_failures": determinism_failures,
         "gates": gates,
         "timestamp": datetime.now(UTC).isoformat(),
     }
-
     acceptance_path = args.run_dir / "acceptance-summary.json"
     acceptance_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    ledger_path = args.run_dir / "failure-ledger.json"
+    ledger = _load_json(ledger_path)
+    if not isinstance(ledger, list):
+        ledger = []
     ledger.append(
         {
-            "iteration": iteration,
+            "iteration": args.iteration if args.iteration is not None else len(ledger) + 1,
             "timestamp": summary["timestamp"],
+            "git_commit": summary["git_commit"],
             "overall_status": summary["overall_status"],
             "gates": {name: gate["status"] for name, gate in gates.items()},
-            "summary": {
-                "structure_failures": structure_failures,
-                "canonical_source_loss": canonical_source_loss,
-                "chunk_source_holes": chunk_source_holes,
-                "chunk_source_overlaps": chunk_source_overlaps,
-                "citation_missing_occurrences": citation_missing,
-                "citation_extra_occurrences": citation_extra,
-                "citation_wrong_targets": citation_wrong_targets,
-                "citation_unattached_targets": unattached_targets,
-                "wrong_regions": wrong_regions,
-                "wrong_bibliography_scopes": wrong_scopes,
-                "determinism_failures": determinism_failures,
-            },
         }
     )
     ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -312,28 +335,22 @@ def main() -> int:
         "git_commit": summary["git_commit"],
         "gold_version": summary["gold_version"],
         "gold_hash": summary["gold_hash"],
-        "overlap_tokens": summary["overlap_tokens"],
-        "pdf_count": summary["pdf_count"],
         "gates": gates,
         "metrics": summary,
-        "timestamp": summary["timestamp"],
         "reports": {
-            "acceptance_summary": str(acceptance_path.relative_to(args.run_dir)),
-            "failure_ledger": str(ledger_path.relative_to(args.run_dir)),
-            "chunk_corpus_review": "chunk-corpus-review.json",
-            "canonical_source_survival": "canonical-source-survival.json",
-            "chunk_source_coverage": "chunk-source-coverage.json",
-            "chunk_regions_scopes": "chunk-regions-scopes.json",
-            "citation_gold_v2": "citation-gold-v2-validation.json",
+            "source": ["canonical-source-survival.json", "chunk-source-coverage.json"],
+            "structure": ["chunk-corpus-review.json", "chunk-regions-scopes.json"],
+            "citation_gold_v3": ["citation-gold-v3-validation.json", "reference-usage.json"],
         },
     }
     contract_path.write_text(json.dumps(contract, ensure_ascii=False, indent=2), encoding="utf-8")
+    package = _write_result_package(run_dir=args.run_dir, gold=args.gold, summary=summary)
 
     print(json.dumps(summary, indent=2))
     print(f"acceptance-summary: {acceptance_path}")
-    print(f"failure-ledger: {ledger_path}")
     print(f"contract-report: {contract_path}")
-    return 0 if summary["overall_status"] == "PASS" else 1
+    print(f"result-package: {package}")
+    return 0 if overall_pass else 1
 
 
 if __name__ == "__main__":

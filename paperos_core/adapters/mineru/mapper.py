@@ -646,6 +646,15 @@ class MinerUCanonicalMapper:
         page = item.get("page_idx")
         page_number = page + 1 if isinstance(page, int) else None
         bbox = self._bbox(item.get("bbox"))
+        source_domain = "table_body" if html is not None else "text"
+        source_subindex: int | None = None
+        source_value = html if html is not None else raw_text
+        if metadata and "caption_index" in metadata:
+            source_domain = "caption"
+            source_subindex = metadata["caption_index"]
+        elif metadata and "footnote_index" in metadata:
+            source_domain = "footnote"
+            source_subindex = metadata["footnote_index"]
         return Element(
             id=element_id(document_id_value, order, artifact_id, item_index, digest),
             document_id=document_id_value,
@@ -664,6 +673,10 @@ class MinerUCanonicalMapper:
             source_span=SourceSpan(
                 artifact_id=artifact_id,
                 item_index=item_index,
+                source_domain=source_domain,
+                source_subindex=source_subindex,
+                character_start=0 if source_value is not None else None,
+                character_end=len(source_value) if source_value is not None else None,
                 page=page_number,
                 bounding_box=bbox,
             ),

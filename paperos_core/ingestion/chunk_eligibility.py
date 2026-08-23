@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from paperos_core.domain.canonical import Element, Section
 from paperos_core.domain.enums import ElementType
 
-from paperos_core.ingestion.sentence_units import _PROSE_TYPES, resolve_major_section_id
+from paperos_core.ingestion.sentence_units import (
+    _PROSE_TYPES,
+    element_text,
+    resolve_major_section_id,
+)
 
 CONTAINER_HEADING_MAX_LEN = 120
 
@@ -15,6 +19,7 @@ ELIGIBLE_PROSE = "ELIGIBLE_PROSE"
 ELIGIBLE_TABLE = "ELIGIBLE_TABLE"
 ELIGIBLE_FORMULA = "ELIGIBLE_FORMULA"
 EXCLUDE_REFERENCE = "EXCLUDE_REFERENCE"
+EXCLUDE_REFERENCE_REGION = "EXCLUDE_REFERENCE_REGION"
 EXCLUDE_HEADER = "EXCLUDE_HEADER"
 EXCLUDE_FOOTER = "EXCLUDE_FOOTER"
 EXCLUDE_PAGE_NUMBER = "EXCLUDE_PAGE_NUMBER"
@@ -32,7 +37,7 @@ class ChunkEligibility:
 
 
 def _element_text(element: Element) -> str:
-    return (element.text or element.markdown or "").strip()
+    return element_text(element).strip()
 
 
 def _is_publication_metadata(element: Element) -> bool:
@@ -59,10 +64,13 @@ def classify_chunk_eligibility(
     element: Element,
     *,
     section_by_id: dict[str, Section],
+    region_type: str | None = None,
 ) -> ChunkEligibility:
     """Single production/validation entry point for authoritative chunk coverage."""
     if element.element_type == ElementType.REFERENCE:
         return ChunkEligibility(False, EXCLUDE_REFERENCE)
+    if region_type == "references":
+        return ChunkEligibility(False, EXCLUDE_REFERENCE_REGION)
     if element.element_type == ElementType.HEADER:
         return ChunkEligibility(False, EXCLUDE_HEADER)
     if element.element_type == ElementType.FOOTER:
