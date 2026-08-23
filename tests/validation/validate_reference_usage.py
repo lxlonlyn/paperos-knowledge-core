@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Validate citation reference usage integrity."""
+"""Validate citation reference usage integrity.
+
+``unexpected_used_references``: resolved mention points at reference_entry_id
+not present in the canonical bibliography.
+
+``missed_used_references``: NOT CHECKED here — counting uncited bibliography rows
+is not the same as "used in prose but not linked" and was removed as a false gate.
+"""
 
 from __future__ import annotations
 
@@ -31,35 +38,23 @@ def _git_commit() -> str | None:
 
 def validate_paper(*, bundle, chunks_json: dict) -> dict:
     ref_ids = {reference.id for reference in bundle.references}
-    cited_ref_ids: set[str] = set()
     unexpected: list[dict] = []
     for mention in chunks_json.get("citation_mentions", []):
         ref_id = mention.get("reference_entry_id")
-        if ref_id:
-            cited_ref_ids.add(ref_id)
-            if ref_id not in ref_ids:
-                unexpected.append(
-                    {
-                        "failure_type": "unexpected_used_reference",
-                        "surface": mention.get("surface_text"),
-                        "reference_entry_id": ref_id,
-                    }
-                )
-    missed: list[dict] = []
-    for reference in bundle.references:
-        if reference.id not in cited_ref_ids:
-            missed.append(
+        if ref_id and ref_id not in ref_ids:
+            unexpected.append(
                 {
-                    "failure_type": "missed_used_reference",
-                    "reference_id": reference.id,
-                    "citation_label": reference.citation_label,
+                    "failure_type": "unexpected_used_reference",
+                    "surface": mention.get("surface_text"),
+                    "reference_entry_id": ref_id,
                 }
             )
     return {
         "unexpected_used_references": len(unexpected),
-        "missed_used_references": len(missed),
-        "failures": unexpected + missed,
-        "pass": not unexpected and not missed,
+        "missed_used_references": None,
+        "missed_gate": "NOT_CHECKED",
+        "failures": unexpected,
+        "pass": not unexpected,
     }
 
 
@@ -70,7 +65,6 @@ def main() -> int:
     args = parser.parse_args()
 
     papers = []
-    missed_total = 0
     unexpected_total = 0
     for src_dir in sorted((args.run_dir / "canonical").glob("src_*")):
         snapshot_dirs = sorted(src_dir.glob("snapshot_*"))
@@ -89,16 +83,16 @@ def main() -> int:
             raise RuntimeError(f"Unable to locate chunks json for {pdf_path.name}")
         chunks_json = json.loads(chunk_candidates[0].read_text(encoding="utf-8"))
         result = validate_paper(bundle=bundle, chunks_json=chunks_json)
-        missed_total += result["missed_used_references"]
         unexpected_total += result["unexpected_used_references"]
         papers.append({"pdf": str(pdf_path), "snapshot_id": bundle.snapshot.id, **result})
 
     report = {
         "git_commit": _git_commit(),
-        "missed_used_references": missed_total,
+        "missed_used_references": None,
+        "missed_gate": "NOT_CHECKED",
         "unexpected_used_references": unexpected_total,
         "papers": papers,
-        "pass": missed_total == 0 and unexpected_total == 0,
+        "pass": unexpected_total == 0,
     }
     output = args.run_dir / "reference-usage.json"
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

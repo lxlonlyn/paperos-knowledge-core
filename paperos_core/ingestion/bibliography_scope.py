@@ -122,78 +122,20 @@ def scope_for_element(
             unowned_candidates.append(scope.scope_id)
 
     if len(owned_candidates) == 1:
-        only = owned_candidates[0]
-        if region_type in {REGION_MAIN, REGION_ABSTRACT}:
-            pool = [
-                scope_id
-                for scope_id, scope in scoped.scopes.items()
-                if scope.parent_region in {REGION_MAIN, REGION_ABSTRACT}
-            ]
-            if pool:
-                largest = max(pool, key=lambda scope_id: len(scoped.scopes[scope_id].reference_ids))
-                if (
-                    largest != only
-                    and len(scoped.scopes[only].reference_ids)
-                    < len(scoped.scopes[largest].reference_ids)
-                ):
-                    return largest, None
-        return only, None
+        return owned_candidates[0], None
     if len(owned_candidates) > 1:
-        if region_type in {REGION_MAIN, REGION_ABSTRACT}:
-            return (
-                max(owned_candidates, key=lambda scope_id: len(scoped.scopes[scope_id].reference_ids)),
-                None,
-            )
         return None, "AMBIGUOUS_BIBLIOGRAPHY_SCOPE"
     if len(unowned_candidates) == 1:
         return unowned_candidates[0], None
     if len(unowned_candidates) > 1:
-        if region_type in {REGION_MAIN, REGION_ABSTRACT}:
-            return (
-                max(unowned_candidates, key=lambda scope_id: len(scoped.scopes[scope_id].reference_ids)),
-                None,
-            )
         return None, "AMBIGUOUS_BIBLIOGRAPHY_SCOPE"
 
-    candidates = owned_candidates or unowned_candidates
-    if len(candidates) == 1:
-        return candidates[0], None
-    if len(candidates) > 1:
-        if region_type in {REGION_MAIN, REGION_ABSTRACT}:
-            return (
-                max(candidates, key=lambda scope_id: len(scoped.scopes[scope_id].reference_ids)),
-                None,
-            )
-        return None, "AMBIGUOUS_BIBLIOGRAPHY_SCOPE"
-    if not candidates:
-        fallback = scopes_for_region(region_type, scoped)
-        if len(fallback) == 1:
-            return fallback[0], None
-        if region_type in {REGION_MAIN, REGION_ABSTRACT}:
-            pool = [
-                scope_id
-                for scope_id, scope in scoped.scopes.items()
-                if scope.parent_region in {REGION_MAIN, REGION_ABSTRACT}
-            ]
-            if len(pool) == 1:
-                return pool[0], None
-            if pool:
-                return (
-                    max(pool, key=lambda scope_id: len(scoped.scopes[scope_id].reference_ids)),
-                    None,
-                )
-        if region_type == REGION_SUPPLEMENT:
-            pool = [
-                scope_id
-                for scope_id, scope in scoped.scopes.items()
-                if scope.parent_region in {REGION_MAIN, REGION_ABSTRACT, REGION_SUPPLEMENT}
-            ]
-            if pool:
-                return (
-                    max(pool, key=lambda scope_id: len(scoped.scopes[scope_id].reference_ids)),
-                    None,
-                )
+    fallback = scopes_for_region(region_type, scoped)
+    if len(fallback) == 1:
+        return fallback[0], None
+    if not fallback:
         return None, FAILURE_SCOPE_NOT_FOUND
+    return None, "AMBIGUOUS_BIBLIOGRAPHY_SCOPE"
 
 
 FAILURE_SCOPE_NOT_FOUND = "SCOPE_NOT_FOUND"

@@ -155,7 +155,7 @@ def main() -> int:
     citation_wrong_targets = gold_report.get("wrong_targets", 0)
     citation_unresolved_expected = gold_report.get("unresolved_expected_targets", 0)
     unattached_targets = gold_report.get("unattached_targets", 0)
-    missed_used_references = reference_usage_report.get("missed_used_references", 0)
+    missed_used_references = reference_usage_report.get("missed_used_references")
     unexpected_used_references = reference_usage_report.get("unexpected_used_references", 0)
     negative_false_positives = negative_report.get("negative_false_positives", 0)
 
@@ -201,10 +201,11 @@ def main() -> int:
             wrong=wrong_scopes,
         ),
         "reference_usage": _gate_result(
-            exit_code=0 if missed_used_references == 0 and unexpected_used_references == 0 else 1,
-            failures=missed_used_references + unexpected_used_references,
-            missed=missed_used_references,
+            exit_code=0 if unexpected_used_references == 0 else 1,
+            failures=unexpected_used_references,
             unexpected=unexpected_used_references,
+            missed=missed_used_references,
+            missed_gate=reference_usage_report.get("missed_gate", "NOT_CHECKED"),
         ),
         "negative_cases": _gate_result(
             exit_code=0 if negative_false_positives == 0 else 1,
