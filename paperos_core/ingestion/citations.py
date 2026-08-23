@@ -22,7 +22,7 @@ from paperos_core.ingestion.bibliography_scope import (
     ScopedBibliography,
     assign_bibliography_scopes,
     repair_numeric_label_sequence,
-    resolve_element_region,
+    scope_for_element,
     scopes_for_region,
 )
 from paperos_core.ingestion.normalization import plain_text
@@ -275,12 +275,14 @@ def _looks_like_author_year_bracket(inner: str) -> bool:
 def resolve_bracket(
     inner: str,
     indexes: ReferenceIndexes,
+    *,
+    left_context: str | None = None,
 ) -> list[AtomicResolution] | None:
     inner = _normalize_bracket_inner(inner).strip()
     if not inner:
         return None
     if _looks_like_author_year_bracket(inner):
-        author_year = _resolve_bracket_author_year(inner, indexes)
+        author_year = _resolve_bracket_author_year(inner, indexes, left_context=left_context)
         return author_year or None
     atoms = parse_bracket_atoms(inner)
     if atoms is None:
@@ -295,7 +297,7 @@ def resolve_bracket(
     if len(atoms) == 1 and normalize_citation_label(atoms[0]) in indexes.label_map:
         return _resolve_atomic_keys(atoms, indexes)
     if len(atoms) == 1:
-        author_year = _resolve_bracket_author_year(inner, indexes)
+        author_year = _resolve_bracket_author_year(inner, indexes, left_context=left_context)
         if author_year:
             return author_year
     return _resolve_atomic_keys(atoms, indexes)
@@ -310,11 +312,14 @@ def extract_citation_mentions_from_text(
     reference_index: dict[str, ReferenceEntry] | ReferenceIndexes | ScopedBibliography,
     document_region: str | None = None,
     bibliography_scope_ids: list[str] | None = None,
+    bibliography_scope_id: str | None = None,
+    region_instance_id: str | None = None,
 ) -> list[CitationMention]:
     scoped, indexes = _resolve_reference_context(
         reference_index,
         document_region=document_region,
         bibliography_scope_ids=bibliography_scope_ids,
+        bibliography_scope_id=bibliography_scope_id,
     )
     mentions: list[CitationMention] = []
     working = text
@@ -325,104 +330,37 @@ def extract_citation_mentions_from_text(
         surface = text[bracket.start : bracket.end]
         if _is_negative_bracket_domain(inner, text, bracket.start):
             continue
+        left_context = text[max(0, bracket.start - 240) : bracket.start]
         if _YEAR_ONLY_BRACKET_RE.fullmatch(inner):
             author = _left_author_phrase(text, bracket.start)
             if author is None:
                 continue
             inner = f"{author} {inner}"
-        resolved = resolve_bracket(inner, indexes)
-        if resolved:
-            if any(item.resolution_status == "resolved" for item in resolved):
-                emit = resolved
-            elif all(
-                normalize_citation_label(item.atomic_key) in indexes.label_map
-                for item in resolved
-            ):
-                emit = resolved
-            else:
-                emit = None
-            if emit:
-                resolved_only = [
-                    item for item in emit if item.resolution_status == "resolved"
-                ]
-                if not resolved_only:
-                    continue
-                mentions.extend(
-                    _mentions_from_atomic_resolutions(
-                        resolutions=resolved_only,
-                        document_id=document_id,
-                        snapshot_id=snapshot_id,
-                        element_id=element_id,
-                        surface=surface,
-                        start=bracket.start,
-                        end=bracket.end,
-                        match_kind="bracket",
-                        document_region=document_region,
-                    )
-                )
-                working = _mask_span(working, bracket.start, bracket.end)
-                continue
-        if _looks_like_author_year_bracket(inner):
-            author_resolved = _resolve_bracket_author_year(inner, indexes)
-            if author_resolved and all(
-                item.resolution_status == "resolved" for item in author_resolved
-            ):
-                mentions.extend(
-                    _mentions_from_atomic_resolutions(
-                        resolutions=author_resolved,
-                        document_id=document_id,
-                        snapshot_id=snapshot_id,
-                        element_id=element_id,
-                        surface=surface,
-                        start=bracket.start,
-                        end=bracket.end,
-                        match_kind="bracket",
-                        document_region=document_region,
-                    )
-                )
-                working = _mask_span(working, bracket.start, bracket.end)
-            continue
-        if not _looks_like_citation_bracket(inner):
-            continue
-        atoms = parse_bracket_atoms(inner) or _split_ocred_symbolic_group(inner)
-        if not atoms:
-            continue
-        if not any(
-            normalize_citation_label(atom) in indexes.label_map for atom in atoms
-        ):
-            continue
-        unresolved = _resolve_atomic_keys(atoms, indexes)
-        resolved_only = [
-            item for item in unresolved if item.resolution_status == "resolved"
-        ]
-        if not resolved_only:
-            continue
-        mentions.extend(
-            _mentions_from_atomic_resolutions(
-                resolutions=resolved_only,
-                document_id=document_id,
-                snapshot_id=snapshot_id,
-                element_id=element_id,
-                surface=surface,
-                start=bracket.start,
-                end=bracket.end,
-                match_kind="bracket",
-                document_region=document_region,
-            )
+        emitted = _emit_bracket_mentions(
+            inner=inner,
+            surface=surface,
+            indexes=indexes,
+            document_id=document_id,
+            snapshot_id=snapshot_id,
+            element_id=element_id,
+            start=bracket.start,
+            end=bracket.end,
+            document_region=document_region,
+            region_instance_id=region_instance_id,
+            left_context=left_context,
+            mentions=mentions,
         )
-        working = _mask_span(working, bracket.start, bracket.end)
+        if emitted:
+            working = _mask_span(working, bracket.start, bracket.end)
 
     for match in _AUTHOR_YEAR_PAREN_RE.finditer(working):
         if _is_venue_false_positive(text, match.start(), match.group(0)):
             continue
-        resolved = _resolve_author_year_text(
-            match.group("author"), match.group("year"), indexes
-        )
-        if not resolved:
-            continue
         mentions.extend(
-            _mentions_from_atomic_resolutions(
-                resolutions=resolved,
+            _author_year_mentions(
+                author=match.group("author"),
+                year=match.group("year"),
+                indexes=indexes,
                 document_id=document_id,
                 snapshot_id=snapshot_id,
                 element_id=element_id,
@@ -438,14 +376,11 @@ def extract_citation_mentions_from_text(
     for match in _AUTHOR_YEAR_INLINE_RE.finditer(working):
         if _is_venue_false_positive(text, match.start(), match.group(0)):
             continue
-        resolved = _resolve_author_year_text(
-            match.group("author"), match.group("year"), indexes
-        )
-        if not resolved:
-            continue
         mentions.extend(
-            _mentions_from_atomic_resolutions(
-                resolutions=resolved,
+            _author_year_mentions(
+                author=match.group("author"),
+                year=match.group("year"),
+                indexes=indexes,
                 document_id=document_id,
                 snapshot_id=snapshot_id,
                 element_id=element_id,
@@ -459,6 +394,162 @@ def extract_citation_mentions_from_text(
 
     _ = scoped
     return mentions
+
+
+def _emit_bracket_mentions(
+    *,
+    inner: str,
+    surface: str,
+    indexes: ReferenceIndexes,
+    document_id: str,
+    snapshot_id: str,
+    element_id: str,
+    start: int,
+    end: int,
+    document_region: str | None,
+    region_instance_id: str | None,
+    left_context: str | None = None,
+    mentions: list[CitationMention],
+) -> bool:
+    if not _looks_like_author_year_bracket(inner) and not _looks_like_citation_bracket(inner):
+        if _split_ocred_symbolic_group(inner) is None:
+            return False
+    if _is_supplement_hyperparam_bracket(inner, document_region, region_instance_id):
+        return False
+    resolved = resolve_bracket(inner, indexes, left_context=left_context)
+    if resolved:
+        if not _should_emit_bracket_citation(inner, resolved, indexes):
+            return False
+        mentions.extend(
+            _mentions_from_atomic_resolutions(
+                resolutions=resolved,
+                document_id=document_id,
+                snapshot_id=snapshot_id,
+                element_id=element_id,
+                surface=surface,
+                start=start,
+                end=end,
+                match_kind="bracket",
+                document_region=document_region,
+            )
+        )
+        return True
+    if _looks_like_author_year_bracket(inner):
+        author_resolved = _resolve_bracket_author_year(inner, indexes, left_context=left_context)
+        if author_resolved:
+            mentions.extend(
+                _mentions_from_atomic_resolutions(
+                    resolutions=author_resolved,
+                    document_id=document_id,
+                    snapshot_id=snapshot_id,
+                    element_id=element_id,
+                    surface=surface,
+                    start=start,
+                    end=end,
+                    match_kind="bracket",
+                    document_region=document_region,
+                )
+            )
+            return True
+        mentions.extend(
+            _unresolved_author_year_bracket_mentions(
+                inner=inner,
+                document_id=document_id,
+                snapshot_id=snapshot_id,
+                element_id=element_id,
+                surface=surface,
+                start=start,
+                end=end,
+                document_region=document_region,
+            )
+        )
+        return True
+    if not _looks_like_citation_bracket(inner):
+        return False
+    atoms = parse_bracket_atoms(inner) or _split_ocred_symbolic_group(inner)
+    if not atoms:
+        atoms = [inner]
+    resolutions = _resolve_atomic_keys(atoms, indexes)
+    mentions.extend(
+        _mentions_from_atomic_resolutions(
+            resolutions=resolutions,
+            document_id=document_id,
+            snapshot_id=snapshot_id,
+            element_id=element_id,
+            surface=surface,
+            start=start,
+            end=end,
+            match_kind="bracket",
+            document_region=document_region,
+        )
+    )
+    return True
+
+
+def _is_supplement_hyperparam_bracket(
+    inner: str,
+    document_region: str | None,
+    region_instance_id: str | None = None,
+) -> bool:
+    in_supplement = document_region == REGION_SUPPLEMENT or (
+        region_instance_id is not None and REGION_SUPPLEMENT in region_instance_id
+    )
+    if not in_supplement:
+        return False
+    compact = inner.strip()
+    parts = [part.strip() for part in compact.split(",") if part.strip()]
+    if parts and all(re.fullmatch(r"\d{2,4}", part) for part in parts):
+        values = [int(part) for part in parts]
+        if all(value >= 32 and value % 2 == 0 for value in values):
+            return True
+    if re.fullmatch(r"\d{2,4}", compact):
+        value = int(compact)
+        return value in {64, 128, 160, 256, 300} or (value >= 64 and value % 2 == 0)
+    return False
+
+
+def _should_emit_bracket_citation(
+    inner: str,
+    resolutions: list[AtomicResolution],
+    indexes: ReferenceIndexes,
+) -> bool:
+    if _looks_like_author_year_bracket(inner) or _looks_like_citation_bracket(inner):
+        return True
+    if any(item.resolution_status == "resolved" for item in resolutions):
+        return True
+    if any(
+        normalize_citation_label(item.atomic_key) in indexes.label_map for item in resolutions
+    ):
+        return True
+    return False
+
+
+def _author_year_mentions(
+    *,
+    author: str,
+    year: str,
+    indexes: ReferenceIndexes,
+    document_id: str,
+    snapshot_id: str,
+    element_id: str,
+    surface: str,
+    start: int,
+    end: int,
+    match_kind: str,
+    document_region: str | None,
+) -> list[CitationMention]:
+    resolved = _resolve_author_year_text(author, year, indexes)
+    return _mentions_from_atomic_resolutions(
+        resolutions=resolved,
+        document_id=document_id,
+        snapshot_id=snapshot_id,
+        element_id=element_id,
+        surface=surface,
+        start=start,
+        end=end,
+        match_kind=match_kind,
+        document_region=document_region,
+    )
 
 
 def attach_mentions_to_chunks(
@@ -483,24 +574,20 @@ def _resolve_reference_context(
     *,
     document_region: str | None,
     bibliography_scope_ids: list[str] | None,
+    bibliography_scope_id: str | None = None,
 ) -> tuple[ScopedBibliography | None, ReferenceIndexes]:
     if isinstance(reference_index, ScopedBibliography):
         scoped = reference_index
-        scope_ids = bibliography_scope_ids
-        if scope_ids is None and document_region is not None:
-            scope_ids = scopes_for_region(document_region, scoped)
-        if scope_ids:
-            merged = ReferenceIndexes(scope_id=scope_ids[0])
-            for scope_id in scope_ids:
-                indexes = scoped.scope_indexes.get(scope_id)
-                if indexes is None:
-                    continue
-                for key, entries in indexes.label_map.items():
-                    _extend_unique(merged.label_map, key, entries)
-                for key, entries in indexes.author_year_map.items():
-                    _extend_unique(merged.author_year_map, key, entries)
-                merged.references.extend(indexes.references)
-            return scoped, merged
+        scope_id = bibliography_scope_id
+        if scope_id is None and bibliography_scope_ids:
+            if len(bibliography_scope_ids) == 1:
+                scope_id = bibliography_scope_ids[0]
+        if scope_id is None and document_region is not None:
+            candidates = scopes_for_region(document_region, scoped)
+            if len(candidates) == 1:
+                scope_id = candidates[0]
+        if scope_id and scope_id in scoped.scope_indexes:
+            return scoped, scoped.scope_indexes[scope_id]
         default = scoped.scope_indexes.get("default") or next(
             iter(scoped.scope_indexes.values())
         )
@@ -614,6 +701,8 @@ def _resolve_atomic_keys(
 def _resolve_bracket_author_year(
     inner: str,
     indexes: ReferenceIndexes,
+    *,
+    left_context: str | None = None,
 ) -> list[AtomicResolution] | None:
     parts = [part.strip() for part in inner.split(";") if part.strip()]
     if not parts:
@@ -623,12 +712,24 @@ def _resolve_bracket_author_year(
         for atom in _expand_author_year_part(part):
             match = _BRACKET_AUTHOR_YEAR_RE.match(atom.strip())
             if not match:
+                resolved.append(
+                    AtomicResolution(
+                        atomic_key=atom,
+                        reference=None,
+                        resolution_status="unresolved",
+                        failure_reason=FAILURE_UNPARSEABLE,
+                        resolution_kind=None,
+                        bibliography_scope_id=indexes.scope_id,
+                    )
+                )
                 continue
             atom_resolved = _resolve_author_year_text(
-                match.group("author"), match.group("year"), indexes
+                match.group("author"),
+                match.group("year"),
+                indexes,
+                left_context=left_context,
             )
-            if atom_resolved:
-                resolved.extend(atom_resolved)
+            resolved.extend(atom_resolved)
     return resolved or None
 
 
@@ -656,21 +757,114 @@ def _expand_author_year_part(part: str) -> list[str]:
     return [part]
 
 
+def _author_key_candidates(author: str) -> list[str]:
+    base = _normalize_author_key(author)
+    candidates = [base]
+    particle = re.match(r"^(van|von|de)\s+(\S+)(.*)$", base)
+    if particle:
+        shortened = f"{particle.group(2)}{particle.group(3)}".strip()
+        if shortened:
+            candidates.append(shortened)
+    return list(dict.fromkeys(candidates))
+
+
+def _lookup_author_year_entries(
+    author: str,
+    year: str,
+    indexes: ReferenceIndexes,
+) -> list[ReferenceEntry]:
+    year_key = year.casefold()
+    for candidate in _author_key_candidates(author):
+        entries = indexes.author_year_map.get((candidate, year_key))
+        if entries:
+            return entries
+    normalized = _normalize_author_key(author)
+    first_author, second_author = _citation_author_constraints(author)
+    matched: list[ReferenceEntry] = []
+    seen: set[str] = set()
+    for (key, map_year), entries in indexes.author_year_map.items():
+        if map_year != year_key:
+            continue
+        if second_author is not None:
+            pair_key = f"{first_author} and {second_author}"
+            if not (
+                _fuzzy_surname_match(first_author, key)
+                or _fuzzy_surname_match(pair_key, key)
+                or _fuzzy_surname_match(normalized, key)
+            ):
+                continue
+        elif not (
+            _fuzzy_surname_match(normalized, key)
+            or key in normalized
+            or normalized in key
+        ):
+            continue
+        for entry in entries:
+            if entry.id not in seen:
+                seen.add(entry.id)
+                matched.append(entry)
+    return matched
+
+
+def _disambiguate_by_context(
+    entries: list[ReferenceEntry],
+    left_context: str | None,
+) -> ReferenceEntry | None:
+    if len(entries) <= 1:
+        return entries[0] if entries else None
+    if not left_context:
+        return None
+    context = _normalize_author_key(left_context)
+    context_tokens = {token for token in re.split(r"\W+", context) if len(token) >= 4}
+    best_score = 0
+    best_entry: ReferenceEntry | None = None
+    for entry in entries:
+        raw = plain_text(entry.raw_text)
+        year_match = _YEAR_RE.search(raw)
+        title_text = raw[year_match.end() :].strip() if year_match else raw
+        title_tokens = {
+            token
+            for token in re.split(r"\W+", _normalize_author_key(title_text))
+            if len(token) >= 4
+        }
+        score = len(context_tokens & title_tokens)
+        if score > best_score:
+            best_score = score
+            best_entry = entry
+    return best_entry if best_score > 0 else None
+
+
 def _resolve_author_year_text(
     author: str,
     year: str,
     indexes: ReferenceIndexes,
-) -> list[AtomicResolution] | None:
+    *,
+    left_context: str | None = None,
+) -> list[AtomicResolution]:
     author_key = _normalize_author_key(author)
     year_key = year.casefold()
-    entries = indexes.author_year_map.get((author_key, year_key))
-    reference, failure = _resolve_unique(entries or [], f"{author_key}:{year_key}")
-    if reference is None and failure is None:
-        reference = _fuzzy_author_year_match(author, year, indexes.references)
-        failure = None if reference else FAILURE_AMBIGUOUS_AUTHOR_YEAR
-    if reference is None:
-        return None
     normalized = f"{author_key}:{year_key}"
+    entries = _lookup_author_year_entries(author, year, indexes)
+    reference, failure = _resolve_unique(entries or [], normalized)
+    if reference is None and failure == FAILURE_AMBIGUOUS_LABEL:
+        reference = _disambiguate_by_context(entries, left_context)
+        if reference is not None:
+            failure = None
+    if reference is None:
+        reference = _fuzzy_author_year_match(author, year, indexes.references)
+        if reference is not None:
+            failure = None
+    if reference is None:
+        return [
+            AtomicResolution(
+                atomic_key=normalized,
+                reference=None,
+                resolution_status="unresolved",
+                failure_reason=failure or FAILURE_AMBIGUOUS_AUTHOR_YEAR,
+                resolution_kind=None,
+                bibliography_scope_id=indexes.scope_id,
+            )
+        ]
     return [
         AtomicResolution(
             atomic_key=normalized,
@@ -701,6 +895,11 @@ def _bibliography_author_year_keys(
     first = _normalize_author_key(surnames[0])
     keys.add((first, year_token))
     keys.add((_normalize_author_key(f"{surnames[0]} et al"), year_token))
+    first_segment = re.split(r"\band\b|&", authors_text, maxsplit=1)[0].strip()
+    name_tokens = [t for t in re.split(r"[\s,]+", first_segment) if t]
+    if len(name_tokens) >= 2:
+        given = _normalize_author_key(name_tokens[0])
+        keys.add((f"{given} et al", year_token))
     if len(surnames) >= 2:
         keys.add(
             (
@@ -898,7 +1097,14 @@ def _author_surname_tokens_from_reference(
             merged[-1] = merged[-1] + token
         else:
             merged.append(token)
-    return merged
+    tokens = list(merged)
+    if tokens:
+        trailing = tokens[-1]
+        if len(trailing) > 4:
+            suffix = trailing[-3:]
+            if suffix and suffix not in tokens:
+                tokens.append(suffix)
+    return tokens
 
 
 def _work_identity(reference: ReferenceEntry) -> str:
@@ -906,8 +1112,17 @@ def _work_identity(reference: ReferenceEntry) -> str:
         return f"doi:{reference.doi.casefold()}"
     if reference.arxiv_id:
         return f"arxiv:{reference.arxiv_id.casefold()}"
-    title = plain_text(reference.title or reference.raw_text)[:120].casefold()
+    raw = plain_text(reference.raw_text)
+    year_match = _YEAR_RE.search(raw)
+    title_text = raw
+    if year_match is not None:
+        after_year = raw[year_match.end() :].strip().lstrip(".,; ")
+        if after_year:
+            title_text = after_year
+    title = re.sub(r"\s+", " ", title_text).strip().casefold()[:200]
     year = reference.year if reference.year is not None else ""
+    if year_match is not None and not year:
+        year = year_match.group(1)
     return f"title:{title}:{year}"
 
 
@@ -1145,6 +1360,15 @@ def _left_author_phrase(text: str, bracket_start: int) -> str | None:
 
 
 def _split_ocred_symbolic_group(inner: str) -> list[str] | None:
+    if re.search(r"\\mathrm\s*\{", inner, re.IGNORECASE):
+        tokens = re.findall(
+            r"\\mathrm\s*\{\s*([A-Za-z*]+)\s*\}\s*(?:\^\s*\{\s*\\?\s*ast\s*\})?",
+            inner,
+            flags=re.IGNORECASE,
+        )
+        years = re.findall(r"(?<!\d)([12]\d{3})(?!\d)", inner)
+        if tokens and years:
+            return [f"{token}{years[0]}" for token in tokens]
     if ". " not in inner and "." not in inner:
         return None
     parts = re.split(r"\.\s*", inner.strip())
@@ -1176,7 +1400,11 @@ def _looks_like_citation_bracket(inner: str) -> bool:
     if re.search(r"\\(?:mathrm|mathcal|widehat|right)", inner):
         return False
     compact = re.sub(r"\s+", "", inner).casefold()
-    if compact in {"0,1", "0,t", "-1,1", "1,1"}:
+    if compact in {"0,1", "0,t", "-1,1", "1,1", "lg", "cs"}:
+        return False
+    if re.fullmatch(r"[a-z]{1,3}", compact):
+        return False
+    if re.fullmatch(r"[A-Z]{1,4}", inner.strip()):
         return False
     if re.fullmatch(r"[12]\d{3}[a-d]?", inner.strip(), flags=re.IGNORECASE):
         return False

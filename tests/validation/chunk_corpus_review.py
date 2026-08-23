@@ -411,7 +411,15 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     active_slugs = {_slugify(pdf_path.name) for pdf_path in pdfs}
     _cleanup_review_artifacts(run_dir, active_slugs=active_slugs)
 
-    if args.rechunk_canonical:
+    if args.rebuild_canonical:
+        from tests.validation.rebuild_canonical import rebuild_all_canonical_snapshots
+
+        rebuild_rows = rebuild_all_canonical_snapshots(
+            run_dir=run_dir,
+            dataset_id=args.dataset,
+        )
+        print(json.dumps({"rebuild_canonical": rebuild_rows}, indent=2))
+    if args.rebuild_canonical or args.rechunk_canonical:
         rows = _run_rechunk_from_canonical(
             run_dir=run_dir,
             corpus_dir=args.corpus_dir,
@@ -450,6 +458,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         "chunk_hard_max_tokens": settings.ingestion.chunk_hard_max_tokens,
         "pdf_count": len(rows),
         "pass_count": sum(1 for row in rows if row.get("status") == "PASS"),
+        "structure_only_pass_count": sum(1 for row in rows if row.get("status") == "PASS"),
+        "overall_status": (
+            "STRUCTURE_ONLY_PASS"
+            if rows and all(row.get("status") == "PASS" for row in rows)
+            else "FAIL"
+        ),
         "results": rows,
     }
     report_path = run_dir / "chunk-corpus-review.json"
@@ -481,6 +495,11 @@ def main() -> None:
         type=int,
         default=None,
         help="Defaults to production config chunk_overlap_tokens.",
+    )
+    parser.add_argument(
+        "--rebuild-canonical",
+        action="store_true",
+        help="Re-map canonical from cached parsed MinerU artifacts (no re-OCR).",
     )
     parser.add_argument(
         "--rechunk-canonical",

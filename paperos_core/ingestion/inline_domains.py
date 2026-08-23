@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -97,7 +98,14 @@ def iter_bracket_scopes(text: str, domains: list[InlineDomain]) -> list[InlineDo
     index = 0
     length = len(text)
     while index < length:
-        if any(start <= index < end for start, end in math_spans):
+        inside_math = any(start <= index < end for start, end in math_spans)
+        if inside_math:
+            if text[index] == "[":
+                end = _scan_balanced(text, index + 1, "]")
+                if end is not None and _is_prose_numeric_citation(text, index, end):
+                    brackets.append(InlineDomain(InlineDomainKind.BRACKET_SCOPE, index, end))
+                    index = end
+                    continue
             index += 1
             continue
         if text[index] != "[":
@@ -110,6 +118,31 @@ def iter_bracket_scopes(text: str, domains: list[InlineDomain]) -> list[InlineDo
         brackets.append(InlineDomain(InlineDomainKind.BRACKET_SCOPE, index, end))
         index = end
     return brackets
+
+
+_NUMERIC_CITATION_RE = re.compile(r"^\s*\d{1,4}([a-d])?\s*$", re.IGNORECASE)
+_CITATION_LIST_RE = re.compile(
+    r"^\s*\d{1,4}([a-d])?\s*(?:\s*[,;]\s*\d{1,4}([a-d])?)*\s*(?:\s*[-–−—]\s*\d{1,4}([a-d])?)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_prose_numeric_citation(text: str, start: int, end: int) -> bool:
+    """True when ``[...]`` inside a math span is a prose numeric citation."""
+    inner = text[start + 1 : end - 1]
+    if re.search(r"\d\s+\d", inner):
+        return False
+    compact = re.sub(r"\s+", "", inner)
+    if _NUMERIC_CITATION_RE.match(compact):
+        return True
+    if "," in inner:
+        parts = [part.strip() for part in inner.split(",") if part.strip()]
+        if parts and all(re.fullmatch(r"\d{1,4}[a-d]?", p, flags=re.I) for p in parts):
+            return True
+        return False
+    if _CITATION_LIST_RE.match(compact):
+        return True
+    return False
 
 
 def bracket_inner(text: str, domain: InlineDomain) -> str:
@@ -154,6 +187,11 @@ def _starts_inline_math(text: str, index: int) -> bool:
     if text[index] != "$":
         return False
     if index + 1 < len(text) and text[index + 1] == "$":
+        return False
+    nxt = text[index + 1] if index + 1 < len(text) else ""
+    if nxt in {" ", ".", ",", ";", ":"}:
+        return False
+    if nxt.isalpha() and nxt.islower():
         return False
     return True
 

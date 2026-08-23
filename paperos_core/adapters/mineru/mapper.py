@@ -41,6 +41,7 @@ from paperos_core.ingestion.normalization import (
     normalize_doi,
     normalize_text,
     plain_text,
+    source_evidence_text,
     strip_heading_number,
 )
 from paperos_core.ingestion.references import parse_reference_entry
@@ -542,7 +543,7 @@ class MinerUCanonicalMapper:
                 is_heading=is_heading,
                 has_asset=asset_path is not None,
             )
-            text = plain_text(raw_text) if raw_text else None
+            text = source_evidence_text(raw_text) if raw_text else None
             if canonical_type == ElementType.FORMULA:
                 latex = self._latex(raw_text)
                 text = latex
@@ -579,7 +580,7 @@ class MinerUCanonicalMapper:
                     element_type=ElementType.CAPTION,
                     section_id=section_for_item.get(item_index),
                     raw_text=caption,
-                    text=plain_text(caption),
+                    text=source_evidence_text(caption),
                     item=item,
                     parent_element_id=element.id,
                     metadata={"caption_index": caption_index},
@@ -596,7 +597,7 @@ class MinerUCanonicalMapper:
                     element_type=ElementType.FOOTNOTE,
                     section_id=section_for_item.get(item_index),
                     raw_text=footnote,
-                    text=plain_text(footnote),
+                    text=source_evidence_text(footnote),
                     item=item,
                     parent_element_id=element.id,
                     metadata={"footnote_index": footnote_index},

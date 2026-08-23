@@ -28,8 +28,12 @@ from paperos_core.ingestion.citations import (
     build_scoped_reference_indexes,
     extract_citation_mentions_from_text,
 )
-from paperos_core.ingestion.bibliography_scope import scopes_for_region
-from paperos_core.ingestion.document_regions import build_document_regions, region_for_element
+from paperos_core.ingestion.bibliography_scope import scope_for_element
+from paperos_core.ingestion.document_regions import (
+    build_document_regions,
+    region_for_element,
+    region_id_for_element,
+)
 from paperos_core.ingestion.retrieval_text import build_retrieval_text
 from paperos_core.ingestion.sentence_units import (
     SentenceUnit,
@@ -60,7 +64,9 @@ def build_chunks(
     count = tokenizer.count_tokens
     elements = list(elements)
     section_by_id = {section.id: section for section in sections}
-    _, element_region = build_document_regions(elements=elements, sections=sections)
+    document_regions, element_regions = build_document_regions(
+        elements=elements, sections=sections
+    )
     reference_indexes = build_scoped_reference_indexes(
         references=references,
         elements=list(elements),
@@ -90,25 +96,27 @@ def build_chunks(
             continue
         eligible.append(element)
 
-    grouped: dict[str, list[Element]] = {}
+    grouped: dict[tuple[str, str], list[Element]] = {}
     for element in sorted(eligible, key=lambda item: item.order):
         major_id = resolve_major_section_id(element.section_id, section_by_id)
         if major_id is None:
             continue
-        grouped.setdefault(major_id, []).append(element)
+        region_id = region_id_for_element(element.id, element_regions) or "region_main_1"
+        grouped.setdefault((major_id, region_id), []).append(element)
 
     built: list[Chunk] = []
     all_mentions: list[CitationMention] = []
     order = 0
-    for major_id in _major_section_order(sections, grouped):
-        elements_in_major = grouped.get(major_id, [])
+    group_keys = _major_region_group_order(sections, grouped)
+    for major_id, region_id in group_keys:
+        elements_in_group = grouped.get((major_id, region_id), [])
         units: list[SentenceUnit] = []
-        for index, element in enumerate(elements_in_major):
+        for index, element in enumerate(elements_in_group):
             section = (
                 section_by_id.get(element.section_id) if element.section_id else None
             )
             subsection_end = _is_subsection_boundary(
-                elements_in_major, index, section_by_id
+                elements_in_group, index, section_by_id
             )
             units.extend(
                 units_for_element(
@@ -121,21 +129,42 @@ def build_chunks(
                 )
             )
             prose = element_text(element)
-            if prose and element.element_type in _PROSE_TYPES:
-                region = region_for_element(element.id, element_region)
-                all_mentions.extend(
-                    extract_citation_mentions_from_text(
-                        document_id=document.id,
-                        snapshot_id=snapshot_id,
-                        element_id=element.id,
-                        text=prose,
-                        reference_index=reference_indexes,
-                        document_region=region,
-                        bibliography_scope_ids=scopes_for_region(
-                            region, reference_indexes
-                        ),
-                    )
+            if prose and (
+                element.element_type in _PROSE_TYPES
+                or element.element_type == ElementType.TABLE
+            ):
+                region = region_for_element(element.id, element_regions)
+                region_info = element_regions.get(element.id)
+                region_id = region_info.region_id if region_info else None
+                scope_id, scope_diag = scope_for_element(
+                    element.id,
+                    element_regions,
+                    reference_indexes,
+                    document_regions,
                 )
+                extracted = extract_citation_mentions_from_text(
+                    document_id=document.id,
+                    snapshot_id=snapshot_id,
+                    element_id=element.id,
+                    text=prose,
+                    reference_index=reference_indexes,
+                    document_region=region,
+                    bibliography_scope_id=scope_id,
+                    region_instance_id=region_id,
+                )
+                if scope_diag:
+                    extracted = [
+                        mention.model_copy(
+                            update={
+                                "metadata": {
+                                    **mention.metadata,
+                                    "bibliography_scope_diagnostic": scope_diag,
+                                }
+                            }
+                        )
+                        for mention in extracted
+                    ]
+                all_mentions.extend(extracted)
         ranges = partition_units(
             units,
             target_tokens=target_tokens,
@@ -155,7 +184,8 @@ def build_chunks(
             overlap_tokens=overlap_tokens,
             start_order=order,
             section_by_id=section_by_id,
-            element_region=element_region,
+            element_regions=element_regions,
+            region_instance_id=region_id,
         )
         built.extend(section_chunks)
         order += len(section_chunks)
@@ -189,6 +219,36 @@ def build_chunks(
             )
         )
     return finalized, all_mentions
+
+
+def _major_region_group_order(
+    sections: list[Section],
+    grouped: dict[tuple[str, str], list[Element]],
+) -> list[tuple[str, str]]:
+    majors = _major_section_order(
+        sections,
+        {major_id: elements for (major_id, _), elements in grouped.items()},
+    )
+    ordered: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for major_id in majors:
+        region_ids = sorted(
+            {
+                region_id
+                for key, elements in grouped.items()
+                if key[0] == major_id and elements
+                for region_id in [key[1]]
+            }
+        )
+        for region_id in region_ids:
+            key = (major_id, region_id)
+            if key not in seen:
+                ordered.append(key)
+                seen.add(key)
+    for key in sorted(grouped):
+        if key not in seen and grouped[key]:
+            ordered.append(key)
+    return ordered
 
 
 def _major_section_order(
@@ -239,7 +299,8 @@ def _chunks_from_ranges(
     overlap_tokens: int,
     start_order: int,
     section_by_id: dict[str, Section],
-    element_region: dict[str, str],
+    element_regions: dict,
+    region_instance_id: str | None = None,
 ) -> list[Chunk]:
     built: list[Chunk] = []
     overlap_tail: list[SentenceUnit] = []
@@ -266,7 +327,8 @@ def _chunks_from_ranges(
             overlap_source_chunk_ids=[built[-1].id] if overlap_tail and built else [],
             overlap_spans=overlap_tail,
             section_by_id=section_by_id,
-            element_region=element_region,
+            element_regions=element_regions,
+            region_instance_id=region_instance_id,
         )
         built.append(chunk)
         overlap_tail = _overlap_tail_units(chunk_units, count, overlap_tokens)
@@ -305,7 +367,8 @@ def _make_chunk(
     overlap_source_chunk_ids: list[str],
     overlap_spans: list[SentenceUnit],
     section_by_id: dict[str, Section],
-    element_region: dict[str, str],
+    element_regions: dict,
+    region_instance_id: str | None = None,
 ) -> Chunk:
     text = _join_unit_text(units)
     pages = [unit.page for unit in units if unit.page is not None]
@@ -315,12 +378,17 @@ def _make_chunk(
     span_ids = [unit.span_id for unit in units]
     identifier = chunk_id(document_id, order, span_ids)
     emergency_splits = sum(1 for unit in units if unit.emergency_split)
-    section_ids = [unit.section_id for unit in units if unit.section_id]
+    first_element_id = units[0].element_id if units else None
     document_region = (
-        region_for_element(section_ids[0], element_region)
-        if section_ids
+        region_for_element(first_element_id, element_regions)
+        if first_element_id
         else None
     )
+    chunk_region_ids = {
+        region_id_for_element(unit.element_id, element_regions) for unit in units
+    }
+    chunk_region_ids.discard(None)
+    mixed_region = len(chunk_region_ids) > 1
     end_boundary = "sentence"
     if units and units[-1].subsection_end:
         end_boundary = "subsection"
@@ -362,6 +430,9 @@ def _make_chunk(
         metadata={
             "end_boundary": end_boundary,
             "emergency_oversized_sentence_splits": emergency_splits,
+            "region_instance_id": region_instance_id
+            or (next(iter(chunk_region_ids)) if len(chunk_region_ids) == 1 else None),
+            "mixed_region_chunk": mixed_region,
         },
     )
 

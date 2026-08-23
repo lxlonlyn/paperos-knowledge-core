@@ -33,11 +33,8 @@ def ref_fp(raw: str) -> str:
 
 def locate_references(run_dir: Path, snapshot_id: str) -> Path:
     roots = [run_dir, run_dir.parent, run_dir.parent.parent, Path("data")]
-    matches = []
-    for root in roots:
-        if root.exists():
-            matches.extend(root.rglob(f"{snapshot_id}/references.jsonl"))
-    matches = list(dict.fromkeys(matches))
+    matches = list(run_dir.rglob(f"{snapshot_id}/references.jsonl"))
+    matches = [path for path in matches if "/src_" in str(path)]
     if len(matches) != 1:
         raise RuntimeError(
             f"Expected exactly one references.jsonl for {snapshot_id}, found {len(matches)}: {matches}"

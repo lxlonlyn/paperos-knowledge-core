@@ -6,11 +6,15 @@ import html
 import re
 import unicodedata
 
-NORMALIZATION_VERSION = "1"
+NORMALIZATION_VERSION = "2"
 
 _WHITESPACE = re.compile(r"[^\S\n]+")
 _BLANK_LINES = re.compile(r"\n{3,}")
-_HTML_TAG = re.compile(r"<[^>]+>")
+# Only strip known MinerU/HTML markup — never treat arbitrary "<...>" as tags.
+_KNOWN_HTML_TAG = re.compile(
+    r"</?(?:sub|sup|table|tr|td|th|thead|tbody|tfoot|br|p|div|span|i|b|em|strong)\b[^>]*>",
+    re.IGNORECASE,
+)
 _LATEX_ACCENTS = {
     "a": "à",
     "e": "è",
@@ -33,11 +37,24 @@ def normalize_text(value: str) -> str:
     return _BLANK_LINES.sub("\n\n", normalized).strip()
 
 
-def plain_text(value: str) -> str:
-    """Return normalized visible text for metadata and retrieval fields."""
-    visible = html.unescape(_HTML_TAG.sub("", value))
+def strip_known_markup(value: str) -> str:
+    """Remove allowlisted HTML tags only."""
+    return _KNOWN_HTML_TAG.sub("", html.unescape(value))
+
+
+def source_evidence_text(value: str) -> str:
+    """Normalize authoritative source text for Canonical elements and citations.
+
+  Preserves mathematical/LaTeX syntax such as ``<``, ``>``, ``$``, brackets.
+  """
+    visible = strip_known_markup(value)
     visible = re.sub(r"([AEIOUaeiou])\\?`", _replace_grave, visible)
     return normalize_text(visible)
+
+
+def plain_text(value: str) -> str:
+    """Return normalized visible text for metadata and display fields."""
+    return source_evidence_text(value)
 
 
 def normalized_match_text(value: str) -> str:

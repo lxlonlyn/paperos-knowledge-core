@@ -27,6 +27,7 @@ _SUPPLEMENT_HINTS = (
 class BibliographyScope:
     scope_id: str
     parent_region: str
+    owner_body_region_id: str | None = None
     reference_ids: list[str] = field(default_factory=list)
 
 
@@ -67,18 +68,68 @@ def scopes_for_region(
     region: str,
     scoped: ScopedBibliography,
 ) -> list[str]:
+    """Legacy helper — prefer ``scope_for_element`` for citation resolution."""
     if region == REGION_SUPPLEMENT:
         return [
             scope.scope_id
             for scope in scoped.scopes.values()
             if scope.parent_region == REGION_SUPPLEMENT
         ]
-    # Main body and abstract citations use main-bibliography scopes.
     return [
         scope.scope_id
         for scope in scoped.scopes.values()
         if scope.parent_region in {REGION_MAIN, REGION_ABSTRACT}
     ]
+
+
+def scope_for_element(
+    element_id: str,
+    element_regions: dict,
+    scoped: ScopedBibliography,
+    document_regions: list,
+) -> tuple[str | None, str | None]:
+    """Select exactly one bibliography scope for a citation-bearing element."""
+    from paperos_core.ingestion.document_regions import ElementRegionInfo
+
+    info: ElementRegionInfo | None = element_regions.get(element_id)
+    if info is None:
+        candidates = scopes_for_region(REGION_MAIN, scoped)
+        if len(candidates) == 1:
+            return candidates[0], None
+        if not candidates:
+            return None, FAILURE_SCOPE_NOT_FOUND
+        return None, "AMBIGUOUS_BIBLIOGRAPHY_SCOPE"
+
+    region_type = info.region_type
+    if region_type == REGION_REFERENCES:
+        region_type = REGION_MAIN
+    region_id = info.region_id
+
+    candidates: list[str] = []
+    for scope in scoped.scopes.values():
+        if region_type == REGION_SUPPLEMENT:
+            if scope.parent_region != REGION_SUPPLEMENT:
+                continue
+        elif region_type in {REGION_MAIN, REGION_ABSTRACT}:
+            if scope.parent_region not in {REGION_MAIN, REGION_ABSTRACT}:
+                continue
+        else:
+            continue
+        if scope.owner_body_region_id is not None and scope.owner_body_region_id != region_id:
+            continue
+        candidates.append(scope.scope_id)
+
+    if len(candidates) == 1:
+        return candidates[0], None
+    if not candidates:
+        fallback = scopes_for_region(region_type, scoped)
+        if len(fallback) == 1:
+            return fallback[0], None
+        return None, FAILURE_SCOPE_NOT_FOUND
+    return None, "AMBIGUOUS_BIBLIOGRAPHY_SCOPE"
+
+
+FAILURE_SCOPE_NOT_FOUND = "SCOPE_NOT_FOUND"
 
 
 def assign_bibliography_scopes(
@@ -91,7 +142,7 @@ def assign_bibliography_scopes(
     from paperos_core.ingestion.document_regions import build_document_regions
 
     section_by_id = {section.id: section for section in sections}
-    regions, element_region = build_document_regions(elements=elements, sections=sections)
+    regions, element_regions = build_document_regions(elements=elements, sections=sections)
     ref_elements = [
         element
         for element in sorted(elements, key=lambda item: item.order)
@@ -106,19 +157,23 @@ def assign_bibliography_scopes(
     previous_order: int | None = None
     scope_counter = 0
 
-    def _open_scope(region: str) -> str:
+    def _open_scope(region: str, *, owner_body_region_id: str | None = None) -> str:
         nonlocal scope_counter, current_scope_id, current_region
         scope_counter += 1
         scope_id = f"bib_scope_{scope_counter}"
-        scopes[scope_id] = BibliographyScope(scope_id=scope_id, parent_region=region)
+        scopes[scope_id] = BibliographyScope(
+            scope_id=scope_id,
+            parent_region=region,
+            owner_body_region_id=owner_body_region_id,
+        )
         current_scope_id = scope_id
         current_region = region
         return scope_id
 
     for ref_element in ref_elements:
-        region = _reference_scope_parent_region(
+        region, owner_body_region_id = _reference_scope_parent_region(
             ref_element,
-            element_region=element_region,
+            element_regions=element_regions,
             regions=regions,
             section_by_id=section_by_id,
         )
@@ -126,8 +181,16 @@ def assign_bibliography_scopes(
         if previous_order is not None and ref_element.order - previous_order > 1:
             needs_new_scope = True
         if needs_new_scope:
-            _open_scope(region)
-        element_scope[ref_element.id] = current_scope_id or _open_scope(region)
+            _open_scope(region, owner_body_region_id=owner_body_region_id)
+        elif (
+            owner_body_region_id is not None
+            and current_scope_id
+            and scopes[current_scope_id].owner_body_region_id != owner_body_region_id
+        ):
+            _open_scope(region, owner_body_region_id=owner_body_region_id)
+        element_scope[ref_element.id] = current_scope_id or _open_scope(
+            region, owner_body_region_id=owner_body_region_id
+        )
         previous_order = ref_element.order
 
     default_scope = current_scope_id or _open_scope(REGION_MAIN)
@@ -198,25 +261,33 @@ def repair_numeric_label_sequence(
 def _reference_scope_parent_region(
     ref_element: Element,
     *,
-    element_region: dict[str, str],
+    element_regions: dict,
     regions: list,
     section_by_id: dict[str, Section],
-) -> str:
+) -> tuple[str, str | None]:
     order = ref_element.order
     for region in regions:
         if region.region_type != REGION_REFERENCES:
             continue
         end_order = region.end_order if region.end_order is not None else order
         if region.start_order <= order <= end_order:
-            if REGION_SUPPLEMENT in region.region_id:
-                return REGION_SUPPLEMENT
-            return REGION_MAIN
+            owner = region.owner_body_region_id
+            if owner and REGION_SUPPLEMENT in owner:
+                return REGION_SUPPLEMENT, owner
+            return REGION_MAIN, owner
+    info = element_regions.get(ref_element.id)
+    if info is not None:
+        if info.region_type == REGION_SUPPLEMENT or (
+            info.region_subtype == "appendix"
+        ):
+            return REGION_SUPPLEMENT, info.region_id
+        return REGION_MAIN, info.region_id
     region = resolve_element_region(ref_element.section_id, section_by_id)
     if region == REGION_REFERENCES:
-        return _infer_references_parent_region(ref_element.section_id, section_by_id)
+        return REGION_MAIN, None
     if region == REGION_SUPPLEMENT:
-        return REGION_SUPPLEMENT
-    return REGION_MAIN
+        return REGION_SUPPLEMENT, None
+    return REGION_MAIN, None
 
 
 def _infer_references_parent_region(
