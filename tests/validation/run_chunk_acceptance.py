@@ -112,6 +112,20 @@ def main() -> int:
         str(args.corpus_dir),
     )
 
+    reference_usage_code = _run_py(
+        "tests/validation/validate_reference_usage.py",
+        "--run-dir",
+        str(args.run_dir),
+        "--corpus-dir",
+        str(args.corpus_dir),
+    )
+
+    negative_code = _run_py(
+        "tests/validation/validate_negative_citations.py",
+        "--run-dir",
+        str(args.run_dir),
+    )
+
     gold_code = 2
     if args.gold.exists():
         gold_code = _run_py(
@@ -126,6 +140,8 @@ def main() -> int:
     survival_report = _load_json(args.run_dir / "canonical-source-survival.json")
     coverage_report = _load_json(args.run_dir / "chunk-source-coverage.json")
     regions_report = _load_json(args.run_dir / "chunk-regions-scopes.json")
+    reference_usage_report = _load_json(args.run_dir / "reference-usage.json")
+    negative_report = _load_json(args.run_dir / "negative-citations.json")
     gold_report = _load_json(args.run_dir / "citation-gold-v2-validation.json")
 
     structure_failures = chunk_report.get("pdf_count", 0) - chunk_report.get("pass_count", 0)
@@ -139,6 +155,9 @@ def main() -> int:
     citation_wrong_targets = gold_report.get("wrong_targets", 0)
     citation_unresolved_expected = gold_report.get("unresolved_expected_targets", 0)
     unattached_targets = gold_report.get("unattached_targets", 0)
+    missed_used_references = reference_usage_report.get("missed_used_references", 0)
+    unexpected_used_references = reference_usage_report.get("unexpected_used_references", 0)
+    negative_false_positives = negative_report.get("negative_false_positives", 0)
 
     gates: dict[str, dict[str, Any]] = {
         "structure": _gate_result(
@@ -181,8 +200,17 @@ def main() -> int:
             failures=wrong_scopes,
             wrong=wrong_scopes,
         ),
-        "reference_usage": _gate_result(exit_code=None, failures=0, missed=0, unexpected=0),
-        "negative_cases": _gate_result(exit_code=None, failures=0, false_positive=0),
+        "reference_usage": _gate_result(
+            exit_code=0 if missed_used_references == 0 and unexpected_used_references == 0 else 1,
+            failures=missed_used_references + unexpected_used_references,
+            missed=missed_used_references,
+            unexpected=unexpected_used_references,
+        ),
+        "negative_cases": _gate_result(
+            exit_code=0 if negative_false_positives == 0 else 1,
+            failures=negative_false_positives,
+            false_positive=negative_false_positives,
+        ),
         "determinism": _gate_result(exit_code=None, failures=0),
     }
 
@@ -241,9 +269,9 @@ def main() -> int:
         "citation_unattached_targets": unattached_targets,
         "wrong_regions": wrong_regions,
         "wrong_bibliography_scopes": wrong_scopes,
-        "missed_used_references": 0,
-        "unexpected_used_references": 0,
-        "negative_false_positives": 0,
+        "missed_used_references": missed_used_references,
+        "unexpected_used_references": unexpected_used_references,
+        "negative_false_positives": negative_false_positives,
         "determinism_failures": determinism_failures,
         "gates": gates,
         "timestamp": datetime.now(UTC).isoformat(),

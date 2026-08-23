@@ -122,7 +122,22 @@ def scope_for_element(
             unowned_candidates.append(scope.scope_id)
 
     if len(owned_candidates) == 1:
-        return owned_candidates[0], None
+        only = owned_candidates[0]
+        if region_type in {REGION_MAIN, REGION_ABSTRACT}:
+            pool = [
+                scope_id
+                for scope_id, scope in scoped.scopes.items()
+                if scope.parent_region in {REGION_MAIN, REGION_ABSTRACT}
+            ]
+            if pool:
+                largest = max(pool, key=lambda scope_id: len(scoped.scopes[scope_id].reference_ids))
+                if (
+                    largest != only
+                    and len(scoped.scopes[only].reference_ids)
+                    < len(scoped.scopes[largest].reference_ids)
+                ):
+                    return largest, None
+        return only, None
     if len(owned_candidates) > 1:
         if region_type in {REGION_MAIN, REGION_ABSTRACT}:
             return (
