@@ -28,7 +28,8 @@ from paperos_core.ingestion.citations import (
     build_scoped_reference_indexes,
     extract_citation_mentions_from_text,
 )
-from paperos_core.ingestion.bibliography_scope import resolve_element_region, scopes_for_region
+from paperos_core.ingestion.bibliography_scope import scopes_for_region
+from paperos_core.ingestion.document_regions import build_document_regions, region_for_element
 from paperos_core.ingestion.retrieval_text import build_retrieval_text
 from paperos_core.ingestion.sentence_units import (
     SentenceUnit,
@@ -59,6 +60,7 @@ def build_chunks(
     count = tokenizer.count_tokens
     elements = list(elements)
     section_by_id = {section.id: section for section in sections}
+    _, element_region = build_document_regions(elements=elements, sections=sections)
     reference_indexes = build_scoped_reference_indexes(
         references=references,
         elements=list(elements),
@@ -66,19 +68,27 @@ def build_chunks(
     )
     references_by_id = {reference.id: reference for reference in references}
 
-    eligible = [
-        element
-        for element in elements
-        if element.element_type in _PROSE_TYPES
-        or element.element_type in {ElementType.TABLE, ElementType.FORMULA}
-    ]
-    eligible = [
-        element
-        for element in eligible
-        if element.element_type != ElementType.REFERENCE
-        and resolve_major_section_id(element.section_id, section_by_id) is not None
-        and element_text(element).strip()
-    ]
+    eligible: list[Element] = []
+    for element in elements:
+        if element.element_type not in _PROSE_TYPES and element.element_type not in {
+            ElementType.TABLE,
+            ElementType.FORMULA,
+        }:
+            continue
+        if element.element_type in {
+            ElementType.HEADER,
+            ElementType.FOOTER,
+            ElementType.PAGE_NUMBER,
+            ElementType.REFERENCE,
+        }:
+            continue
+        if _is_publication_metadata(element):
+            continue
+        if resolve_major_section_id(element.section_id, section_by_id) is None:
+            continue
+        if not element_text(element).strip():
+            continue
+        eligible.append(element)
 
     grouped: dict[str, list[Element]] = {}
     for element in sorted(eligible, key=lambda item: item.order):
@@ -112,7 +122,7 @@ def build_chunks(
             )
             prose = element_text(element)
             if prose and element.element_type in _PROSE_TYPES:
-                region = resolve_element_region(element.section_id, section_by_id)
+                region = region_for_element(element.id, element_region)
                 all_mentions.extend(
                     extract_citation_mentions_from_text(
                         document_id=document.id,
@@ -145,6 +155,7 @@ def build_chunks(
             overlap_tokens=overlap_tokens,
             start_order=order,
             section_by_id=section_by_id,
+            element_region=element_region,
         )
         built.extend(section_chunks)
         order += len(section_chunks)
@@ -228,6 +239,7 @@ def _chunks_from_ranges(
     overlap_tokens: int,
     start_order: int,
     section_by_id: dict[str, Section],
+    element_region: dict[str, str],
 ) -> list[Chunk]:
     built: list[Chunk] = []
     overlap_tail: list[SentenceUnit] = []
@@ -254,6 +266,7 @@ def _chunks_from_ranges(
             overlap_source_chunk_ids=[built[-1].id] if overlap_tail and built else [],
             overlap_spans=overlap_tail,
             section_by_id=section_by_id,
+            element_region=element_region,
         )
         built.append(chunk)
         overlap_tail = _overlap_tail_units(chunk_units, count, overlap_tokens)
@@ -292,6 +305,7 @@ def _make_chunk(
     overlap_source_chunk_ids: list[str],
     overlap_spans: list[SentenceUnit],
     section_by_id: dict[str, Section],
+    element_region: dict[str, str],
 ) -> Chunk:
     text = _join_unit_text(units)
     pages = [unit.page for unit in units if unit.page is not None]
@@ -303,7 +317,9 @@ def _make_chunk(
     emergency_splits = sum(1 for unit in units if unit.emergency_split)
     section_ids = [unit.section_id for unit in units if unit.section_id]
     document_region = (
-        resolve_element_region(section_ids[0], section_by_id) if section_ids else None
+        region_for_element(section_ids[0], element_region)
+        if section_ids
+        else None
     )
     end_boundary = "sentence"
     if units and units[-1].subsection_end:
@@ -348,6 +364,19 @@ def _make_chunk(
             "emergency_oversized_sentence_splits": emergency_splits,
         },
     )
+
+
+def _is_publication_metadata(element: Element) -> bool:
+    text = (element.text or element.markdown or "").casefold()
+    markers = (
+        "received ",
+        "revised ",
+        "accepted ",
+        "acm reference format",
+        "copyright",
+        "to cite this version",
+    )
+    return any(marker in text for marker in markers) and len(text) < 400
 
 
 def _merge_boxes(

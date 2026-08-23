@@ -9,8 +9,14 @@ from typing import Any, Literal, Protocol
 from paperos_core.domain.canonical import Element, Section
 from paperos_core.domain.enums import ElementType
 
+from paperos_core.ingestion.inline_domains import (
+    scan_inline_domains,
+    sentence_boundary_allowed,
+)
+
 _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?。！？；;])\s+")
+_ET_AL_BOUNDARY = re.compile(r"\bet\s+al\.\s+", re.IGNORECASE)
 
 SplitType = Literal[
     "NORMAL",
@@ -139,6 +145,7 @@ def units_for_element(
 
 
 def _sentence_ranges(text: str, count: Any, hard_max_tokens: int) -> list[_TextRange]:
+    domains = scan_inline_domains(text)
     paragraphs = _split_paragraphs(text)
     ranges: list[_TextRange] = []
     for paragraph_start, paragraph_end in paragraphs:
@@ -146,7 +153,11 @@ def _sentence_ranges(text: str, count: Any, hard_max_tokens: int) -> list[_TextR
         cursor = paragraph_start
         boundaries = [paragraph_start]
         for match in _SENTENCE_SPLIT.finditer(paragraph):
-            boundaries.append(paragraph_start + match.end())
+            boundary = paragraph_start + match.end()
+            if sentence_boundary_allowed(boundary, domains) and not _is_et_al_boundary(
+                text, boundary
+            ):
+                boundaries.append(boundary)
         if boundaries[-1] < paragraph_end:
             boundaries.append(paragraph_end)
         if len(boundaries) <= 2 and paragraph.strip():
@@ -173,6 +184,11 @@ def _sentence_ranges(text: str, count: Any, hard_max_tokens: int) -> list[_TextR
                 else [_TextRange(text=piece, start=start_offset, end=end_offset)]
             )
     return ranges
+
+
+def _is_et_al_boundary(text: str, boundary: int) -> bool:
+    window = text[max(0, boundary - 12) : boundary + 1]
+    return bool(_ET_AL_BOUNDARY.search(window))
 
 
 def _emergency_split(

@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 
 from paperos_core.domain.canonical import Element, ReferenceEntry, Section
 from paperos_core.domain.enums import ElementType
-from paperos_core.ingestion.normalization import plain_text
 
 REGION_MAIN = "main"
 REGION_SUPPLEMENT = "supplement"
@@ -89,7 +88,10 @@ def assign_bibliography_scopes(
     sections: list[Section],
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Return (reference_id -> scope_id, scope_id -> parent_region)."""
+    from paperos_core.ingestion.document_regions import build_document_regions
+
     section_by_id = {section.id: section for section in sections}
+    regions, element_region = build_document_regions(elements=elements, sections=sections)
     ref_elements = [
         element
         for element in sorted(elements, key=lambda item: item.order)
@@ -114,11 +116,12 @@ def assign_bibliography_scopes(
         return scope_id
 
     for ref_element in ref_elements:
-        region = resolve_element_region(ref_element.section_id, section_by_id)
-        if region == REGION_REFERENCES:
-            region = _infer_references_parent_region(
-                ref_element.section_id, section_by_id
-            )
+        region = _reference_scope_parent_region(
+            ref_element,
+            element_region=element_region,
+            regions=regions,
+            section_by_id=section_by_id,
+        )
         needs_new_scope = current_scope_id is None or region != current_region
         if previous_order is not None and ref_element.order - previous_order > 1:
             needs_new_scope = True
@@ -190,6 +193,30 @@ def repair_numeric_label_sequence(
         return repaired
     repaired_by_id = {reference.id: reference for reference in repaired}
     return [repaired_by_id.get(reference.id, reference) for reference in references]
+
+
+def _reference_scope_parent_region(
+    ref_element: Element,
+    *,
+    element_region: dict[str, str],
+    regions: list,
+    section_by_id: dict[str, Section],
+) -> str:
+    order = ref_element.order
+    for region in regions:
+        if region.region_type != REGION_REFERENCES:
+            continue
+        end_order = region.end_order if region.end_order is not None else order
+        if region.start_order <= order <= end_order:
+            if REGION_SUPPLEMENT in region.region_id:
+                return REGION_SUPPLEMENT
+            return REGION_MAIN
+    region = resolve_element_region(ref_element.section_id, section_by_id)
+    if region == REGION_REFERENCES:
+        return _infer_references_parent_region(ref_element.section_id, section_by_id)
+    if region == REGION_SUPPLEMENT:
+        return REGION_SUPPLEMENT
+    return REGION_MAIN
 
 
 def _infer_references_parent_region(
