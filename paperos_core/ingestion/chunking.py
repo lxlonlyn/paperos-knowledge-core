@@ -35,6 +35,7 @@ from paperos_core.ingestion.document_regions import (
     region_id_for_element,
 )
 from paperos_core.ingestion.retrieval_text import build_retrieval_text
+from paperos_core.ingestion.chunk_eligibility import classify_chunk_eligibility
 from paperos_core.ingestion.sentence_units import (
     SentenceUnit,
     _PROSE_TYPES,
@@ -76,23 +77,8 @@ def build_chunks(
 
     eligible: list[Element] = []
     for element in elements:
-        if element.element_type not in _PROSE_TYPES and element.element_type not in {
-            ElementType.TABLE,
-            ElementType.FORMULA,
-        }:
-            continue
-        if element.element_type in {
-            ElementType.HEADER,
-            ElementType.FOOTER,
-            ElementType.PAGE_NUMBER,
-            ElementType.REFERENCE,
-        }:
-            continue
-        if _is_publication_metadata(element):
-            continue
-        if resolve_major_section_id(element.section_id, section_by_id) is None:
-            continue
-        if not element_text(element).strip():
+        eligibility = classify_chunk_eligibility(element, section_by_id=section_by_id)
+        if not eligibility.eligible:
             continue
         eligible.append(element)
 
@@ -435,19 +421,6 @@ def _make_chunk(
             "mixed_region_chunk": mixed_region,
         },
     )
-
-
-def _is_publication_metadata(element: Element) -> bool:
-    text = (element.text or element.markdown or "").casefold()
-    markers = (
-        "received ",
-        "revised ",
-        "accepted ",
-        "acm reference format",
-        "copyright",
-        "to cite this version",
-    )
-    return any(marker in text for marker in markers) and len(text) < 400
 
 
 def _merge_boxes(

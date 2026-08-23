@@ -159,10 +159,6 @@ def main() -> int:
             }[element.element_type]
             for surface, left, right, chash in _bracket_spans(text):
                 inner = surface.strip("[]")
-                if element.element_type == ElementType.TABLE and re.fullmatch(r"[\d,\s]+", inner):
-                    parts = [p.strip() for p in inner.split(",") if p.strip()]
-                    if parts and all(p.isdigit() and int(p) >= 32 for p in parts):
-                        continue
                 targets = _label_targets(inner, paper.get("references", []))
                 if not targets or all(t.get("unresolved") for t in targets):
                     continue

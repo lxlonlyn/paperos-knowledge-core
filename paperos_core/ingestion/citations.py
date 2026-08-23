@@ -168,7 +168,7 @@ def build_scoped_reference_indexes(
     elements: list,
     sections: list[Section],
 ) -> ScopedBibliography:
-    reference_scope, parent_regions = assign_bibliography_scopes(
+    reference_scope, assigned_scopes = assign_bibliography_scopes(
         references=references,
         elements=elements,
         sections=sections,
@@ -201,9 +201,11 @@ def build_scoped_reference_indexes(
 
     for scope_id, scoped_refs in grouped.items():
         scope_indexes[scope_id] = _indexes_for_references(scoped_refs, scope_id=scope_id)
+        existing = assigned_scopes.get(scope_id)
         scopes[scope_id] = BibliographyScope(
             scope_id=scope_id,
-            parent_region=parent_regions.get(scope_id, REGION_MAIN),
+            parent_region=existing.parent_region if existing else REGION_MAIN,
+            owner_body_region_id=existing.owner_body_region_id if existing else None,
             reference_ids=[reference.id for reference in scoped_refs],
         )
 
@@ -414,8 +416,6 @@ def _emit_bracket_mentions(
     if not _looks_like_author_year_bracket(inner) and not _looks_like_citation_bracket(inner):
         if _split_ocred_symbolic_group(inner) is None:
             return False
-    if _is_supplement_hyperparam_bracket(inner, document_region, region_instance_id):
-        return False
     resolved = resolve_bracket(inner, indexes, left_context=left_context)
     if resolved:
         if not _should_emit_bracket_citation(inner, resolved, indexes):
@@ -484,28 +484,6 @@ def _emit_bracket_mentions(
         )
     )
     return True
-
-
-def _is_supplement_hyperparam_bracket(
-    inner: str,
-    document_region: str | None,
-    region_instance_id: str | None = None,
-) -> bool:
-    in_supplement = document_region == REGION_SUPPLEMENT or (
-        region_instance_id is not None and REGION_SUPPLEMENT in region_instance_id
-    )
-    if not in_supplement:
-        return False
-    compact = inner.strip()
-    parts = [part.strip() for part in compact.split(",") if part.strip()]
-    if parts and all(re.fullmatch(r"\d{2,4}", part) for part in parts):
-        values = [int(part) for part in parts]
-        if all(value >= 32 and value % 2 == 0 for value in values):
-            return True
-    if re.fullmatch(r"\d{2,4}", compact):
-        value = int(compact)
-        return value in {64, 128, 160, 256, 300} or (value >= 64 and value % 2 == 0)
-    return False
 
 
 def _should_emit_bracket_citation(
@@ -588,10 +566,16 @@ def _resolve_reference_context(
                 scope_id = candidates[0]
         if scope_id and scope_id in scoped.scope_indexes:
             return scoped, scoped.scope_indexes[scope_id]
-        default = scoped.scope_indexes.get("default") or next(
-            iter(scoped.scope_indexes.values())
-        )
-        return scoped, default
+        if document_region is not None:
+            candidates = scopes_for_region(document_region, scoped)
+            if len(candidates) > 1:
+                return scoped, ReferenceIndexes(scope_id=None)
+            if len(candidates) == 1:
+                return scoped, scoped.scope_indexes[candidates[0]]
+        if len(scoped.scope_indexes) == 1:
+            only = next(iter(scoped.scope_indexes.values()))
+            return scoped, only
+        return scoped, ReferenceIndexes(scope_id=None)
     if isinstance(reference_index, ReferenceIndexes):
         return None, reference_index
     return None, _legacy_index_to_indexes(reference_index)

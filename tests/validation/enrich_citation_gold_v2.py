@@ -161,10 +161,6 @@ def main() -> int:
             }:
                 continue
             inner = candidate["surface_text"].strip("[]")
-            if domain == "table_body" and re.fullmatch(r"[\d,\s]+", inner):
-                parts = [p.strip() for p in inner.split(",") if p.strip()]
-                if parts and all(p.isdigit() and int(p) >= 32 for p in parts):
-                    continue
             region = "main"
             if appendix_start_index is not None and candidate["item_index"] >= appendix_start_index:
                 region = "supplement"

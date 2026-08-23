@@ -7,21 +7,14 @@ import argparse
 import json
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from paperos_core.domain.enums import ElementType
+from paperos_core.ingestion.chunk_eligibility import classify_chunk_eligibility
 from tests.validation.chunk_corpus_review import _load_bundle_from_snapshot_dir, _guess_pdf_for_bundle
-
-
-EXCLUDED_TYPES = {
-    ElementType.REFERENCE,
-    ElementType.HEADER,
-    ElementType.FOOTER,
-    ElementType.PAGE_NUMBER,
-}
 
 
 def _git_commit() -> str | None:
@@ -38,45 +31,23 @@ def _git_commit() -> str | None:
         return None
 
 
-def _is_publication_metadata(text: str) -> bool:
-    lowered = text.casefold()
-    markers = (
-        "received ",
-        "revised ",
-        "accepted ",
-        "acm reference format",
-        "copyright",
-        "to cite this version",
-    )
-    return any(marker in lowered for marker in markers) and len(text) < 400
-
-
 def validate_paper(*, bundle, chunks_json: dict) -> dict:
     chunks = chunks_json["chunks"]
+    section_by_id = {section.id: section for section in bundle.sections}
     eligible = []
     excluded = []
+    exclusion_stats: Counter[str] = Counter()
     for element in bundle.elements:
-        if element.element_type in EXCLUDED_TYPES:
-            excluded.append({"element_id": element.id, "reason": element.element_type.value})
-            continue
-        text = (element.text or element.markdown or "").strip()
-        if not text:
-            excluded.append({"element_id": element.id, "reason": "empty_text"})
-            continue
-        if element.element_type == ElementType.TITLE and len(text) < 120:
-            excluded.append({"element_id": element.id, "reason": "container_only_heading"})
-            continue
-        if element.element_type not in {
-            ElementType.PARAGRAPH,
-            ElementType.TITLE,
-            ElementType.LIST,
-            ElementType.LIST_ITEM,
-            ElementType.CAPTION,
-            ElementType.FOOTNOTE,
-            ElementType.TABLE,
-            ElementType.FORMULA,
-        }:
-            excluded.append({"element_id": element.id, "reason": f"type:{element.element_type.value}"})
+        eligibility = classify_chunk_eligibility(element, section_by_id=section_by_id)
+        if not eligibility.eligible:
+            excluded.append(
+                {
+                    "element_id": element.id,
+                    "element_type": element.element_type.value,
+                    "exclusion_reason": eligibility.reason,
+                }
+            )
+            exclusion_stats[eligibility.reason] += 1
             continue
         eligible.append(element)
 
@@ -142,6 +113,7 @@ def validate_paper(*, bundle, chunks_json: dict) -> dict:
     return {
         "eligible_elements": len(eligible),
         "excluded_elements": excluded,
+        "exclusion_stats": dict(exclusion_stats),
         "chunk_source_holes": holes,
         "chunk_source_overlaps": overlaps,
         "failures": failures,

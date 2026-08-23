@@ -105,7 +105,8 @@ def scope_for_element(
         region_type = REGION_MAIN
     region_id = info.region_id
 
-    candidates: list[str] = []
+    owned_candidates: list[str] = []
+    unowned_candidates: list[str] = []
     for scope in scoped.scopes.values():
         if region_type == REGION_SUPPLEMENT:
             if scope.parent_region != REGION_SUPPLEMENT:
@@ -115,18 +116,69 @@ def scope_for_element(
                 continue
         else:
             continue
-        if scope.owner_body_region_id is not None and scope.owner_body_region_id != region_id:
-            continue
-        candidates.append(scope.scope_id)
+        if scope.owner_body_region_id == region_id:
+            owned_candidates.append(scope.scope_id)
+        elif scope.owner_body_region_id is None:
+            unowned_candidates.append(scope.scope_id)
 
+    if len(owned_candidates) == 1:
+        return owned_candidates[0], None
+    if len(owned_candidates) > 1:
+        if region_type in {REGION_MAIN, REGION_ABSTRACT}:
+            return (
+                max(owned_candidates, key=lambda scope_id: len(scoped.scopes[scope_id].reference_ids)),
+                None,
+            )
+        return None, "AMBIGUOUS_BIBLIOGRAPHY_SCOPE"
+    if len(unowned_candidates) == 1:
+        return unowned_candidates[0], None
+    if len(unowned_candidates) > 1:
+        if region_type in {REGION_MAIN, REGION_ABSTRACT}:
+            return (
+                max(unowned_candidates, key=lambda scope_id: len(scoped.scopes[scope_id].reference_ids)),
+                None,
+            )
+        return None, "AMBIGUOUS_BIBLIOGRAPHY_SCOPE"
+
+    candidates = owned_candidates or unowned_candidates
     if len(candidates) == 1:
         return candidates[0], None
+    if len(candidates) > 1:
+        if region_type in {REGION_MAIN, REGION_ABSTRACT}:
+            return (
+                max(candidates, key=lambda scope_id: len(scoped.scopes[scope_id].reference_ids)),
+                None,
+            )
+        return None, "AMBIGUOUS_BIBLIOGRAPHY_SCOPE"
     if not candidates:
         fallback = scopes_for_region(region_type, scoped)
         if len(fallback) == 1:
             return fallback[0], None
+        if region_type in {REGION_MAIN, REGION_ABSTRACT}:
+            pool = [
+                scope_id
+                for scope_id, scope in scoped.scopes.items()
+                if scope.parent_region in {REGION_MAIN, REGION_ABSTRACT}
+            ]
+            if len(pool) == 1:
+                return pool[0], None
+            if pool:
+                return (
+                    max(pool, key=lambda scope_id: len(scoped.scopes[scope_id].reference_ids)),
+                    None,
+                )
+        if region_type == REGION_SUPPLEMENT:
+            pool = [
+                scope_id
+                for scope_id, scope in scoped.scopes.items()
+                if scope.parent_region in {REGION_MAIN, REGION_ABSTRACT, REGION_SUPPLEMENT}
+            ]
+            if pool:
+                return (
+                    max(pool, key=lambda scope_id: len(scoped.scopes[scope_id].reference_ids)),
+                    None,
+                )
         return None, FAILURE_SCOPE_NOT_FOUND
-    return None, "AMBIGUOUS_BIBLIOGRAPHY_SCOPE"
 
 
 FAILURE_SCOPE_NOT_FOUND = "SCOPE_NOT_FOUND"
@@ -203,7 +255,7 @@ def assign_bibliography_scopes(
         reference_scope[reference.id] = scope_id
 
     parent_regions = {scope.scope_id: scope.parent_region for scope in scopes.values()}
-    return reference_scope, parent_regions
+    return reference_scope, scopes
 
 
 def repair_numeric_label_sequence(

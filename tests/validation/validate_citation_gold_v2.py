@@ -32,11 +32,7 @@ def ref_fp(raw: str) -> str:
     return hashlib.sha256(norm_text(raw).casefold().encode("utf-8")).hexdigest()[:16]
 
 
-def context_hash(left: str, surface: str, right: str) -> str:
-    payload = f"{norm_text(left)}|{norm_text(surface)}|{norm_text(right)}"
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-
-
+from tests.validation.gold_audit_candidate_builder import context_hash, norm_context
 def locate_references(run_dir: Path, snapshot_id: str) -> Path:
     matches = list(run_dir.rglob(f"{snapshot_id}/references.jsonl"))
     matches = [path for path in matches if "/src_" in str(path)]
@@ -85,6 +81,51 @@ def expected_targets(group: dict[str, Any], canon) -> tuple[str, ...]:
     return tuple(sorted(keys))
 
 
+def _target_details(
+    target_keys: tuple[str, ...],
+    *,
+    ref_by_id: dict[str, dict[str, Any]],
+    gold_targets: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    details: list[dict[str, Any]] = []
+    gold_by_key: dict[str, dict[str, Any]] = {}
+    if gold_targets:
+        for target in gold_targets:
+            if target.get("unresolved"):
+                gold_by_key[f"unresolved:{target.get('atomic_key', '')}"] = target
+            else:
+                fps = target.get("acceptable_fingerprints") or []
+                if fps:
+                    gold_by_key[f"resolved:{fps[0]}"] = target
+    for key in target_keys:
+        if key.startswith("unresolved:"):
+            details.append(
+                {
+                    "atomic_key": key.removeprefix("unresolved:"),
+                    "resolution_status": "unresolved",
+                }
+            )
+            continue
+        fp = key.removeprefix("resolved:")
+        gold_target = gold_by_key.get(key)
+        label = gold_target.get("atomic_key") if gold_target else None
+        title = None
+        for ref in ref_by_id.values():
+            if ref_fp(ref["raw_text"]) == fp:
+                title = ref.get("title") or ref.get("raw_text", "")[:120]
+                label = label or ref.get("citation_label")
+                break
+        details.append(
+            {
+                "label": label,
+                "title": title,
+                "fingerprint": fp,
+                "resolution_status": "resolved",
+            }
+        )
+    return details
+
+
 def actual_span_record(
     mentions: list[dict[str, Any]],
     ref_by_id: dict[str, dict[str, Any]],
@@ -111,11 +152,13 @@ def actual_span_record(
         "region": first.get("document_region") or "main",
         "surface": norm_text(surface),
         "targets": tuple(sorted(targets)),
-        "left_context": norm_text(left)[-60:],
-        "right_context": norm_text(right)[:60],
+        "left_context": norm_context(left)[-60:],
+        "right_context": norm_context(right)[:60],
         "context_hash": context_hash(left, surface, right),
         "page": first.get("page"),
+        "source_domain": first.get("metadata", {}).get("source_domain"),
         "bibliography_scope_id": first.get("bibliography_scope_id"),
+        "element_id": element_id,
         "mentions": mentions,
     }
 
@@ -134,12 +177,74 @@ def load_element_texts(run_dir: Path, snapshot_id: str) -> dict[str, str]:
     return texts
 
 
-def match_key(record: dict[str, Any], *, use_context: bool) -> tuple:
-    base = (record["region"], record["surface"], record["targets"])
+def occurrence_key(record: dict[str, Any], *, use_context: bool) -> tuple:
+    element_id = record.get("element_id")
     if use_context and record.get("context_hash"):
-        return base + (record["context_hash"],)
-    return base
+        if element_id:
+            return ("element_hash", element_id, record["context_hash"])
+        return ("hash", record["context_hash"], record["surface"])
+    domain = record.get("source_domain") or record.get("region") or "main"
+    return (
+        "fallback",
+        element_id,
+        domain,
+        record["surface"],
+        record.get("left_context", ""),
+        record.get("right_context", ""),
+    )
 
+
+def legacy_group_key(record: dict[str, Any]) -> tuple:
+    return (
+        record.get("region") or "main",
+        record["surface"],
+    )
+
+
+def record_match_key(record: dict[str, Any]) -> tuple:
+    if record.get("context_hash"):
+        return occurrence_key(record, use_context=True)
+    return legacy_group_key(record)
+
+
+def _match_citation_records(
+    expected_records: list[dict[str, Any]],
+    actual_records: list[dict[str, Any]],
+) -> tuple[int, int, list[dict], list[dict], list[tuple[dict, dict]]]:
+    """Greedy occurrence matching with separate locator and legacy keys."""
+    unmatched_actual = list(actual_records)
+    missing_records: list[dict] = []
+    extra_records: list[dict] = []
+    matched_pairs: list[tuple[dict, dict]] = []
+
+    for expected in expected_records:
+        if expected.get("context_hash"):
+            key_fn = record_match_key
+        else:
+            key_fn = legacy_group_key
+        expected_key = key_fn(expected)
+        match_index = next(
+            (
+                index
+                for index, actual in enumerate(unmatched_actual)
+                if key_fn(actual) == expected_key
+            ),
+            None,
+        )
+        if match_index is None:
+            missing_records.append(expected)
+            continue
+        actual = unmatched_actual.pop(match_index)
+        matched_pairs.append((expected, actual))
+
+    extra_records.extend(unmatched_actual)
+    return (
+        len(missing_records),
+        len(extra_records),
+        missing_records,
+        extra_records,
+        matched_pairs,
+    )
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -157,6 +262,11 @@ def main() -> int:
         "gold_version": gold.get("gold_version"),
         "papers": {},
         "failure_count": 0,
+        "missing_occurrences": 0,
+        "extra_occurrences": 0,
+        "wrong_targets": 0,
+        "unresolved_expected_targets": 0,
+        "unattached_targets": 0,
     }
 
     for paper_key, paper in gold["papers"].items():
@@ -175,7 +285,6 @@ def main() -> int:
             actual_span_record(group, ref_by_id, canon, element_texts)
             for group in by_span.values()
         ]
-        actual_counter = Counter(match_key(record, use_context=False) for record in actual_records)
 
         expected_records = []
         for span in paper.get("citation_spans", paper.get("citation_groups", [])):
@@ -190,42 +299,98 @@ def main() -> int:
                     "right_context": locator.get("right_context", ""),
                     "context_hash": locator.get("context_hash"),
                     "page": locator.get("page", span.get("page_idx")),
-                    "source_domain": locator.get("source_domain"),
+                    "source_domain": locator.get("source_domain") or span.get("region"),
+                    "element_id": locator.get("element_id"),
                     "span_id": span.get("span_id"),
+                    "gold_targets": span.get("targets", []),
+                    "expected_bibliography_scope_id": span.get("bibliography_scope_id"),
                 }
             )
-        expected_counter = Counter(
-            match_key(record, use_context=False) for record in expected_records
-        )
 
-        missing = expected_counter - actual_counter
-        extra = actual_counter - expected_counter
+        missing_count, extra_count, missing_records, extra_records, matched_pairs = (
+            _match_citation_records(expected_records, actual_records)
+        )
         paper_failures: list[dict[str, Any]] = []
 
-        for key, count in missing.items():
-            for _ in range(count):
+        for record in missing_records:
+            paper_failures.append(
+                {
+                    "failure_type": "MISSING_OCCURRENCE",
+                    "paper": paper_key,
+                    "page": record.get("page"),
+                    "source_domain": record.get("source_domain") or record.get("region"),
+                    "surface": record.get("surface"),
+                    "left_context": record.get("left_context"),
+                    "right_context": record.get("right_context"),
+                    "expected_region": record.get("region"),
+                    "expected_bibliography_scope": record.get("expected_bibliography_scope_id"),
+                    "expected_targets": _target_details(
+                        record.get("targets", ()),
+                        ref_by_id=ref_by_id,
+                        gold_targets=record.get("gold_targets"),
+                    ),
+                }
+            )
+
+        for record in extra_records:
+            paper_failures.append(
+                {
+                    "failure_type": "EXTRA_OCCURRENCE",
+                    "paper": paper_key,
+                    "page": record.get("page"),
+                    "source_domain": record.get("source_domain") or record.get("region"),
+                    "surface": record.get("surface"),
+                    "left_context": record.get("left_context"),
+                    "right_context": record.get("right_context"),
+                    "actual_region": record.get("region"),
+                    "actual_bibliography_scope": record.get("bibliography_scope_id"),
+                    "actual_targets": _target_details(
+                        record.get("targets", ()),
+                        ref_by_id=ref_by_id,
+                    ),
+                }
+            )
+
+        wrong_target_count = 0
+        for expected, actual in matched_pairs:
+            if expected["targets"] != actual["targets"]:
+                wrong_target_count += 1
                 paper_failures.append(
                     {
-                        "failure_type": "missing_span",
+                        "failure_type": "WRONG_TARGETS",
                         "paper": paper_key,
-                        "region": key[0],
-                        "surface": key[1],
-                        "expected_targets": list(key[2]),
-                        "context_hash": key[3] if len(key) > 3 else None,
+                        "page": expected.get("page"),
+                        "source_domain": expected.get("source_domain"),
+                        "surface": expected.get("surface"),
+                        "left_context": expected.get("left_context"),
+                        "right_context": expected.get("right_context"),
+                        "expected_region": expected.get("region"),
+                        "actual_region": actual.get("region"),
+                        "expected_bibliography_scope": expected.get("expected_bibliography_scope_id"),
+                        "actual_bibliography_scope": actual.get("bibliography_scope_id"),
+                        "expected_targets": _target_details(
+                            expected["targets"],
+                            ref_by_id=ref_by_id,
+                            gold_targets=expected.get("gold_targets"),
+                        ),
+                        "actual_targets": _target_details(
+                            actual["targets"],
+                            ref_by_id=ref_by_id,
+                        ),
                     }
                 )
-        for key, count in extra.items():
-            for _ in range(count):
-                paper_failures.append(
-                    {
-                        "failure_type": "extra_span",
-                        "paper": paper_key,
-                        "region": key[0],
-                        "surface": key[1],
-                        "actual_targets": list(key[2]),
-                        "context_hash": key[3] if len(key) > 3 else None,
-                    }
-                )
+            for target in expected["targets"]:
+                if target.startswith("unresolved:") and target not in actual["targets"]:
+                    paper_failures.append(
+                        {
+                            "failure_type": "UNRESOLVED_EXPECTED_TARGET",
+                            "paper": paper_key,
+                            "page": expected.get("page"),
+                            "surface": expected.get("surface"),
+                            "expected_target": target,
+                            "actual_targets": list(actual["targets"]),
+                        }
+                    )
 
         unattached = [
             mention
@@ -235,28 +400,41 @@ def main() -> int:
         for mention in unattached:
             paper_failures.append(
                 {
-                    "failure_type": "unattached_target",
+                    "failure_type": "UNATTACHED_TARGET",
                     "paper": paper_key,
+                    "page": mention.get("page"),
                     "surface": mention.get("surface_text"),
                     "atomic_key": mention.get("atomic_key"),
                 }
             )
 
+        wrong_target_count = sum(1 for item in paper_failures if item["failure_type"] == "WRONG_TARGETS")
+        unresolved_expected = sum(
+            1 for item in paper_failures if item["failure_type"] == "UNRESOLVED_EXPECTED_TARGET"
+        )
         failures.extend(paper_failures)
         report["papers"][paper_key] = {
             "result_file": str(result_path),
             "expected_spans": len(expected_records),
             "actual_spans": len(actual_records),
-            "missing_spans": sum(missing.values()),
-            "extra_spans": sum(extra.values()),
+            "missing_occurrences": missing_count,
+            "extra_occurrences": extra_count,
+            "wrong_targets": wrong_target_count,
+            "unresolved_expected_targets": unresolved_expected,
             "unattached_targets": len(unattached),
             "status": "PASS" if not paper_failures else "FAIL",
             "failures": paper_failures[:50],
         }
+        report["missing_occurrences"] += missing_count
+        report["extra_occurrences"] += extra_count
+        report["wrong_targets"] += wrong_target_count
+        report["unresolved_expected_targets"] += unresolved_expected
+        report["unattached_targets"] += len(unattached)
+
         print(f"\n=== {paper_key}: {report['papers'][paper_key]['status']} ===")
         print(
             f"spans expected/actual={len(expected_records)}/{len(actual_records)} "
-            f"missing={sum(missing.values())} extra={sum(extra.values())} "
+            f"missing={missing_count} extra={extra_count} wrong_targets={wrong_target_count} "
             f"unattached={len(unattached)}"
         )
         for failure in paper_failures[:5]:
