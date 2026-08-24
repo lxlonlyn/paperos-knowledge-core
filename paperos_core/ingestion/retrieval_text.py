@@ -48,7 +48,8 @@ def build_retrieval_text(
             resolved_lines.append(f"{label} = unresolved")
     if resolved_lines:
         lines.append("Referenced works:\n" + "\n".join(resolved_lines))
-    lines.append(chunk.text)
+    retrieval_content = chunk.metadata.get("retrieval_content_text") or chunk.text
+    lines.append(str(retrieval_content))
     return "\n\n".join(line for line in lines if line.strip())
 
 

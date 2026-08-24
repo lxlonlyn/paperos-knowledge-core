@@ -140,7 +140,7 @@ def region_for_element(
     info = element_regions.get(element_id)
     if info is None:
         return default
-    return REGION_MAIN if info.region_type == REGION_ABSTRACT else info.region_type
+    return info.region_type
 
 
 def region_id_for_element(

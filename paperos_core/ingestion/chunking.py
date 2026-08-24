@@ -368,6 +368,7 @@ def _make_chunk(
     region_instance_id: str | None = None,
 ) -> Chunk:
     text = _join_unit_text(units)
+    retrieval_content_text = _join_unit_text(units, display=True)
     pages = [unit.page for unit in units if unit.page is not None]
     section_paths = [unit.section_path for unit in units if unit.section_path]
     section_ids = [unit.section_id for unit in units if unit.section_id]
@@ -375,6 +376,7 @@ def _make_chunk(
     span_ids = [unit.span_id for unit in units]
     identifier = chunk_id(document_id, order, span_ids)
     emergency_splits = sum(1 for unit in units if unit.emergency_split)
+    table_parts = sum(1 for unit in units if unit.split_type == "TABLE_PART")
     first_element_id = units[0].element_id if units else None
     document_region = (
         region_for_element(first_element_id, element_regions)
@@ -432,6 +434,11 @@ def _make_chunk(
         metadata={
             "end_boundary": end_boundary,
             "emergency_oversized_sentence_splits": emergency_splits,
+            "real_emergency_splits": emergency_splits,
+            "table_parts": table_parts,
+            "retrieval_content_text": (
+                retrieval_content_text if retrieval_content_text != text else None
+            ),
             "region_instance_id": region_instance_id
             or (next(iter(chunk_region_ids)) if len(chunk_region_ids) == 1 else None),
             "mixed_region_chunk": mixed_region,
@@ -452,10 +459,12 @@ def _merge_boxes(
     )
 
 
-def _join_unit_text(units: list[SentenceUnit]) -> str:
+def _join_unit_text(units: list[SentenceUnit], *, display: bool = False) -> str:
     if not units:
         return ""
-    parts = [units[0].text]
+    parts = [
+        (units[0].display_text or units[0].text) if display else units[0].text
+    ]
     for previous, current in pairwise(units):
         contiguous = (
             previous.element_id == current.element_id
@@ -463,5 +472,5 @@ def _join_unit_text(units: list[SentenceUnit]) -> str:
         )
         if not contiguous:
             parts.append("\n\n")
-        parts.append(current.text)
+        parts.append((current.display_text or current.text) if display else current.text)
     return "".join(parts)

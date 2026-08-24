@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
 from paperos_core.domain.canonical import Element, Section
@@ -17,6 +17,22 @@ from paperos_core.ingestion.inline_domains import (
 _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?。！？；;])\s+")
 _ET_AL_BOUNDARY = re.compile(r"\bet\s+al\.\s+", re.IGNORECASE)
+_FORMULA_LEAD = re.compile(
+    r"(?:"
+    r"as\s+follows|"
+    r"(?:is|are|was|were)\s+(?:defined|given|expressed)(?:\s+as)?|"
+    r"can\s+be\s+written(?:\s+as)?|"
+    r"we\s+(?:obtain|have|define)"
+    r")\s*[.:]?\s*$",
+    re.IGNORECASE,
+)
+_FORMULA_CONTINUATION = re.compile(
+    r"^(?:where|with|in\s+which|here|such\s+that)\b",
+    re.IGNORECASE,
+)
+_REAL_EMERGENCY_SPLIT_TYPES = frozenset(
+    {"EMERGENCY_WHITESPACE", "EMERGENCY_TOKEN_SAFE", "EMERGENCY_FORCED"}
+)
 
 SplitType = Literal[
     "NORMAL",
@@ -58,7 +74,23 @@ class SentenceUnit:
 
     @property
     def emergency_split(self) -> bool:
-        return self.split_type != "NORMAL"
+        return self.split_type in _REAL_EMERGENCY_SPLIT_TYPES
+
+
+def formula_cohesion_boundary(left: SentenceUnit, right: SentenceUnit) -> bool:
+    """Whether a DP break would separate formula-dependent prose."""
+    if left.unit_kind != "formula" and right.unit_kind != "formula":
+        return False
+    if right.unit_kind == "formula" and left.unit_kind == "sentence":
+        lead = left.text.rstrip()
+        return lead.endswith(":") or bool(_FORMULA_LEAD.search(lead))
+    if left.unit_kind == "formula" and right.unit_kind == "sentence":
+        continuation = right.text.lstrip()
+        if _FORMULA_CONTINUATION.match(continuation):
+            return True
+        first_alpha = next((char for char in continuation if char.isalpha()), None)
+        return first_alpha is not None and first_alpha.islower()
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,7 +320,7 @@ def _table_units(
                 unit_kind="table",
             )
         ]
-    lines = text.splitlines()
+    lines = _line_ranges(text)
     if len(lines) <= 2:
         ranges = _sentence_ranges(text, count, hard_max_tokens)
         return [
@@ -304,65 +336,76 @@ def _table_units(
             )
             for index, item in enumerate(ranges)
         ]
-    header = lines[:2]
-    body = lines[2:]
+
+    header_end = lines[1][1]
+    header_text = text[:header_end].rstrip("\r\n")
+    source_ranges: list[tuple[int, int]] = []
+    batch_start = 0
+    batch_end = header_end
+    for row_start, row_end in lines[2:]:
+        candidate_display = _table_display_text(
+            text, start=batch_start, end=row_end, header_text=header_text
+        )
+        if batch_end > batch_start and _count(count, candidate_display) > hard_max_tokens:
+            source_ranges.append((batch_start, batch_end))
+            batch_start = row_start
+        batch_end = row_end
+    if batch_end > batch_start:
+        source_ranges.append((batch_start, batch_end))
+
     units: list[SentenceUnit] = []
-    batch: list[str] = list(header)
-    source_cursor = 0
-    for row in body:
-        candidate = "\n".join([*batch, row])
-        if batch and _count(count, candidate) > hard_max_tokens:
-            block = "\n".join(batch)
-            block_start = source_cursor
-            block_end = block_start + len(block)
-            units.append(
-                _unit_from_range(
-                    element,
-                    _TextRange(
-                        text=block,
-                        start=block_start,
-                        end=block_end,
-                        split_type="TABLE_PART",
-                    ),
-                    count=count,
-                    section_id=section_id,
-                    section_path=section_path,
-                    paragraph_end=False,
-                    subsection_end=False,
-                    unit_kind="table_part",
-                    display_text=None if not units else "\n".join([*header, block]),
-                )
-            )
-            source_cursor = block_end + 1
-            batch = [*header, row]
-        else:
-            batch.append(row)
-    if batch:
-        block = "\n".join(batch)
-        body_only = "\n".join(batch[2:]) if len(batch) > 2 else block
-        block_start = text.find(body_only, source_cursor) if len(units) > 0 else 0
-        if block_start < 0:
-            block_start = source_cursor
-        block_end = block_start + len(body_only)
+    for start, end in source_ranges:
+        display_text = _table_display_text(
+            text, start=start, end=end, header_text=header_text
+        )
         units.append(
             _unit_from_range(
                 element,
                 _TextRange(
-                    text=body_only if len(units) > 0 else block,
-                    start=block_start,
-                    end=block_end,
+                    text=text[start:end],
+                    start=start,
+                    end=end,
                     split_type="TABLE_PART",
                 ),
                 count=count,
                 section_id=section_id,
                 section_path=section_path,
-                paragraph_end=True,
-                subsection_end=subsection_end,
+                paragraph_end=False,
+                subsection_end=False,
                 unit_kind="table_part",
-                display_text="\n".join(batch) if len(units) > 0 else None,
+                display_text=display_text if start > 0 else None,
             )
         )
+    if units:
+        units[-1] = replace(
+            units[-1], paragraph_end=True, subsection_end=subsection_end
+        )
     return units
+
+
+def _line_ranges(text: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    for line in text.splitlines(keepends=True):
+        end = cursor + len(line)
+        ranges.append((cursor, end))
+        cursor = end
+    if cursor < len(text):
+        ranges.append((cursor, len(text)))
+    return ranges
+
+
+def _table_display_text(
+    source: str,
+    *,
+    start: int,
+    end: int,
+    header_text: str,
+) -> str:
+    authoritative = source[start:end]
+    if start == 0:
+        return authoritative
+    return f"{header_text}\n{authoritative}"
 
 
 def _unit_from_range(

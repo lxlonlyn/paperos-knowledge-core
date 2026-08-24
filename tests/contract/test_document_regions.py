@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from paperos_core.domain.canonical import Element, Section
 from paperos_core.domain.enums import ElementType
-from paperos_core.ingestion.document_regions import build_document_regions
+from paperos_core.ingestion.document_regions import build_document_regions, region_for_element
 
 
 def _section(
@@ -125,3 +125,20 @@ def test_supplement_heading_repairs_stale_references_section_ancestry() -> None:
     assert len([region for region in regions if region.region_type == "references"]) == 2
     assert binding["element_5"].region_type == "supplement"
     assert binding["element_5"].citation_namespace_id == "citation_namespace_2"
+
+
+def test_abstract_region_is_preserved_while_sharing_main_namespace() -> None:
+    sections = [
+        _section(0, "Abstract", section_type="abstract"),
+        _section(1, "Introduction"),
+        _section(2, "References", section_type="references"),
+    ]
+    elements = [
+        _element(0, ElementType.PARAGRAPH, "Abstract citation [1].", "section_0"),
+        _element(1, ElementType.PARAGRAPH, "Main citation [1].", "section_1"),
+        _element(2, ElementType.TITLE, "References", "section_2"),
+        _element(3, ElementType.REFERENCE, "[1] Shared ref.", "section_2"),
+    ]
+    _, binding = build_document_regions(elements=elements, sections=sections)
+    assert region_for_element("element_0", binding) == "abstract"
+    assert binding["element_0"].citation_namespace_id == binding["element_1"].citation_namespace_id

@@ -109,6 +109,7 @@ def _write_result_package(
         run_dir / "reference-usage.json",
         run_dir / "chunk-corpus-review.json",
         run_dir / "failure-ledger.json",
+        run_dir / "chunk-boundary-contracts.json",
         run_dir / "logs" / "contracts" / CONTRACT_REPORT_NAME,
         gold,
         gold.with_name("gold-v3-audit.json"),
@@ -193,6 +194,10 @@ def main() -> int:
         "--run-dir", str(args.run_dir),
         "--corpus-dir", str(args.corpus_dir),
     )
+    boundary_code = _run_py(
+        "tests/validation/validate_chunk_boundary_contracts.py",
+        "--run-dir", str(args.run_dir),
+    )
     gold_code = _run_py(
         "tests/validation/validate_citation_gold_v3.py",
         "--gold", str(args.gold),
@@ -209,6 +214,7 @@ def main() -> int:
     survival_report = _load_json(args.run_dir / "canonical-source-survival.json")
     coverage_report = _load_json(args.run_dir / "chunk-source-coverage.json")
     regions_report = _load_json(args.run_dir / "chunk-regions-scopes.json")
+    boundary_report = _load_json(args.run_dir / "chunk-boundary-contracts.json")
     gold_report = _load_json(args.run_dir / "citation-gold-v3-validation.json")
     reference_report = _load_json(args.run_dir / "reference-usage.json")
 
@@ -220,6 +226,18 @@ def main() -> int:
     source_failures = int(survival_report.get("failure_count", 0))
     holes = int(coverage_report.get("chunk_source_holes", 0))
     overlaps = int(coverage_report.get("chunk_source_overlaps", 0))
+    boundary_metrics = {
+        "abstract_region_errors": int(boundary_report.get("abstract_region_errors", 0)),
+        "avoidable_formula_cohesion_breaks": int(
+            boundary_report.get("avoidable_formula_cohesion_breaks", 0)
+        ),
+        "table_part_emergency_misclassification": int(
+            boundary_report.get("table_part_emergency_misclassification", 0)
+        ),
+        "multi_part_table_provenance_errors": int(
+            boundary_report.get("multi_part_table_provenance_errors", 0)
+        ),
+    }
     citation_metrics = {
         "missing_occurrences": int(gold_report.get("missing_occurrences", 0)),
         "extra_occurrences": int(gold_report.get("extra_occurrences", 0)),
@@ -233,7 +251,14 @@ def main() -> int:
     }
 
     source_failure_count = source_failures + holes + overlaps
-    structure_failure_count = structure_failures + wrong_regions + wrong_namespaces + hard_max_violations + empty_chunks
+    structure_failure_count = (
+        structure_failures
+        + wrong_regions
+        + wrong_namespaces
+        + hard_max_violations
+        + empty_chunks
+        + sum(boundary_metrics.values())
+    )
     citation_failure_count = sum(citation_metrics.values())
     gates: dict[str, dict[str, Any]] = {
         "source": _gate(
@@ -245,13 +270,14 @@ def main() -> int:
             chunk_overlaps=overlaps,
         ),
         "structure": _gate(
-            structure_code == 0 and regions_code == 0,
+            structure_code == 0 and regions_code == 0 and boundary_code == 0,
             structure_failure_count,
             pdf_failures=structure_failures,
             wrong_regions=wrong_regions,
             wrong_namespaces=wrong_namespaces,
             hard_max_violations=hard_max_violations,
             empty_chunks=empty_chunks,
+            **boundary_metrics,
         ),
         "citation_gold_v3": _gate(
             gold_code == 0 and reference_code == 0,
@@ -304,6 +330,7 @@ def main() -> int:
         "wrong_namespaces": wrong_namespaces,
         "hard_max_violations": hard_max_violations,
         "empty_chunks": empty_chunks,
+        **boundary_metrics,
         **citation_metrics,
         "determinism_failures": determinism_failures,
         "gates": gates,
@@ -339,7 +366,11 @@ def main() -> int:
         "metrics": summary,
         "reports": {
             "source": ["canonical-source-survival.json", "chunk-source-coverage.json"],
-            "structure": ["chunk-corpus-review.json", "chunk-regions-scopes.json"],
+            "structure": [
+                "chunk-corpus-review.json",
+                "chunk-regions-scopes.json",
+                "chunk-boundary-contracts.json",
+            ],
             "citation_gold_v3": ["citation-gold-v3-validation.json", "reference-usage.json"],
         },
     }

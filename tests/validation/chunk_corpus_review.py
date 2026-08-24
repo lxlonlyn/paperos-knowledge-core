@@ -158,7 +158,9 @@ def _validate_chunks(
             errors.append(
                 f"hard_max_violation:{chunk.id}:{chunk.token_count}>{hard_max_tokens}"
             )
-        if chunk.retrieval_text and chunk.text not in chunk.retrieval_text:
+        if chunk.retrieval_text and any(
+            span.text not in chunk.retrieval_text for span in chunk.spans
+        ):
             errors.append(f"retrieval_missing_authoritative:{chunk.id}")
         if chunk.text.startswith("Paper:") or "\nSection:\n" in chunk.text[:80]:
             errors.append(f"authoritative_has_header:{chunk.id}")
@@ -259,9 +261,12 @@ def _process_bundle(
         )
         token_counts = [chunk.token_count or 0 for chunk in chunks]
         boundaries = Counter(chunk.metadata.get("end_boundary") for chunk in chunks)
-        emergency = sum(
-            int(chunk.metadata.get("emergency_oversized_sentence_splits") or 0)
+        real_emergency_splits = sum(
+            int(chunk.metadata.get("real_emergency_splits") or 0)
             for chunk in chunks
+        )
+        table_parts = sum(
+            int(chunk.metadata.get("table_parts") or 0) for chunk in chunks
         )
         ref_chunks = [
             element
@@ -317,7 +322,9 @@ def _process_bundle(
                 "tiny_chunks": sum(
                     1 for count in token_counts if count < TINY_TOKEN_THRESHOLD
                 ),
-                "emergency_splits": emergency,
+                "emergency_splits": real_emergency_splits,
+                "real_emergency_splits": real_emergency_splits,
+                "table_parts": table_parts,
                 "reference_elements": len(ref_chunks),
                 "boundaries": dict(boundaries),
                 "markdown_path": str(md_path),

@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from paperos_core.ingestion.sentence_units import SentenceUnit
+from paperos_core.ingestion.sentence_units import (
+    SentenceUnit,
+    formula_cohesion_boundary,
+)
 
 TINY_TOKEN_THRESHOLD = 250
 FINAL_TINY_WEIGHT = 0.75
+FORMULA_COHESION_BREAK_PENALTY = 1.25
 
 
 def partition_units(
@@ -53,6 +57,9 @@ def partition_units(
                 emergency_count=span_emergency(start, end),
                 target_tokens=target_tokens,
                 is_final=(end == n),
+                breaks_formula_cohesion=(
+                    end < n and formula_cohesion_boundary(units[end - 1], units[end])
+                ),
             )
             candidate = costs[start] + edge
             if candidate < costs[end] - 1e-12:
@@ -90,6 +97,7 @@ def _edge_cost(
     emergency_count: int,
     target_tokens: int,
     is_final: bool,
+    breaks_formula_cohesion: bool,
 ) -> float:
     ratio = tokens / max(target_tokens, 1)
     size_cost = (ratio - 1.0) ** 2
@@ -104,7 +112,8 @@ def _edge_cost(
     if tokens < TINY_TOKEN_THRESHOLD:
         weight = FINAL_TINY_WEIGHT if is_final else 1.0
         tiny_cost = weight * ((TINY_TOKEN_THRESHOLD - tokens) / TINY_TOKEN_THRESHOLD) ** 2
-    return size_cost + boundary_cost + tiny_cost + emergency_count * 0.5
+    cohesion_cost = FORMULA_COHESION_BREAK_PENALTY if breaks_formula_cohesion else 0.0
+    return size_cost + boundary_cost + tiny_cost + emergency_count * 0.5 + cohesion_cost
 
 
 def _better_tie_break(
