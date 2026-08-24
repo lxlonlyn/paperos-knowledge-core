@@ -2,9 +2,9 @@
 
 This project intentionally does not use pytest. Run:
 
-    python tests/validation/scholarly_work_reference_acceptance.py \
-      --corpus-dir data/validation/corpus/scholarly-work-reference \
-      --run-dir data/validation/runs/scholarly-work-reference \
+    python tests/validation/scholarly_work_reference.py \
+      --corpus-dir data/validation/corpus \
+      --run-dir data/validation/scholarly_work_reference/output \
       --dataset paperos-scholarly-work-reference --resume
 """
 
@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import traceback
@@ -33,7 +34,9 @@ from paperos_core.domain.canonical import CanonicalBundle
 from paperos_core.domain.scholarly import ScholarlyWork
 from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
 
-FIXTURE_ROOT = REPOSITORY_ROOT / "tests" / "fixtures" / "scholarly_work_reference"
+FIXTURE_ROOT = (
+    REPOSITORY_ROOT / "data" / "validation" / "scholarly_work_reference" / "config"
+)
 REPORT_NAME = "scholarly-work-citation-backbone.json"
 STATE_NAME = "scholarly-work-citation-backbone.state.json"
 BACKBONE_RELATIONS = {"REPRESENTS_WORK", "RESOLVES_TO", "CITES"}
@@ -120,7 +123,9 @@ def _matching_works(
             doi=paper.get("doi"),
         ):
             matches.append(work)
-    return sorted({work.id: work for work in matches}.values(), key=lambda item: item.id)
+    return sorted(
+        {work.id: work for work in matches}.values(), key=lambda item: item.id
+    )
 
 
 def _identity_snapshot_path(contract_root: Path, position: int, paper_key: str) -> Path:
@@ -222,9 +227,10 @@ def _stored_graph_contract(
         for node in graph.get("nodes", []):
             if not isinstance(node, dict):
                 continue
-            if node.get("__type__") == "TripletDataPoint" and node.get(
-                "relation_type"
-            ) in BACKBONE_RELATIONS:
+            if (
+                node.get("__type__") == "TripletDataPoint"
+                and node.get("relation_type") in BACKBONE_RELATIONS
+            ):
                 triplet_backbone_count += 1
             if node.get("__type__") != "ScholarlyWorkDataPoint":
                 continue
@@ -235,7 +241,11 @@ def _stored_graph_contract(
             invalid = sorted(field for field in FAKE_PROVENANCE_FIELDS if field in node)
             if invalid:
                 fake_external.append(
-                    {"work_id": canonical_id, "fields": invalid, "source": str(graph_path)}
+                    {
+                        "work_id": canonical_id,
+                        "fields": invalid,
+                        "source": str(graph_path),
+                    }
                 )
         for relation in graph.get("relations", []):
             if not isinstance(relation, dict):
@@ -305,9 +315,7 @@ async def _live_cognee_contract(
 ) -> dict[str, Any]:
     canonical_ids = set(signature["work_ids"].values())
     canonical_ids.update(signature["document_links"].keys())
-    canonical_ids.update(
-        item["reference_id"] for item in signature["reference_links"]
-    )
+    canonical_ids.update(item["reference_id"] for item in signature["reference_links"])
     readback = await application.knowledge_pipeline.compat.read_graph_records(
         [str(cognee_uuid(item)) for item in sorted(canonical_ids)],
         dataset_name=application.settings.dataset,
@@ -499,7 +507,9 @@ def _validate_final(
 ) -> None:
     work_ids = signature["work_ids"]
     if len(work_ids) != len(papers) or len(set(work_ids.values())) != len(papers):
-        _record_failure(report, "Four supplied PDFs did not resolve to four distinct Works.")
+        _record_failure(
+            report, "Four supplied PDFs did not resolve to four distinct Works."
+        )
     ingested = {
         work.id
         for work in report.pop("_active_works")
@@ -541,7 +551,11 @@ def _validate_final(
             and edge["reference_id"] in item["derived_from_ids"]
             for item in cognee["cites_edges"]
         )
-        status = "resolved" if stored_provenance and live_provenance else "missing_provenance"
+        status = (
+            "resolved"
+            if stored_provenance and live_provenance
+            else "missing_provenance"
+        )
         resolutions.append(
             {
                 "reference_id": edge["reference_id"],
@@ -560,7 +574,9 @@ def _validate_final(
     if stored["triplet_backbone_count"]:
         _record_failure(report, "Backbone edges were duplicated as TripletDataPoints.")
     if stored["fake_external_provenance"]:
-        _record_failure(report, "Stored external Work contains fake canonical provenance.")
+        _record_failure(
+            report, "Stored external Work contains fake canonical provenance."
+        )
     if cognee["fake_external_provenance_count"]:
         _record_failure(report, "Live Cognee external Work contains fake provenance.")
 
@@ -584,8 +600,7 @@ def _validate_final(
         for item in signature["reference_links"]
     }
     resolves = {
-        (item["source_id"], item["target_id"])
-        for item in cognee["resolves_to_edges"]
+        (item["source_id"], item["target_id"]) for item in cognee["resolves_to_edges"]
     }
     missing_resolves = sorted(expected_resolves - resolves)
     if missing_resolves:
@@ -597,9 +612,7 @@ def _validate_final(
     expected_cites = {
         (work_ids[source], work_ids[target]) for source, target in expected_edges
     }
-    cites = {
-        (item["source_id"], item["target_id"]) for item in cognee["cites_edges"]
-    }
+    cites = {(item["source_id"], item["target_id"]) for item in cognee["cites_edges"]}
     missing_cites = sorted(expected_cites - cites)
     if missing_cites:
         _record_failure(report, f"Cognee is missing Work CITES edges: {missing_cites}")
@@ -631,13 +644,18 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     application: Application | None = None
     shutdown_error: Exception | None = None
     try:
-        _validate_fixture_copy(corpus_dir, report)
-        manifest = _load_json(FIXTURE_ROOT / "reference_corpus_manifest.json")
+        global FIXTURE_ROOT
+        FIXTURE_ROOT = args.config_dir.expanduser().resolve()
+        manifest = _hydrate_manifest(
+            _load_json(FIXTURE_ROOT / "corpus_spec.json"), corpus_dir, run_dir
+        )
         ground_truth = _load_json(FIXTURE_ROOT / "reference_ground_truth.json")
         papers = _paper_map(manifest)
         ingest_order = [str(item) for item in manifest["recommended_ingest_order"]]
         if set(ingest_order) != set(papers) or len(ingest_order) != 4:
-            raise RuntimeError("Fixture ingest order must describe exactly four papers.")
+            raise RuntimeError(
+                "Fixture ingest order must describe exactly four papers."
+            )
         expected_edges = {
             _pair(item) for item in ground_truth["citation_edges_within_corpus"]
         }
@@ -646,7 +664,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             for item in ground_truth["forbidden_reverse_edges_within_corpus"]
         }
 
-        pdfs = {key: corpus_dir / "papers" / str(paper["file"]) for key, paper in papers.items()}
+        pdfs = {
+            key: corpus_dir / "papers" / str(paper["pool_file"])
+            for key, paper in papers.items()
+        }
         missing_pdfs = [str(path) for path in pdfs.values() if not path.is_file()]
         if missing_pdfs:
             raise RuntimeError(f"Missing supplied PDFs: {missing_pdfs}")
@@ -674,7 +695,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             }
             _atomic_json(state_path, state)
 
-        configured = load_settings(args.config)
+        configured = load_settings(args.settings)
         if not configured.mineru.api_key_value():
             raise RuntimeError("MinerU API key is not configured.")
         settings = configured.model_copy(
@@ -730,20 +751,28 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 latest = _latest_bundles(application)
                 bundle = latest.get(str(paper["file"]))
                 if bundle is not None and args.resume:
-                    print(f"ingest {position}/4 resume-knowledge {paper_key}", flush=True)
+                    print(
+                        f"ingest {position}/4 resume-knowledge {paper_key}", flush=True
+                    )
                     await application.knowledge_pipeline.ingest_bundle(bundle)
-                    bundle = application.canonical_repository.get_bundle(bundle.snapshot.id)
+                    bundle = application.canonical_repository.get_bundle(
+                        bundle.snapshot.id
+                    )
                 else:
                     print(f"ingest {position}/4 live {paper_key}", flush=True)
-                    result = await application.services.ingestion.ingest_pdf_to_knowledge(
-                        pdfs[paper_key],
-                        dataset=args.dataset,
+                    result = (
+                        await application.services.ingestion.ingest_pdf_to_knowledge(
+                            pdfs[paper_key],
+                            dataset=args.dataset,
+                        )
                     )
                     bundle = result.canonical_result.canonical
 
             work = application.scholarly_registry.work_for_document(bundle.document.id)
             if work is None:
-                raise RuntimeError(f"No Document-to-Work link after ingest: {paper_key}")
+                raise RuntimeError(
+                    f"No Document-to-Work link after ingest: {paper_key}"
+                )
             step.update(
                 {
                     "status": "completed",
@@ -834,7 +863,9 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             if not completed["stable"]:
                 _record_failure(report, f"Real reprocess changed Work ID: {paper_key}")
             if completed["before_snapshot_id"] == completed["after_snapshot_id"]:
-                _record_failure(report, f"Real reprocess did not create a snapshot: {paper_key}")
+                _record_failure(
+                    report, f"Real reprocess did not create a snapshot: {paper_key}"
+                )
 
         rebuild_state = dict(state.get("rebuild") or {})
         retained_before = rebuild_state.get("before_signature")
@@ -862,7 +893,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 or datetime.now(UTC).isoformat(),
             }
             _atomic_json(state_path, state)
-            print("rebuild first current snapshots with missing enrichment refresh", flush=True)
+            print(
+                "rebuild first current snapshots with missing enrichment refresh",
+                flush=True,
+            )
             rebuilt = await application.services.rebuilder.rebuild(
                 refresh_enrichment=True,
             )
@@ -926,9 +960,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         )
         report["cognee"] = {
             **after_live,
-            "stored_triplet_backbone_count": after_stored[
-                "triplet_backbone_count"
-            ],
+            "stored_triplet_backbone_count": after_stored["triplet_backbone_count"],
         }
         report["resolution_diagnostics"] = _resolution_diagnostics(
             application,
@@ -958,12 +990,11 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         resolved_links = application.scholarly_registry.identity_snapshot()[
             "reference_links"
         ]
-        references_by_id = {
-            reference.id: reference for reference in all_references
-        }
+        references_by_id = {reference.id: reference for reference in all_references}
         title_only_count = sum(
             item["resolution_status"] == "resolved"
-            and (reference := references_by_id.get(str(item["reference_id"]))) is not None
+            and (reference := references_by_id.get(str(item["reference_id"])))
+            is not None
             and bool(reference.title)
             and not reference.doi
             and not reference.arxiv_id
@@ -982,7 +1013,9 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "title_only_resolution_count": title_only_count,
             "citation_context_source_chunk_coverage": (
-                sum(bool(item["source_chunk_ids"]) for item in after_live["cites_edges"])
+                sum(
+                    bool(item["source_chunk_ids"]) for item in after_live["cites_edges"]
+                )
                 / len(after_live["cites_edges"])
                 if after_live["cites_edges"]
                 else 0.0
@@ -1013,24 +1046,52 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--corpus",
         "--corpus-dir",
+        dest="corpus_dir",
         type=Path,
-        default=Path("data/validation/corpus/scholarly-work-reference"),
+        default=Path("data/validation/corpus"),
     )
     parser.add_argument("--rerun-rebuild", action="store_true")
     parser.add_argument(
+        "--output",
         "--run-dir",
+        dest="run_dir",
         type=Path,
-        default=Path("data/validation/runs/scholarly-work-reference"),
+        default=Path("data/validation/scholarly_work_reference/output"),
     )
     parser.add_argument("--dataset", default="paperos-scholarly-work-reference")
-    parser.add_argument("--config", type=Path)
+    parser.add_argument("--config", dest="config_dir", type=Path, default=FIXTURE_ROOT)
+    parser.add_argument("--settings", type=Path)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     report = asyncio.run(_run(args))
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
     if report["status"] != "passed":
         raise SystemExit(1)
+
+
+def _hydrate_manifest(
+    manifest: dict[str, Any], corpus_dir: Path, run_dir: Path
+) -> dict[str, Any]:
+    pool = _load_json(corpus_dir / "manifest.json")
+    retained_by_sha: dict[str, str] = {}
+    registry = run_dir / "jobs" / "registry.sqlite3"
+    if registry.is_file():
+        with sqlite3.connect(registry) as connection:
+            sources = connection.execute(
+                "SELECT id, original_filename FROM source_files"
+            ).fetchall()
+        for source_id, original_filename in sources:
+            source_pdf = run_dir / "raw" / str(source_id) / "source.pdf"
+            if source_pdf.is_file():
+                retained_by_sha[_sha256(source_pdf)] = str(original_filename)
+    for paper in manifest["papers"]:
+        entry = pool[str(paper["paper_id"])]
+        paper["pool_file"] = Path(str(entry["file"])).name
+        paper["file"] = retained_by_sha.get(entry["sha256"], paper["pool_file"])
+        paper["sha256"] = entry["sha256"]
+    return manifest
 
 
 if __name__ == "__main__":

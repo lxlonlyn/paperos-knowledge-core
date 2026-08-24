@@ -3,8 +3,8 @@
 Consumes the retained Task 02 scholarly-work-reference corpus. Does not call
 MinerU, semantic enrichment, or rebuild.
 
-    python tests/validation/query_scope_acceptance.py \\
-      --live-data-dir data/validation/runs/scholarly-work-reference \\
+    python tests/validation/query_scope.py \\
+      --live-data-dir data/validation/scholarly_work_reference/output \\
       --dataset paperos-scholarly-work-reference
 """
 
@@ -42,10 +42,11 @@ from paperos_core.retrieval.scope import (
 
 MANIFEST = (
     REPOSITORY_ROOT
-    / "tests"
-    / "fixtures"
+    / "data"
+    / "validation"
     / "scholarly_work_reference"
-    / "reference_corpus_manifest.json"
+    / "config"
+    / "corpus_spec.json"
 )
 REPORT_NAME = "query-scope-acceptance.json"
 
@@ -57,7 +58,14 @@ QUERIES = {
     "E": "比较 NISE、Volume Preserving Neural Shape Morphing 和 EFIS 在 volume preservation / intermediate shape 方面的差异。",
 }
 
-VOLUME_ANY = ("control", "disappear", "reappear", "preserve", "intermediate", "property")
+VOLUME_ANY = (
+    "control",
+    "disappear",
+    "reappear",
+    "preserve",
+    "intermediate",
+    "property",
+)
 SELF_ANY = ("blob", "detach", "reattach", "lse")
 PREFERRED_EXTERNAL_TITLE = "geometry processing with neural fields"
 
@@ -138,7 +146,9 @@ def _text_blob(response: QueryResponse) -> str:
     return "\n".join(parts)
 
 
-def _concept_hit(text: str, *, required: tuple[str, ...], any_of: tuple[str, ...]) -> bool:
+def _concept_hit(
+    text: str, *, required: tuple[str, ...], any_of: tuple[str, ...]
+) -> bool:
     lowered = text.casefold()
     if any(token not in lowered for token in required):
         return False
@@ -146,11 +156,7 @@ def _concept_hit(text: str, *, required: tuple[str, ...], any_of: tuple[str, ...
 
 
 def _structured_about(response: QueryResponse) -> list[Any]:
-    return [
-        item
-        for item in response.evidence
-        if "subject_claim" in item.channels
-    ]
+    return [item for item in response.evidence if "subject_claim" in item.channels]
 
 
 def _enrichment_fingerprint(application: Application) -> dict[str, str]:
@@ -460,16 +466,21 @@ def _judge_f(
     unrelated = [
         item.evidence_id
         for item in response.evidence
-        if work_id not in _evidence_subject_ids(
+        if work_id
+        not in _evidence_subject_ids(
             item, response.resolved_scope.subject_work_ids, mention_index
         )
     ]
     if unrelated:
         failures.append(f"final evidence lacking subject relevance: {unrelated}")
-    sources = sorted({item.source_work_id for item in response.evidence if item.source_work_id})
+    sources = sorted(
+        {item.source_work_id for item in response.evidence if item.source_work_id}
+    )
     if any(item not in ingested_work_ids for item in sources):
         failures.append(f"evidence source is not an ingested Work: {sources}")
-    if any(not item.chunk_id or not item.derived_from_ids for item in response.evidence):
+    if any(
+        not item.chunk_id or not item.derived_from_ids for item in response.evidence
+    ):
         failures.append("provenance incomplete")
     return {
         "status": "PASS" if not failures else "FAIL",
@@ -499,12 +510,14 @@ async def _select_external_subject(
         has_document = work.id in corpus.document_ids_by_work
         if PREFERRED_EXTERNAL_TITLE not in work.title.casefold():
             continue
-        relations = await application.services.retrieval.compat.incoming_typed_relations(
-            [work.id],
-            dataset_name=dataset,
-            relation_type=RelationType.ABOUT.value,
-            depth=1,
-            limit=200,
+        relations = (
+            await application.services.retrieval.compat.incoming_typed_relations(
+                [work.id],
+                dataset_name=dataset,
+                relation_type=RelationType.ABOUT.value,
+                depth=1,
+                limit=200,
+            )
         )
         candidate = {
             "work_id": work.id,
@@ -581,9 +594,7 @@ async def _wait_healthy(base_url: str, *, attempts: int = 90) -> dict[str, Any]:
     raise RuntimeError(f"PaperOS HTTP health check failed: {last_error}")
 
 
-async def _http_query(
-    base_url: str, query: str, dataset: str
-) -> QueryResponse:
+async def _http_query(base_url: str, query: str, dataset: str) -> QueryResponse:
     async with httpx.AsyncClient(base_url=base_url, timeout=300) as client:
         response = await client.post(
             "/api/v1/query",
@@ -656,7 +667,7 @@ async def _real_http_e2e(
             "server_command": (
                 "reused existing PaperOS on localhost socket"
                 if process is None
-                else "python tests/validation/query_scope_acceptance.py --serve "
+                else "python tests/validation/query_scope.py --serve "
                 "(create_app + uvicorn lifespan, official server equivalent)"
             ),
             "health_status": health.get("status"),
@@ -792,7 +803,9 @@ async def run(live_data_dir: Path, dataset: str) -> dict[str, Any]:
     enrichment_unchanged = before_enrichment == after_enrichment
     reingest = before_parse != after_parse or before_snapshots != after_snapshots
     overall = (
-        all(case_reports[case_id]["judgment"]["status"] == "PASS" for case_id in queries)
+        all(
+            case_reports[case_id]["judgment"]["status"] == "PASS" for case_id in queries
+        )
         and http_report.get("status") == "PASS"
         and before_work_ids == after_work_ids
         and not reingest
@@ -829,9 +842,7 @@ async def run(live_data_dir: Path, dataset: str) -> dict[str, Any]:
         "provenance_complete": provenance_complete,
         "re_ingest_observed": reingest,
         "re_enrichment_observed": not enrichment_unchanged,
-        "enrichment_artifacts_unchanged": (
-            "PASS" if enrichment_unchanged else "FAIL"
-        ),
+        "enrichment_artifacts_unchanged": ("PASS" if enrichment_unchanged else "FAIL"),
         "retrieval_service_pipeline": "PASS" if pipeline_pass else "FAIL",
         "http_end_to_end": http_report,
         "overall": "PASS" if overall else "FAIL",
@@ -844,7 +855,14 @@ def main() -> None:
     parser.add_argument(
         "--live-data-dir",
         type=Path,
-        default=Path("data/validation/runs/scholarly-work-reference"),
+        default=Path("data/validation/scholarly_work_reference/output"),
+    )
+    parser.add_argument("--corpus", type=Path, default=Path("data/validation/corpus"))
+    parser.add_argument(
+        "--config", type=Path, default=Path("data/validation/query_scope/config")
+    )
+    parser.add_argument(
+        "--output", type=Path, default=Path("data/validation/query_scope/output")
     )
     parser.add_argument("--dataset", default="paperos-scholarly-work-reference")
     parser.add_argument(
@@ -853,21 +871,68 @@ def main() -> None:
         help="Start the official create_app/uvicorn PaperOS server for HTTP e2e.",
     )
     args = parser.parse_args()
+    global _QUERY_LIVE_DATA_ROOT
+    _QUERY_LIVE_DATA_ROOT = args.live_data_dir.resolve()
     if args.serve:
         _serve(args.live_data_dir, args.dataset)
         return
+    _validate_selection(args.corpus, args.config)
     report = asyncio.run(run(args.live_data_dir, args.dataset))
-    output = (
-        args.live_data_dir.resolve()
-        / "logs"
-        / "contracts"
-        / REPORT_NAME
-    )
+    output = args.output.resolve() / "logs" / "contracts" / REPORT_NAME
     _atomic_json(output, report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["overall"] != "PASS":
         raise SystemExit(1)
 
+
+_QUERY_LIVE_DATA_ROOT = Path("data/validation/scholarly_work_reference/output")
+
+
+def _hydrate_query_manifest() -> dict[str, Any]:
+    manifest = _original_query_load_json(MANIFEST)
+    pool = _original_query_load_json(
+        REPOSITORY_ROOT / "data/validation/corpus/manifest.json"
+    )
+    retained_by_sha: dict[str, str] = {}
+    registry = _QUERY_LIVE_DATA_ROOT / "jobs" / "registry.sqlite3"
+    if registry.is_file():
+        with sqlite3.connect(registry) as connection:
+            sources = connection.execute(
+                "SELECT id, original_filename FROM source_files"
+            ).fetchall()
+        for source_id, original_filename in sources:
+            source_pdf = _QUERY_LIVE_DATA_ROOT / "raw" / str(source_id) / "source.pdf"
+            if source_pdf.is_file():
+                digest = hashlib.sha256(source_pdf.read_bytes()).hexdigest()
+                retained_by_sha[digest] = str(original_filename)
+    for paper in manifest["papers"]:
+        entry = pool[str(paper["paper_id"])]
+        paper["file"] = retained_by_sha.get(
+            entry["sha256"], Path(str(entry["file"])).name
+        )
+    return manifest
+
+
+def _validate_selection(corpus: Path, config: Path) -> None:
+    pool = _load_json(corpus / "manifest.json")
+    selected = _load_json(config / "papers.json")["papers"]
+    for paper_id in selected:
+        entry = pool[str(paper_id)]
+        path = corpus / str(entry["file"])
+        if not path.is_file():
+            raise RuntimeError(f"Missing validation PDF: {paper_id} / {path}")
+
+
+_original_query_load_json = _load_json
+
+
+def _query_load_json(path: Path) -> dict[str, Any]:
+    if path.resolve() == MANIFEST.resolve():
+        return _hydrate_query_manifest()
+    return _original_query_load_json(path)
+
+
+_load_json = _query_load_json
 
 if __name__ == "__main__":
     main()

@@ -3,7 +3,7 @@
 This project intentionally does not use pytest. Run:
 
     python tests/contract/test_rebuild_enrichment_lifecycle.py \
-      --live-data-dir data/validation/runs/scholarly-work-reference
+      --live-data-dir data/validation/scholarly_work_reference/output
 """
 
 from __future__ import annotations

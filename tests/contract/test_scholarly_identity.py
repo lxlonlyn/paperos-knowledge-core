@@ -3,7 +3,7 @@
 This project intentionally does not use pytest. Run:
 
     python tests/contract/test_scholarly_identity.py \
-        --live-data-dir data/validation/runs/<latest>
+        --live-data-dir data/validation/scholarly_work_reference/output
 """
 
 from __future__ import annotations

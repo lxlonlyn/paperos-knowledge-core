@@ -6,8 +6,8 @@ from dataclasses import replace
 
 from paperos_core.ingestion.chunk_dp import partition_units
 from paperos_core.ingestion.sentence_units import SentenceUnit
-from tests.validation.validate_chunk_boundary_contracts import (
-    synthetic_multi_part_table_contract,
+from tests.validation.chunk import (
+    boundaries__synthetic_multi_part_table_contract,
 )
 
 
@@ -48,6 +48,6 @@ def test_formula_lead_and_continuation_stay_together_when_they_fit() -> None:
 
 
 def test_multi_part_table_provenance_contract() -> None:
-    result = synthetic_multi_part_table_contract()
+    result = boundaries__synthetic_multi_part_table_contract()
     assert result["table_part_count"] >= 3
     assert result["multi_part_table_provenance_errors"] == 0, result["failures"]

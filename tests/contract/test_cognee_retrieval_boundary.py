@@ -7,7 +7,7 @@ Static:
 
 Live retained dataset:
     python tests/contract/test_cognee_retrieval_boundary.py
-        --live-data-dir data/validation/runs/<latest>
+        --live-data-dir data/validation/scholarly_work_reference/output
         --dataset <dataset-name>
 """
 
@@ -126,7 +126,7 @@ async def live_contract(
     resolved = data_root.expanduser().resolve(strict=False)
     from paperos_core.application import create_application
     from paperos_core.config import load_settings
-    from tests.validation.retrieval_contract import run_live_retrieval_contract
+    from tests.validation.retrieval import contract__run_live_retrieval_contract
 
     selected_dataset = dataset or _dataset_from_manifests(resolved)
     configured = load_settings()
@@ -141,7 +141,7 @@ async def live_contract(
     output_path = resolved / "logs" / "contracts" / "cognee-retrieval-boundary.json"
     try:
         await application.start()
-        report = await run_live_retrieval_contract(
+        report = await contract__run_live_retrieval_contract(
             application,
             dataset=selected_dataset,
             output_path=output_path,
