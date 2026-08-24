@@ -19,12 +19,11 @@ def main() -> None:
     ingest.add_argument("--dataset")
     query = subcommands.add_parser("query")
     query.add_argument("question")
-    query.add_argument("--profile", default="comprehensive")
     query.add_argument("--dataset")
-    query.add_argument(
-        "--scope-json",
-        help="Optional JSON object for QueryRequest.scope",
-    )
+    query.add_argument("--document-id", action="append", dest="document_ids")
+    query.add_argument("--work-id", action="append", dest="work_ids")
+    query.add_argument("--expand-context", action="store_true")
+    query.add_argument("--expand-graph", action="store_true")
     job = subcommands.add_parser("job")
     job.add_argument("job_id")
     subcommands.add_parser("health")
@@ -47,14 +46,15 @@ def main() -> None:
                 status_response.raise_for_status()
                 payload = status_response.json()
         elif args.command == "query":
-            payload_body: dict[str, object] = {
-                "query": args.question,
-                "profile": args.profile,
-            }
+            payload_body: dict[str, object] = {"query": args.question}
             if args.dataset:
                 payload_body["dataset"] = args.dataset
-            if args.scope_json:
-                payload_body["scope"] = json.loads(args.scope_json)
+            if args.document_ids:
+                payload_body["document_ids"] = args.document_ids
+            if args.work_ids:
+                payload_body["work_ids"] = args.work_ids
+            payload_body["expand_context"] = args.expand_context
+            payload_body["expand_graph"] = args.expand_graph
             response = client.post("/api/v1/query", json=payload_body)
             response.raise_for_status()
             payload = response.json()

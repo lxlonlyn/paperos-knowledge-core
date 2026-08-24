@@ -19,11 +19,12 @@ from paperos_core.adapters.cognee.datapoints import (
     SummaryDataPoint,
     TripletDataPoint,
 )
-from paperos_core.ingestion.retrieval_text import effective_index_text
+from paperos_core.domain.canonical import CanonicalBundle, Chunk
 from paperos_core.domain.ids import knowledge_triplet_id
 from paperos_core.domain.knowledge import SemanticEnrichment
 from paperos_core.domain.provenance import RelationRecord, RelationType
 from paperos_core.domain.scholarly import ScholarlyContext
+from paperos_core.ingestion.retrieval_text import effective_index_text
 
 
 @dataclass(slots=True)
@@ -45,6 +46,7 @@ class DataPointGraph:
                 relation.model_dump(mode="json") for relation in self.relations
             ],
         }
+
 
 def canonical_to_datapoints(
     bundle: CanonicalBundle,
@@ -125,6 +127,10 @@ def canonical_to_datapoints(
     for chunk in chunks:
         for element_id in chunk.element_ids:
             chunks_by_element.setdefault(element_id, []).append(chunk.id)
+    citing_chunks_by_reference: dict[str, list[str]] = {}
+    for chunk in chunks:
+        for reference_id in chunk.citation_reference_entry_ids:
+            citing_chunks_by_reference.setdefault(reference_id, []).append(chunk.id)
     nodes.extend(
         ElementDataPoint(
             id=cognee_uuid(element.id),
@@ -157,7 +163,7 @@ def canonical_to_datapoints(
                 if reference.id in resolutions
                 else "unresolved"
             ),
-            source_chunk_ids=chunks_by_element.get(reference.source_element_id or "", []),
+            source_chunk_ids=citing_chunks_by_reference.get(reference.id, []),
             derived_from_ids=([reference.source_element_id] if reference.source_element_id else []),
             **common,
         )

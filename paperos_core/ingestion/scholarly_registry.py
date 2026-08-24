@@ -580,17 +580,17 @@ class ScholarlyRegistry:
         self, bundle: CanonicalBundle, chunks: list[Chunk]
     ) -> ScholarlyContext:
         document_work = self.resolve_document(bundle.document)
-        chunks_by_element: dict[str, list[str]] = {}
+        citing_chunks_by_reference: dict[str, list[str]] = {}
         for chunk in chunks:
-            for element_id in chunk.element_ids:
-                chunks_by_element.setdefault(element_id, []).append(chunk.id)
+            for reference_id in chunk.citation_reference_entry_ids:
+                citing_chunks_by_reference.setdefault(reference_id, []).append(
+                    chunk.id
+                )
 
         resolutions = [
             self.resolve_reference(
                 reference,
-                source_chunk_ids=chunks_by_element.get(
-                    reference.source_element_id or "", []
-                ),
+                source_chunk_ids=citing_chunks_by_reference.get(reference.id, []),
             )
             for reference in bundle.references
         ]

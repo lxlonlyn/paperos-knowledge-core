@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Literal
@@ -25,6 +24,7 @@ class CorpusView:
     work_id_by_document: dict[str, str] = field(default_factory=dict)
     document_ids_by_work: dict[str, set[str]] = field(default_factory=dict)
     work_titles: dict[str, str] = field(default_factory=dict)
+    cited_work_ids_by_chunk: dict[str, set[str]] = field(default_factory=dict)
 
     @classmethod
     def load(
@@ -84,9 +84,17 @@ class CorpusView:
         work_id_by_document: dict[str, str] = {}
         document_ids_by_work: dict[str, set[str]] = {}
         work_titles: dict[str, str] = {}
+        cited_work_ids_by_chunk: dict[str, set[str]] = {}
         if scholarly_registry is not None:
             for work in scholarly_registry.list_works():
                 work_titles[work.id] = work.title
+            for chunk in chunks.values():
+                for reference_id in chunk.citation_reference_entry_ids:
+                    work = scholarly_registry.work_for_reference(reference_id)
+                    if work is not None:
+                        cited_work_ids_by_chunk.setdefault(chunk.id, set()).add(
+                            work.id
+                        )
             for document_id in bundles:
                 work = scholarly_registry.work_for_document(document_id)
                 if work is None:
@@ -103,6 +111,7 @@ class CorpusView:
             work_id_by_document=work_id_by_document,
             document_ids_by_work=document_ids_by_work,
             work_titles=work_titles,
+            cited_work_ids_by_chunk=cited_work_ids_by_chunk,
         )
 
     def candidate_for_chunk(
@@ -120,7 +129,7 @@ class CorpusView:
             "user_confirmed",
         ] = "source_fact",
         derived_from_ids: list[str] | None = None,
-        text: str | None = None,
+        relation_types: list[str] | None = None,
         source_work_id: str | None = None,
         subject_work_ids: list[str] | None = None,
         candidate_id: str | None = None,
@@ -143,11 +152,12 @@ class CorpusView:
             section_path=chunk.section_path,
             page_start=chunk.page_start,
             page_end=chunk.page_end,
-            text=text if text is not None else chunk.text,
+            text=chunk.text,
             channels=[channel],
             channel_scores={channel: score},
             knowledge_kind=knowledge_kind,
             derived_from_ids=derived_from_ids or [],
+            relation_types=relation_types or [],
             source_work_id=resolved_source_work,
             subject_work_ids=list(subject_work_ids or []),
         )
@@ -171,53 +181,3 @@ class CorpusView:
         for work_id in work_ids:
             selected.update(self.document_ids_by_work.get(work_id, set()))
         return selected
-
-    def explicitly_mentioned_document_ids(self, query: str) -> set[str]:
-        """Resolve unambiguous title/identifier mentions without an LLM planner."""
-        normalized_query = _normalized_title_text(query)
-        title_tokens = {
-            document_id: _normalized_title_text(bundle.document.title).split()
-            for document_id, bundle in self.bundles.items()
-        }
-        prefixes = {
-            document_id: {
-                " ".join(tokens[:length])
-                for length in range(2, len(tokens) + 1)
-                if len(" ".join(tokens[:length])) >= 7
-            }
-            for document_id, tokens in title_tokens.items()
-        }
-        matched: set[str] = set()
-        for document_id, bundle in self.bundles.items():
-            title = " ".join(title_tokens[document_id])
-            identifiers = {
-                _normalized_title_text(token)
-                for token in re.findall(
-                    r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+", bundle.document.title
-                )
-                if len(token) >= 5
-            }
-            unique_prefixes = {
-                prefix
-                for prefix in prefixes[document_id]
-                if not any(
-                    prefix in other_prefixes
-                    for other_id, other_prefixes in prefixes.items()
-                    if other_id != document_id
-                )
-            }
-            mentions = {title, *identifiers, *unique_prefixes}
-            if any(
-                _contains_title_phrase(normalized_query, mention)
-                for mention in mentions
-            ):
-                matched.add(document_id)
-        return matched
-
-
-def _normalized_title_text(value: str) -> str:
-    return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
-
-
-def _contains_title_phrase(normalized_query: str, phrase: str) -> bool:
-    return f" {phrase} " in f" {normalized_query} "

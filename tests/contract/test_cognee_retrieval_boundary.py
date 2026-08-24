@@ -126,7 +126,8 @@ async def live_contract(
     resolved = data_root.expanduser().resolve(strict=False)
     from paperos_core.application import create_application
     from paperos_core.config import load_settings
-    from tests.validation.retrieval import contract__run_live_retrieval_contract
+    from paperos_core.retrieval.candidates import QueryRequest
+    from paperos_core.retrieval.corpus import CorpusView
 
     selected_dataset = dataset or _dataset_from_manifests(resolved)
     configured = load_settings()
@@ -138,22 +139,39 @@ async def live_contract(
         }
     )
     application = create_application(settings)
-    output_path = resolved / "logs" / "contracts" / "cognee-retrieval-boundary.json"
     try:
         await application.start()
-        report = await contract__run_live_retrieval_contract(
-            application,
-            dataset=selected_dataset,
-            output_path=output_path,
-            query_override=query,
+        question = query or "What methods and limitations are described?"
+        response = await application.services.retrieval.query(
+            QueryRequest(query=question, dataset=selected_dataset)
         )
+        corpus = CorpusView.load(
+            application.paths,
+            application.canonical_repository,
+            application.registry,
+            application.scholarly_registry,
+        )
+        grounded = all(
+            item.chunk_id in corpus.chunks
+            and item.text == corpus.chunks[item.chunk_id].text
+            and item.document_id == corpus.chunks[item.chunk_id].document_id
+            for item in response.evidence
+        )
+        _require(response.evidence, "Chunk vector boundary returned no evidence.")
+        _require(grounded, "Retrieval returned non-canonical evidence.")
+        _require(
+            set(response.channels_used) <= {"lexical", "vector"},
+            f"Unexpected first-stage channels: {response.channels_used}",
+        )
+        report = {
+            "status": "passed",
+            "dataset": selected_dataset,
+            "chunk_ids": [item.chunk_id for item in response.evidence],
+            "channels": response.channels_used,
+            "source_grounded": grounded,
+        }
     finally:
         await application.aclose()
-    _require(
-        not report["hard_failures"],
-        "Public and compatibility retrieval both failed for: "
-        + ", ".join(report["hard_failures"]),
-    )
     return report
 
 

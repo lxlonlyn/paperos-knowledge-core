@@ -125,6 +125,7 @@ class CogneePipelineAdapter:
             graph_results=graph_results,
             reuse_existing_enrichment=reuse_existing_enrichment,
             generate_enrichment_if_missing=generate_enrichment_if_missing,
+            claim_enrichment_enabled=self.ingestion.claim_enrichment_enabled,
         )
         item = PipelineItem(
             id=data_id,

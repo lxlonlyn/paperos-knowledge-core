@@ -12,11 +12,7 @@ from paperos_core.paths import DataPaths
 from paperos_core.retrieval.candidates import QueryRequest, QueryResponse
 from paperos_core.retrieval.corpus import CorpusView
 
-QUERY_CACHE_VERSIONS = {
-    "truth": "13",
-    "associative": "25",
-    "comprehensive": "25",
-}
+QUERY_CACHE_VERSION = "chunk-first-1"
 
 
 class QueryCache:
@@ -25,32 +21,14 @@ class QueryCache:
         self.feedback = feedback
 
     def key(self, request: QueryRequest, corpus: CorpusView) -> str:
-        from paperos_core.retrieval.ablation import current_ablation_policy
-
         snapshot_ids = sorted(
             bundle.snapshot.id for bundle in corpus.bundles.values()
         )
-        improvement_ids = sorted(
-            item.id for item in self.feedback.confirmed_improvements()
-        )
-        policy = current_ablation_policy()
-        ablation_parts: list[str] = []
-        if policy is not None:
-            ablation_parts = [
-                f"ablation:{policy.configuration_id}",
-                f"pool:{policy.candidate_pool_size or ''}",
-                f"topk:{policy.final_top_k or ''}",
-                f"priv:{int(policy.subject_claim_privilege)}",
-                f"dedup:{int(policy.chunk_dedup_final)}",
-                f"blind:{int(policy.claim_blind)}",
-            ]
         return stable_id(
             "answer",
             request.model_dump_json(),
             *snapshot_ids,
-            *improvement_ids,
-            *ablation_parts,
-            id_version=QUERY_CACHE_VERSIONS[request.profile.value],
+            id_version=QUERY_CACHE_VERSION,
         )
 
     def get(self, key: str) -> QueryResponse | None:

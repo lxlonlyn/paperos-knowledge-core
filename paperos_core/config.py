@@ -123,6 +123,7 @@ class IngestionSettings(StrictSettings):
     chunk_target_tokens: int = Field(default=900, gt=0)
     chunk_hard_max_tokens: int = Field(default=1200, gt=0)
     chunk_overlap_tokens: int = Field(default=0, ge=0)
+    claim_enrichment_enabled: bool = False
 
 
 class LocalInferenceSettings(StrictSettings):
@@ -149,29 +150,13 @@ class LocalInferenceSettings(StrictSettings):
         return value
 
 
-class RetrievalProfileSettings(StrictSettings):
-    lexical_weight: float = Field(default=1.0, ge=0)
-    semantic_weight: float = Field(default=1.0, ge=0)
-    graph_weight: float = Field(default=1.0, ge=0)
-    global_context_weight: float = Field(default=0.6, ge=0)
-    confirmed_knowledge_weight: float = Field(default=1.2, ge=0)
-
-
-class RetrievalProfilesSettings(StrictSettings):
-    comprehensive: RetrievalProfileSettings = Field(default_factory=RetrievalProfileSettings)
-    truth: RetrievalProfileSettings = Field(default_factory=RetrievalProfileSettings)
-    associative: RetrievalProfileSettings = Field(default_factory=RetrievalProfileSettings)
-
-
 class RetrievalSettings(StrictSettings):
-    default_profile: Literal["comprehensive", "truth", "associative"] = "comprehensive"
     top_k: int = Field(default=12, gt=0)
     candidate_pool_size: int = Field(default=40, gt=0)
     graph_depth: int = Field(default=2, ge=0)
-    rerank_enabled: bool = False
+    rerank_enabled: bool = True
     max_chunks_per_document: int = Field(default=3, gt=0)
     max_chunks_per_section: int = Field(default=2, gt=0)
-    profiles: RetrievalProfilesSettings = Field(default_factory=RetrievalProfilesSettings)
 
 
 class RuntimeSettings(StrictSettings):

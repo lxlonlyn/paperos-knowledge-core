@@ -18,6 +18,7 @@ from paperos_core.domain.canonical import (
     CanonicalSnapshot,
     Chunk,
     ChunkProjection,
+    CitationMention,
     Document,
     Element,
     ReferenceEntry,
@@ -46,7 +47,19 @@ class CanonicalRepository:
         self.paths.assert_within_root(path)
         return path
 
-    def save_chunks(self, snapshot_id: str, chunks: Sequence[Chunk]) -> Path:
+    def citation_mention_store_path(self, snapshot_id: str) -> Path:
+        path = (
+            self.paths.cognee / "citation_mentions" / f"{snapshot_id}.jsonl"
+        ).resolve(strict=False)
+        self.paths.assert_within_root(path)
+        return path
+
+    def save_chunks(
+        self,
+        snapshot_id: str,
+        chunks: Sequence[Chunk],
+        citation_mentions: Sequence[CitationMention] = (),
+    ) -> Path:
         """Atomically persist chunks produced by the custom pipeline (derived)."""
         path = self.chunk_store_path(snapshot_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -65,6 +78,27 @@ class CanonicalRepository:
             raise CanonicalStorageError(
                 f"Unable to persist derived chunk store: {exc}",
                 affected=path,
+            ) from exc
+        finally:
+            if temporary_name:
+                Path(temporary_name).unlink(missing_ok=True)
+        mention_path = self.citation_mention_store_path(snapshot_id)
+        mention_path.parent.mkdir(parents=True, exist_ok=True)
+        mention_payload = self._jsonl_bytes(citation_mentions)
+        temporary_name = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=".mentions-", dir=mention_path.parent, delete=False
+            ) as temporary:
+                temporary_name = temporary.name
+                temporary.write(mention_payload)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_name, mention_path)
+        except OSError as exc:
+            raise CanonicalStorageError(
+                f"Unable to persist citation mentions: {exc}",
+                affected=mention_path,
             ) from exc
         finally:
             if temporary_name:
@@ -212,11 +246,18 @@ class CanonicalRepository:
         """Load the derived chunk projection for one canonical snapshot."""
         self.get_snapshot(snapshot_id)
         derived = self.chunk_store_path(snapshot_id)
+        mention_store = self.citation_mention_store_path(snapshot_id)
         chunks = self._read_jsonl(derived, Chunk) if derived.is_file() else []
+        citation_mentions = (
+            self._read_jsonl(mention_store, CitationMention)
+            if mention_store.is_file()
+            else []
+        )
         return ChunkProjection(
             snapshot_id=snapshot_id,
             chunking_version=CHUNKING_VERSION,
             chunks=chunks,
+            citation_mentions=citation_mentions,
         )
 
     def list_snapshot_ids(self) -> list[str]:

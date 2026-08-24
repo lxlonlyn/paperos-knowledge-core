@@ -153,6 +153,7 @@ class Chunk(DomainModel):
     document_region: str | None = None
     citation_namespace_id: str | None = None
     citation_mention_ids: list[str] = Field(default_factory=list)
+    citation_reference_entry_ids: list[str] = Field(default_factory=list)
     previous_chunk_id: str | None = None
     next_chunk_id: str | None = None
     overlap_source_chunk_ids: list[str] = Field(default_factory=list)
@@ -240,6 +241,7 @@ class ChunkProjection(DomainModel):
     snapshot_id: str
     chunking_version: str = CHUNKING_VERSION
     chunks: list[Chunk] = Field(default_factory=list)
+    citation_mentions: list[CitationMention] = Field(default_factory=list)
 
 
 class CanonicalBundle(DomainModel):

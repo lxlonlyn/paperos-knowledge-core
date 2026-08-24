@@ -114,14 +114,14 @@ these identities without fake canonical provenance, and rebuild reproduces
 Document-to-Work, Reference-to-Work, and Work-to-Work CITES edges with the same
 permanent Work IDs.
 
-Cognee/LanceDB is the only semantic vector layer. SQLite FTS5 is the lexical
-supplement. Cognee 1.4.0 ``GRAPH_COMPLETION`` discovers loaded custom
-DataPoint indexes, but built-in ``CHUNKS`` remains tied to Cognee native
-``DocumentChunk_text`` and public graph output omits canonical/source-chunk and
-typed-edge provenance. A real 22-query benchmark also shows current public
-graph relevance remains below PaperOS production, so the version-locked
-fallbacks in ``paperos_core/adapters/cognee/compat.py`` remain. PaperOS does
-not create a second vector index, embedding client, or graph store.
+Cognee/LanceDB is the only semantic vector layer and SQLite FTS5 is the lexical
+supplement. Production query discovery searches only canonical
+``ChunkDataPoint`` objects in ``PAPEROS_CHUNKS``. Query text never selects an
+Entity, Claim, Summary, or Graph search channel. Explicit context expansion
+starts from first-stage Chunk hits and returns only canonical source Chunks.
+Version-locked graph/vector access remains isolated in
+``paperos_core/adapters/cognee/compat.py``; PaperOS does not create a second
+vector index, embedding client, or graph store.
 
 ## Local inference
 
@@ -139,8 +139,8 @@ Application lifecycle can start or stop the child process.
 - `scripts/doctor.py`: read-only configuration and dependency diagnostics.
 - `scripts/migrate_portable_paths.py`: dry-run/transactional migration of legacy
   absolute SQLite and JSON references.
-- `scripts/acceptance_real_pipeline.py`: cumulative real-PDF validation using
-  live MinerU/Cognee providers, all retrieval profiles, and lifecycle cleanup.
+- `tests/validation/retrieval.py`: real-PDF Chunk-first validation using live
+  MinerU/Cognee/LLM providers, with JSON and Markdown review artifacts.
 - `tests/contract/test_portable_data_paths.py`: permanent portable-path and real
   retained-data relocation contract, run directly without pytest.
 - `tests/contract/test_cognee_retrieval_boundary.py`: permanent static/live
@@ -153,37 +153,17 @@ Application lifecycle can start or stop the child process.
   rebuild, and live Cognee citation-backbone readback.
 - `scripts/backfill_scholarly_works.py`: deterministic registry backfill from
   retained canonical snapshots without invoking MinerU, LLM, or Cognee rebuild.
-- `tests/validation/retrieval_quality_benchmark.py`: resumable real-query
-  comparison of Cognee public graph search/recall and PaperOS production; no
-  pytest, mocks, fabricated queries, or production weight changes.
 - `scripts/debug_pipeline.py`: real retained-stage pipeline debugging.
 - `scripts/agent_client.py`: HTTP client example for agents and integrations.
 
 PaperOS does not use pytest, mocks, fabricated papers, or prerecorded downstream
 results. Acceptance exercises behavior; permanent contracts protect boundaries.
 
-Run the complete acceptance path with:
+Run the complete acceptance path with the authoritative validation corpus:
 
 ```bash
-python scripts/acceptance_real_pipeline.py
+python tests/validation/retrieval.py --rebuild
 ```
-
-Add `--visualize-graphs` to write capped, browser-readable JSON/SVG snapshots
-for real associative and comprehensive retrieval cases. The same acceptance run
-writes the real Cognee retrieval contract under `logs/contracts`; graph rendering
-failures remain non-blocking validation warnings.
-
-Run the retained real retrieval-quality benchmark with:
-
-```bash
-python tests/validation/retrieval_quality_benchmark.py \
-  --run-root data/validation/runs/<latest> \
-  --dataset <dataset-from-the-original-run> --resume
-```
-
-Configuration F is limited to associative/comprehensive cases. Use
-`--retry-errors` only to resume provider/network failures already recorded in
-the report.
 See [docs/architecture.md](docs/architecture.md),
 [docs/data_model.md](docs/data_model.md), and
 [docs/interfaces.md](docs/interfaces.md) for the binding internal contracts.

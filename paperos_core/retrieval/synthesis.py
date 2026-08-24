@@ -3,26 +3,18 @@
 import re
 
 from paperos_core.adapters.cognee.llm import LLMClient
-from paperos_core.retrieval.candidates import Evidence, ResolvedQueryScope, RetrievalProfile
+from paperos_core.retrieval.candidates import Evidence
 
 
 async def synthesize_answer(
     client: LLMClient,
     *,
     query: str,
-    profile: RetrievalProfile,
     evidence: list[Evidence],
-    recall_context: list[str] | None = None,
-    resolved_scope: ResolvedQueryScope | None = None,
 ) -> str:
     answer = await client.synthesize_answer(
         query=query,
-        profile=profile.value,
         evidence=[item.model_dump(mode="json") for item in evidence],
-        recall_context=recall_context,
-        resolved_scope=(
-            resolved_scope.model_dump(mode="json") if resolved_scope is not None else None
-        ),
     )
     for item in evidence:
         canonical = f"[{item.evidence_id}]"

@@ -218,8 +218,9 @@ fabricated source-file, parse-run, snapshot, or chunk provenance.
 The citation backbone is `Document --REPRESENTS_WORK--> ScholarlyWork`,
 `ReferenceEntry --RESOLVES_TO--> ScholarlyWork`, and
 `ScholarlyWork --CITES--> ScholarlyWork`. Each CITES edge derives from its
-ReferenceEntry and carries citation-context chunk IDs when the source element
-can be located. Chunks are
+ReferenceEntry and carries the body Chunk IDs whose resolved citation mentions
+actually target that ReferenceEntry. Reference-list paragraphs are not used as
+CITES evidence. Chunks are
 formally split from the canonical snapshot: canonical artifacts carry
 document/sections/elements/references only, and the derived
 ``ChunkProjection`` is produced by the pipeline and rebuilt on demand. Cognee's
@@ -230,48 +231,33 @@ for custom canonical input: the provenance spike contract proves it, and the
 minimal private registration stays centralized in
 ``paperos_core/adapters/cognee/compat.py``.
 
-Retrieval is public-first, with the current real profile mapping:
+Production retrieval has one architecture for every natural-language query:
 
 ```text
-truth         -> FTS5 + compat custom ChunkDataPoint vector search
-associative   -> compat custom Chunk/Entity/Claim/Summary search
-                 + finite typed graph traversal
-comprehensive -> FTS5 + the same Cognee recall/search compatibility paths
-                 + fusion
+Query
+-> FTS5 Chunk retrieval + PAPEROS_CHUNKS vector retrieval
+-> reciprocal-rank fusion
+-> chunk_id deduplication
+-> rerank
+-> top source Chunk seeds
+-> optional explicit local/citation/graph post-hit expansion
+-> chunk_id deduplication and a second rerank when new Chunks were added
+-> canonical source-grounded Evidence
+-> LLM synthesis
 ```
 
-Cognee public search/recall is preferred wherever it preserves PaperOS identity,
-dataset scope, ranking, and provenance. Cognee 1.4.0 public `CHUNKS` is fixed
-to its built-in ``DocumentChunk_text`` collection. By contrast, public
-``GRAPH_COMPLETION`` discovers ``index_fields`` from loaded custom DataPoint
-subclasses and can retrieve the PaperOS custom graph. These are separate
-capability facts: public graph results still omit reliable ``canonical_id``,
-``source_chunk_ids``, and typed edge provenance. The real retrieval-quality
-benchmark additionally shows that the current public graph relevance is below
-PaperOS production, so custom-DataPoint seeds, graph-node provenance readback,
-and finite typed traversal remain version-locked in
-``paperos_core/adapters/cognee/compat.py``.
-PaperOS does not implement a second embedding client, vector index, or graph store.
+Only caller-provided document/work IDs are hard filters. There is no QueryScope
+planner, title routing, task classification, comparison/limitation classifier,
+or profile-selected retrieval world. Local expansion is restricted to ±1 Chunk
+inside the same document region and major section. Graph expansion is
+``Chunk -> typed graph -> source_chunk_ids -> Chunk``; the query itself never
+searches graph nodes. Derived text can aid discovery/provenance but never becomes
+paper evidence. Evidence is always rehydrated from the current ChunkProjection.
 
-Hits backtrack through canonical IDs, node IDs, and source references, never by
-text-prefix matching. Missing vector distances use returned rank as an explicit
-rank-based score. The retained four-paper, 22-query benchmark against Cognee
-1.4.0 records 186 case-runs. PaperOS G reached 0.966 document and 0.954 concept
-recall. The primary public C comparison reached 0.871 and 0.658; context extension
-F reached 0.742 and 0.823 on its ten associative/comprehensive cases but averaged
-about 196 s, returned about 136k characters, and preserved no public canonical
-provenance. Top-k 12 to 40 was the clearest gain; depth 2 did not improve over
-depth 1, and wide=200/seed=80/depth=3 produced limited mixed gains. No
-triplet-penalty tuning was justified. Decisions: KEEP custom Chunk vector search,
-custom DataPoint graph seeds, typed traversal, graph-node provenance readback,
-and semantic graph retrieval; REMOVE none. Public API is therefore not yet the
-production semantic graph primary.
-
-The direct-run live contract compares public search, public recall, and compat
-for real Chunk, Entity, Claim, Summary, and associative graph context. It writes
-``logs/contracts/cognee-retrieval-boundary.json``, provides the evidence for
-every retained fallback, and can identify a future Cognee version where a
-fallback is safe to delete.
+Claim enrichment is optional and disabled by default. The disabled path uses a
+prompt and response schema with no Claim output field, creates no ClaimDataPoint
+or ABOUT edge, and therefore avoids Claim-generation LLM work. Enabling Claims
+does not add a Query-to-Claim search channel.
 
 ## Prompt ownership
 

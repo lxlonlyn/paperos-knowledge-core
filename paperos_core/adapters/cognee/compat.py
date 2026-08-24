@@ -52,36 +52,6 @@ _COGNEE_1_4_RETRIEVAL_COLLECTIONS: dict[
     str, tuple[tuple[str, str, str], ...]
 ] = {
     "PAPEROS_CHUNKS": (("ChunkDataPoint_text", "text", "ChunkDataPoint"),),
-    "PAPEROS_ENTITIES": (
-        ("EntityDataPoint_name", "name", "EntityDataPoint"),
-        ("EntityDataPoint_description", "description", "EntityDataPoint"),
-    ),
-    "PAPEROS_CLAIMS": (("ClaimDataPoint_text", "text", "ClaimDataPoint"),),
-    "PAPEROS_ENTITY_CLAIM": (
-        ("EntityDataPoint_name", "name", "EntityDataPoint"),
-        ("EntityDataPoint_description", "description", "EntityDataPoint"),
-        ("ClaimDataPoint_text", "text", "ClaimDataPoint"),
-    ),
-    "PAPEROS_ASSOCIATIVE_SEEDS": (
-        ("ChunkDataPoint_text", "text", "ChunkDataPoint"),
-        ("EntityDataPoint_name", "name", "EntityDataPoint"),
-        ("EntityDataPoint_description", "description", "EntityDataPoint"),
-        ("ClaimDataPoint_text", "text", "ClaimDataPoint"),
-    ),
-    "PAPEROS_GRAPH_SEEDS": (
-        ("EntityDataPoint_name", "name", "EntityDataPoint"),
-        ("EntityDataPoint_description", "description", "EntityDataPoint"),
-        ("ClaimDataPoint_text", "text", "ClaimDataPoint"),
-        ("TripletDataPoint_text", "text", "TripletDataPoint"),
-        (
-            "ConceptRelationDataPoint_description",
-            "description",
-            "ConceptRelationDataPoint",
-        ),
-    ),
-    "PAPEROS_SUMMARIES": (
-        ("SummaryDataPoint_text", "text", "SummaryDataPoint"),
-    ),
 }
 
 

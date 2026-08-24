@@ -91,6 +91,11 @@ class _SectionExtraction(_StrictModel):
     relations: list[_RelationExtraction]
 
 
+class _SectionExtractionWithoutClaims(_StrictModel):
+    entities: list[_EntityExtraction]
+    relations: list[_RelationExtraction]
+
+
 class _SummaryExtraction(_StrictModel):
     text: str
     source_chunk_ids: list[str] = Field(min_length=1)
@@ -101,18 +106,6 @@ class AnswerOutput(_StrictModel):
 
     answer: str
     cited_chunk_ids: list[str]
-
-
-class ScopePlannerOutput(_StrictModel):
-    """Bounded work-catalog scope plan. Never invents work keys or answers."""
-
-    source_work_keys: list[str] = Field(default_factory=list)
-    exclude_source_work_keys: list[str] = Field(default_factory=list)
-    subject_work_keys: list[str] = Field(default_factory=list)
-    work_set_work_keys: list[str] = Field(default_factory=list)
-    topic_queries: list[str] = Field(default_factory=list)
-    notes: str | None = None
-    confident: bool = True
 
 
 _T = TypeVar("_T", bound=BaseModel)
@@ -201,9 +194,15 @@ class LLMClient:
         bundle: CanonicalBundle,
         chunks: list[Chunk],
         scholarly: ScholarlyContext,
+        *,
+        claim_enrichment_enabled: bool = False,
     ) -> SemanticEnrichment:
         """Section-grouped, batch-local semantic enrichment with coverage."""
-        prompt = self.prompts.describe("semantic_enrichment")
+        prompt = self.prompts.describe(
+            "semantic_enrichment"
+            if claim_enrichment_enabled
+            else "semantic_enrichment_without_claims"
+        )
         catalog = _build_work_catalog(bundle, scholarly)
         raw_sections: list[tuple[str | None, list[Chunk], _SectionExtraction]] = []
         covered: list[str] = []
@@ -216,6 +215,7 @@ class LLMClient:
                     section_id=section_id,
                     chunks=batch,
                     catalog=catalog,
+                    claim_enrichment_enabled=claim_enrichment_enabled,
                 )
                 raw_sections.append((section_id, batch, extraction))
         config = self.runtime_config.read()
@@ -255,9 +255,9 @@ class LLMClient:
         section_id: str | None,
         chunks: list[Chunk],
         catalog: _WorkCatalog,
+        claim_enrichment_enabled: bool,
     ) -> _SectionExtraction:
-        request = {
-            "schema": {
+        extraction_schema: dict[str, Any] = {
                 "entities": [
                     {
                         "key": "unique local key",
@@ -268,7 +268,19 @@ class LLMClient:
                         "confidence": "optional number 0..1",
                     }
                 ],
-                "claims": [
+                "relations": [
+                    {
+                        "source_key": "entity key",
+                        "target_key": "entity key",
+                        "relation_type": "string",
+                        "description": "optional string",
+                        "source_chunk_ids": ["chunk id"],
+                        "confidence": "optional number 0..1",
+                    }
+                ],
+            }
+        if claim_enrichment_enabled:
+            extraction_schema["claims"] = [
                     {
                         "key": "unique local key",
                         "text": "string",
@@ -285,18 +297,9 @@ class LLMClient:
                             }
                         ],
                     }
-                ],
-                "relations": [
-                    {
-                        "source_key": "entity key",
-                        "target_key": "entity key",
-                        "relation_type": "string",
-                        "description": "optional string",
-                        "source_chunk_ids": ["chunk id"],
-                        "confidence": "optional number 0..1",
-                    }
-                ],
-            },
+                ]
+        request = {
+            "schema": extraction_schema,
             "document": {
                 "title": bundle.document.title,
                 "abstract": bundle.document.abstract,
@@ -308,11 +311,23 @@ class LLMClient:
         failures: list[dict[str, Any]] = []
         extraction: _SectionExtraction | None = None
         for attempt in range(1, 4):
-            extraction = await self._generate_structured(
-                system=prompt.text,
-                user=json.dumps(request, ensure_ascii=False),
-                response_model=_SectionExtraction,
-            )
+            if claim_enrichment_enabled:
+                extraction = await self._generate_structured(
+                    system=prompt.text,
+                    user=json.dumps(request, ensure_ascii=False),
+                    response_model=_SectionExtraction,
+                )
+            else:
+                without_claims = await self._generate_structured(
+                    system=prompt.text,
+                    user=json.dumps(request, ensure_ascii=False),
+                    response_model=_SectionExtractionWithoutClaims,
+                )
+                extraction = _SectionExtraction(
+                    entities=without_claims.entities,
+                    claims=[],
+                    relations=without_claims.relations,
+                )
             try:
                 return _normalize_section_extraction(
                     extraction,
@@ -333,9 +348,14 @@ class LLMClient:
                         "instruction": (
                             "Regenerate the complete response. Every source_chunk_ids value "
                             "must exactly equal a chunk_id present in evidence; relation keys "
-                            "must reference entities in this response; claim about.work_key "
-                            "must exactly equal a work_key from work_catalog; about.role must "
-                            "be one of self, subject, comparison_target, topic."
+                            "must reference entities in this response."
+                            + (
+                                " Claim about.work_key must exactly equal a work_key "
+                                "from work_catalog; about.role must be one of self, "
+                                "subject, comparison_target, topic."
+                                if claim_enrichment_enabled
+                                else ""
+                            )
                         ),
                         "allowed_work_keys": sorted(catalog.key_to_work_id),
                         "previous_error": exc.details,
@@ -525,45 +545,11 @@ class LLMClient:
             details={"attempts": failures},
         )
 
-    async def plan_query_scope(
-        self,
-        *,
-        query: str,
-        catalog_entries: list[dict[str, Any]],
-    ) -> ScopePlannerOutput:
-        """Classify source/subject/work-set/topic using a bounded Work catalog."""
-        from cognee.infrastructure.llm import LLMGateway
-
-        content = await LLMGateway.acreate_structured_output(
-            text_input=json.dumps(
-                {
-                    "question": query,
-                    "work_catalog": catalog_entries,
-                    "instructions": {
-                        "return_only_catalog_keys": True,
-                        "do_not_answer": True,
-                        "do_not_retrieve": True,
-                    },
-                },
-                ensure_ascii=False,
-            ),
-            system_prompt=self.prompts.load("query_scope"),
-            response_model=ScopePlannerOutput,
-            temperature=0.0,
-            max_tokens=2_000,
-        )
-        if not isinstance(content, ScopePlannerOutput):
-            raise TypeError("scope planner returned unexpected type")
-        return content
-
     async def synthesize_answer(
         self,
         *,
         query: str,
-        profile: str,
         evidence: list[dict[str, Any]],
-        recall_context: list[str] | None = None,
-        resolved_scope: dict[str, Any] | None = None,
     ) -> str:
         """Synthesize one evidence-bound answer with an explicit Pydantic schema."""
         from cognee.infrastructure.llm import LLMGateway
@@ -599,11 +585,8 @@ class LLMClient:
                 content = await LLMGateway.acreate_structured_output(
                     text_input=json.dumps(
                         {
-                            "profile": profile,
                             "question": query,
-                            "resolved_scope": resolved_scope or {},
                             "evidence": compact_evidence,
-                            "recall_context": recall_context or [],
                         },
                         ensure_ascii=False,
                     ),

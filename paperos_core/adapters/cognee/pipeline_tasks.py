@@ -75,7 +75,7 @@ async def academic_chunk_task(
     results: list[ChunkedBundle] = []
     for item in data:
         bundle = getattr(item, "bundle", item)
-        chunks, _mentions = build_chunks(
+        chunks, mentions = build_chunks(
             document=bundle.document,
             snapshot_id=bundle.snapshot.id,
             sections=bundle.sections,
@@ -86,13 +86,14 @@ async def academic_chunk_task(
             overlap_tokens=chunk_overlap_tokens,
             tokenizer=tokenizer,
         )
-        repository.save_chunks(bundle.snapshot.id, chunks)
+        repository.save_chunks(bundle.snapshot.id, chunks, mentions)
         results.append(
             ChunkedBundle(
                 bundle=bundle,
                 projection=ChunkProjection(
                     snapshot_id=bundle.snapshot.id,
                     chunks=chunks,
+                    citation_mentions=mentions,
                 ),
             )
         )
@@ -126,6 +127,7 @@ async def semantic_enrichment_task(
     enrichment_root: Path,
     reuse_existing: bool = False,
     generate_if_missing: bool = True,
+    claim_enrichment_enabled: bool = False,
 ) -> list[EnrichedBundle]:
     """Reuse validated enrichment or generate it only when explicitly allowed."""
     results: list[EnrichedBundle] = []
@@ -133,6 +135,11 @@ async def semantic_enrichment_task(
         enrichment_path = enrichment_root / f"{chunked.bundle.snapshot.id}.json"
         if reuse_existing and enrichment_path.is_file():
             enrichment = _load_enrichment(enrichment_path)
+            if not claim_enrichment_enabled and enrichment.claims:
+                raise CogneeStorageError(
+                    "Claim-disabled ingestion cannot reuse enrichment containing claims.",
+                    affected=enrichment_path,
+                )
         elif not generate_if_missing:
             raise CogneeStorageError(
                 "Semantic enrichment artifact is missing and generation is disabled.",
@@ -143,6 +150,7 @@ async def semantic_enrichment_task(
                 chunked.bundle,
                 chunked.projection.chunks,
                 scholarly=chunked.scholarly,
+                claim_enrichment_enabled=claim_enrichment_enabled,
             )
             _persist_enrichment(
                 enrichment_root, chunked.bundle.snapshot.id, enrichment
@@ -225,6 +233,7 @@ def configure_pipeline_tasks(
     graph_results: list[DataPointGraph],
     reuse_existing_enrichment: bool,
     generate_enrichment_if_missing: bool,
+    claim_enrichment_enabled: bool,
 ) -> list[Any]:
     """Bind per-run dependencies and return the Cognee Task list."""
     return [
@@ -248,6 +257,7 @@ def configure_pipeline_tasks(
             enrichment_root=enrichment_root,
             reuse_existing=reuse_existing_enrichment,
             generate_if_missing=generate_enrichment_if_missing,
+            claim_enrichment_enabled=claim_enrichment_enabled,
         ).task,
         task(
             datapoint_mapping_task,

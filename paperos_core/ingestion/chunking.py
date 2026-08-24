@@ -22,15 +22,16 @@ from paperos_core.domain.canonical import (
 )
 from paperos_core.domain.enums import ElementType
 from paperos_core.domain.ids import chunk_id
+from paperos_core.ingestion.bibliography_scope import (
+    FAILURE_NAMESPACE_NOT_ASSIGNED,
+    REGION_REFERENCES,
+)
 from paperos_core.ingestion.chunk_dp import partition_units
+from paperos_core.ingestion.chunk_eligibility import classify_chunk_eligibility
 from paperos_core.ingestion.citations import (
     attach_mentions_to_chunks,
     build_scoped_reference_indexes,
     extract_citation_mentions_from_text,
-)
-from paperos_core.ingestion.bibliography_scope import (
-    FAILURE_NAMESPACE_NOT_ASSIGNED,
-    REGION_REFERENCES,
 )
 from paperos_core.ingestion.document_regions import (
     build_document_regions,
@@ -39,10 +40,9 @@ from paperos_core.ingestion.document_regions import (
     region_id_for_element,
 )
 from paperos_core.ingestion.retrieval_text import build_retrieval_text
-from paperos_core.ingestion.chunk_eligibility import classify_chunk_eligibility
 from paperos_core.ingestion.sentence_units import (
-    SentenceUnit,
     _PROSE_TYPES,
+    SentenceUnit,
     element_text,
     resolve_major_section_id,
     units_for_element,
@@ -69,7 +69,7 @@ def build_chunks(
     count = tokenizer.count_tokens
     elements = list(elements)
     section_by_id = {section.id: section for section in sections}
-    document_regions, element_regions = build_document_regions(
+    _document_regions, element_regions = build_document_regions(
         elements=elements, sections=sections
     )
     reference_indexes = build_scoped_reference_indexes(
@@ -208,6 +208,13 @@ def build_chunks(
                 update={
                     "retrieval_text": retrieval,
                     "citation_mention_ids": [mention.id for mention in mentions],
+                    "citation_reference_entry_ids": list(
+                        dict.fromkeys(
+                            mention.reference_entry_id
+                            for mention in mentions
+                            if mention.reference_entry_id is not None
+                        )
+                    ),
                     "previous_chunk_id": built[index - 1].id if index else None,
                     "next_chunk_id": (
                         built[index + 1].id if index + 1 < len(built) else None
@@ -279,9 +286,11 @@ def _is_subsection_boundary(
         return True
     current_section = section_by_id.get(current.section_id or "")
     next_section = section_by_id.get(next_element.section_id or "")
-    if current_section and next_section and current_section.id != next_section.id:
-        return True
-    return False
+    return bool(
+        current_section
+        and next_section
+        and current_section.id != next_section.id
+    )
 
 
 def _chunks_from_ranges(
