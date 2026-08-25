@@ -36,6 +36,7 @@ from paperos_core.retrieval.semantic import semantic_retrieve
 from paperos_core.retrieval.synthesis import (
     FinalSynthesisContext,
     render_synthesis_prompt,
+    select_synthesis_evidence,
     synthesize_answer,
 )
 from paperos_core.runtime.local_inference.client import LocalInferenceClient
@@ -163,7 +164,13 @@ class RetrievalService:
 
         selected = deduplicate_candidates_by_chunk(reranked)[:top_k]
         stages.extend(["final_selection", "source_grounded_evidence"])
-        evidence = format_evidence(selected, corpus)
+        ranked_evidence = format_evidence(selected, corpus)
+        evidence = select_synthesis_evidence(
+            original_query=request.query,
+            ranked_evidence=ranked_evidence,
+            max_input_tokens=self.config.retrieval.synthesis_max_input_tokens,
+        )
+        selected = selected[: len(evidence)]
         synthesis_context = FinalSynthesisContext(
             original_query=request.query,
             evidence=evidence,

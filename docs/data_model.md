@@ -45,7 +45,10 @@ object with `original_query` and `replay_text`. The latter is the exact rendered
 Markdown user prompt used for final synthesis. It contains the question,
 ordered evidence and available paper provenance, but not the current answer or
 retrieval-engine scores. Replay is returned with the query response and has no
-independent persistence lifecycle.
+independent persistence lifecycle. The final Evidence list is the longest
+ranked whole-Chunk prefix admitted by `retrieval.synthesis_max_input_tokens`;
+the response Evidence, Replay blocks, and actual synthesis input are therefore
+identical, and selected `Chunk.text` values are never partially truncated.
 
 ## Common persistence fields
 

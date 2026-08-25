@@ -375,6 +375,7 @@ def _retrieval_service(*, rerank_enabled: bool) -> RetrievalService:
             top_k=2,
             candidate_pool_size=4,
             rerank_enabled=rerank_enabled,
+            synthesis_max_input_tokens=48_000,
         ),
     )
     service.paths = SimpleNamespace()

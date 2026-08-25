@@ -150,6 +150,7 @@ class RetrievalSettings(StrictSettings):
     top_k: int = Field(default=12, gt=0)
     candidate_pool_size: int = Field(default=40, gt=0)
     rerank_enabled: bool = True
+    synthesis_max_input_tokens: int = Field(default=48_000, gt=0)
 
 
 class RuntimeSettings(StrictSettings):

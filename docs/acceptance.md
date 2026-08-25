@@ -23,8 +23,8 @@ PDF
 → PAPEROS_CHUNKS vector index + SQLite FTS5 lexical index
 → lexical Chunk + vector Chunk retrieval
 → RRF → chunk_id dedup → rerank
-→ optional post-hit local / citation / graph expansion
-→ canonical source-grounded Evidence
+→ optional local context / direct semantic relation expansion
+→ whole-Chunk synthesis budget → canonical source-grounded Evidence
 → LLM answer
 ```
 
@@ -52,19 +52,22 @@ The run fails unless all of the following contracts hold:
    `source_chunk_ids`.
 5. Explicit local expansion starts from a first-stage hit and stays within the
    same document, region, and major section.
-6. Explicit graph expansion starts from a first-stage Chunk, follows bounded
-   typed graph provenance, and returns only canonical Chunks. If the retained
-   corpus has no genuine relation that can produce a case, the report records
-   `NO_CASE`; it never fabricates a success.
+6. Direct semantic expansion starts from a seed Chunk, follows semantic objects
+   grounded in that Chunk through one direct semantic relation, and resolves
+   `relation.source_chunk_ids` to canonical Chunk candidates. CITES is validated
+   as scholarly provenance, not used as ordinary semantic expansion. If the
+   retained corpus has no genuine relation that can produce a case, the report
+   records `NO_CASE`; it never fabricates a success.
 7. Every final Evidence item satisfies the source-grounding invariant:
    `chunk_id` exists, `evidence.document_id == canonical_chunk.document_id`,
    and `evidence.text == canonical_chunk.text`.
 8. At least one real query reaches final LLM synthesis, proving that the
    PDF-to-LLM chain completed.
 
-The report includes the first-stage IDs, first rerank IDs, local/citation/graph
-expansion IDs, second rerank IDs, final selected IDs, and graph traversal
-provenance needed for manual review.
+The report includes the first-stage IDs, first rerank IDs, local/direct-semantic
+expansion IDs, second rerank IDs, final selected IDs, and direct-relation
+provenance needed for manual review. Citation/CITES checks remain separate
+scholarly-provenance gates.
 
 ## Outputs
 

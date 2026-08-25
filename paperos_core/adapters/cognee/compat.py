@@ -13,7 +13,7 @@ Only narrowly version-locked private access is justified and centralized here:
 2. verifying and deleting derived projections and closing process-local
    engines, which Cognee does not expose publicly;
 3. Cognee 1.4.0 retrieval fallbacks for custom DataPoint collection selection,
-   canonical provenance readback, and finite-depth typed graph traversal.
+   canonical provenance readback, and direct semantic relation lookup.
 """
 
 from __future__ import annotations

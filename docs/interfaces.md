@@ -40,7 +40,9 @@ error, and result. Status is one of `pending`, `running`, `completed`, or
 provenance, the retrieval trace, and `replay`. `replay.original_query` preserves
 the caller's exact question, while `replay.replay_text` is the same standalone
 Markdown user prompt sent to final synthesis. A caller can paste that text into
-a new web LLM conversation without rerunning retrieval.
+a new web LLM conversation without rerunning retrieval. The returned Evidence
+is limited by the total `retrieval.synthesis_max_input_tokens` budget, but every
+selected canonical Chunk remains complete.
 
 ### Documents and maintenance
 

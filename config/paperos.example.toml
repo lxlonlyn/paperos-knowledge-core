@@ -57,6 +57,7 @@ claim_enrichment_enabled = false
 top_k = 12
 candidate_pool_size = 40
 rerank_enabled = true
+synthesis_max_input_tokens = 48000
 
 [api]
 host = "127.0.0.1"

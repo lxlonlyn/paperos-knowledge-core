@@ -240,9 +240,11 @@ Query
 -> chunk_id deduplication
 -> rerank
 -> top source Chunk seeds
--> optional explicit local/citation/graph post-hit expansion
+-> optional local context expansion
+-> optional direct semantic relation expansion
 -> chunk_id deduplication and a second rerank when new Chunks were added
--> canonical source-grounded Evidence
+-> whole-Chunk synthesis budget selection
+-> final canonical source-grounded Evidence
 -> FinalSynthesisContext
 -> one rendered Markdown synthesis prompt
    |-> LLM synthesis -> answer
@@ -252,14 +254,21 @@ Query
 Only caller-provided document/work IDs are hard filters. There is no QueryScope
 planner, title routing, task classification, comparison/limitation classifier,
 or profile-selected retrieval world. Local expansion is restricted to ±1 Chunk
-inside the same document region and major section. Graph expansion is
-``Chunk -> typed graph -> source_chunk_ids -> Chunk``; the query itself never
-searches graph nodes. Derived text can aid discovery/provenance but never becomes
-paper evidence. Evidence is always rehydrated from the current ChunkProjection.
+inside the same document region and major section. Direct semantic expansion
+follows only ``Seed Chunk -> semantic objects grounded in that Chunk -> one
+direct semantic relation -> relation.source_chunk_ids -> canonical Chunk
+candidates``; the query itself never searches graph nodes. CITES is
+scholarly/provenance infrastructure and is not an ordinary semantic Search
+expansion path. Derived text can aid discovery/provenance but never becomes paper
+evidence. Evidence is always rehydrated from the current ChunkProjection.
 The final synthesis renderer preserves the caller's original query, Evidence
 ordering, canonical `Chunk.text`, and available paper provenance. Its rendered
 prompt is both the exact LLM user input and the production Query Replay; Replay
 does not rerender, persist queries, or trigger another search or model call.
+Before rendering, `retrieval.synthesis_max_input_tokens` selects the longest
+ranked Evidence prefix whose complete Markdown prompt fits the deterministic
+token estimate. Selected Chunks remain complete; source text is never substring
+truncated.
 
 Claim enrichment is optional and disabled by default. The disabled path uses a
 prompt and response schema with no Claim output field, creates no ClaimDataPoint
@@ -268,10 +277,12 @@ does not add a Query-to-Claim search channel.
 
 ## Prompt ownership
 
-Markdown files under `prompts/` are the only complete prompt source.
-`PromptRepository` validates prompt names and records version and SHA-256.
-Semantic enrichment manifests contain coverage IDs/ratio, prompt name/version/
-SHA-256, and Cognee's actual provider/model.
+Versioned provider-level and enrichment prompts live under `prompts/`;
+`PromptRepository` validates their names and records version and SHA-256.
+`render_synthesis_prompt()` is the single owner of the query-dependent final
+synthesis user prompt shared with Query Replay. Semantic enrichment manifests
+contain coverage IDs/ratio, prompt name/version/SHA-256, and Cognee's actual
+provider/model.
 
 ## API organization
 
