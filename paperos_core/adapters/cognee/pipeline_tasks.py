@@ -111,9 +111,7 @@ async def scholarly_identity_task(
         IdentityBoundBundle(
             bundle=item.bundle,
             projection=item.projection,
-            scholarly=scholarly_registry.resolve_bundle(
-                item.bundle, item.projection.chunks
-            ),
+            scholarly=scholarly_registry.resolve_bundle(item.bundle, item.projection.chunks),
         )
         for item in data
     ]
@@ -152,9 +150,7 @@ async def semantic_enrichment_task(
                 scholarly=chunked.scholarly,
                 claim_enrichment_enabled=claim_enrichment_enabled,
             )
-            _persist_enrichment(
-                enrichment_root, chunked.bundle.snapshot.id, enrichment
-            )
+            _persist_enrichment(enrichment_root, chunked.bundle.snapshot.id, enrichment)
         _validate_semantic_provenance(chunked.projection.chunks, enrichment)
         results.append(
             EnrichedBundle(
@@ -199,9 +195,7 @@ async def store_datapoints_task(
     """Write mapped DataPoints and typed edges through Cognee's add_data_points."""
     results: list[DataPointGraph] = []
     for graph in data:
-        custom_edges = [
-            _custom_edge(relation, graph.id_mapping) for relation in graph.relations
-        ]
+        custom_edges = [_custom_edge(relation, graph.id_mapping) for relation in graph.relations]
         # Single triplet representation: PaperOS TripletDataPoint carries
         # canonical_id, source_chunk_ids, and derived_from_ids. Cognee's
         # embed_triplets=True produces Triplet(text, from_node_id, to_node_id)
@@ -273,9 +267,7 @@ def configure_pipeline_tasks(
     ]
 
 
-def _custom_edge(
-    relation: Any, id_mapping: dict[str, str]
-) -> tuple[str, str, str, dict[str, Any]]:
+def _custom_edge(relation: Any, id_mapping: dict[str, str]) -> tuple[str, str, str, dict[str, Any]]:
     source = id_mapping.get(relation.source_id, str(cognee_uuid(relation.source_id)))
     target = id_mapping.get(relation.target_id, str(cognee_uuid(relation.target_id)))
     return (
@@ -292,9 +284,7 @@ def _custom_edge(
     )
 
 
-def _validate_semantic_provenance(
-    chunks: list[Any], enrichment: SemanticEnrichment
-) -> None:
+def _validate_semantic_provenance(chunks: list[Any], enrichment: SemanticEnrichment) -> None:
     chunk_ids = {chunk.id for chunk in chunks}
     for entity in enrichment.entities:
         _validate_provenance(entity.id, entity.source_chunk_ids, chunk_ids)
@@ -308,8 +298,6 @@ def _validate_semantic_provenance(
             )
     for relation in enrichment.relations:
         _validate_provenance(relation.id, relation.source_chunk_ids, chunk_ids)
-    for summary in enrichment.summaries:
-        _validate_provenance(summary.id, summary.source_chunk_ids, chunk_ids)
 
 
 def _validate_provenance(
@@ -322,9 +310,7 @@ def _validate_provenance(
         )
 
 
-def _persist_enrichment(
-    root: Path, snapshot_id: str, enrichment: SemanticEnrichment
-) -> Path:
+def _persist_enrichment(root: Path, snapshot_id: str, enrichment: SemanticEnrichment) -> Path:
     path = root / f"{snapshot_id}.json"
     _atomic_json(path, enrichment.model_dump(mode="json"))
     return path
@@ -340,9 +326,7 @@ def _load_enrichment(path: Path) -> SemanticEnrichment:
         ) from exc
 
 
-def _persist_graph(
-    root: Path, snapshot_id: str, graph: DataPointGraph
-) -> Path:
+def _persist_graph(root: Path, snapshot_id: str, graph: DataPointGraph) -> Path:
     path = root / f"{snapshot_id}.json"
     _atomic_json(path, graph.to_json())
     return path

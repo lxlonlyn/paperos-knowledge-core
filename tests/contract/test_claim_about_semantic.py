@@ -100,7 +100,6 @@ def retained_enrichment_contract() -> dict[str, object]:
             }
         ],
         "relations": [],
-        "summaries": [],
         "model": "contract",
         "provider": "contract",
         "model_version": "contract",
@@ -195,7 +194,6 @@ def about_mapper_contract() -> dict[str, object]:
             ),
         ],
         relations=[],
-        summaries=[],
         model="contract",
         provider="contract",
         model_version="contract",
@@ -225,9 +223,7 @@ def about_mapper_contract() -> dict[str, object]:
     ]
     graph = canonical_to_datapoints(bundle, chunks, enrichment, scholarly)
     about_edges = [
-        relation
-        for relation in graph.relations
-        if relation.relation_type is RelationType.ABOUT
+        relation for relation in graph.relations if relation.relation_type is RelationType.ABOUT
     ]
     _require(len(about_edges) == 2, f"Expected 2 ABOUT edges, got {len(about_edges)}")
     by_claim = {edge.source_id: edge for edge in about_edges}
@@ -309,7 +305,6 @@ def about_no_triplet_contract() -> dict[str, object]:
         entities=[],
         claims=[],
         relations=[],
-        summaries=[],
         model="contract",
         provider="contract",
         model_version="contract",
@@ -416,8 +411,7 @@ def work_catalog_contract() -> dict[str, object]:
         "Catalog keys must be SELF/CITED_*.",
     )
     _require(
-        set(catalog.key_to_work_id.values())
-        == {source_work.id, target_work.id, other_work.id},
+        set(catalog.key_to_work_id.values()) == {source_work.id, target_work.id, other_work.id},
         "Catalog must cover current and cited Works.",
     )
     for entry in catalog.entries:

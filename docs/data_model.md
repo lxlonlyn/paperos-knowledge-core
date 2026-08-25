@@ -665,39 +665,6 @@ Relation types must be centrally declared.
 
 Modules must not create private relation-name variants for the same meaning.
 
-## Summary
-
-Represents a derived summary.
-
-Required fields:
-
-* `id`
-* `summary_type`
-* `text`
-* `status`
-* `schema_version`
-* `derived_from_ids`
-
-Optional fields:
-
-* `document_id`
-* `section_id`
-* `chunk_ids`
-* `entity_ids`
-* `model`
-* `model_version`
-* `prompt_version`
-
-Summary types may include:
-
-* document summary;
-* section summary;
-* topic summary;
-* global summary;
-* comparative summary.
-
-Summaries are derived views and must not replace source content.
-
 ## ResearchInsight
 
 Represents a versioned system-generated or user-confirmed research insight.
@@ -809,7 +776,6 @@ The unified graph must support the following core relations:
 * `Claim SUPPORTED_BY Chunk`
 * `Claim CONTRADICTS Claim`
 * `ConceptRelation DERIVED_FROM Chunk`
-* `Summary DERIVED_FROM source object`
 * `ResearchInsight DERIVED_FROM Claim or Chunk`
 * `Correction DERIVED_FROM Feedback`
 
@@ -897,7 +863,6 @@ The system may destructively rebuild:
 * graph data;
 * vector indexes;
 * lexical indexes;
-* summaries;
 * exported views.
 
 The system must preserve:

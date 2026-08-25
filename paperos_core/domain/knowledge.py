@@ -90,25 +90,10 @@ class ConceptRelation(DomainModel):
     model_version: str | None = None
 
 
-class Summary(DomainModel):
-    id: str
-    canonical_snapshot_id: str
-    summary_type: str
-    text: str
-    status: KnowledgeStatus
-    derived_from_ids: list[str] = Field(min_length=1)
-    source_chunk_ids: list[str] = Field(min_length=1)
-    schema_version: str = CANONICAL_SCHEMA_VERSION
-    id_version: str = CANONICAL_ID_VERSION
-    model: str | None = None
-    model_version: str | None = None
-
-
 class SemanticEnrichment(DomainModel):
     entities: list[Entity]
     claims: list[Claim]
     relations: list[ConceptRelation]
-    summaries: list[Summary]
     model: str
     provider: str = "unknown"
     model_version: str

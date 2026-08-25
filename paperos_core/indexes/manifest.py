@@ -49,10 +49,10 @@ class IndexingReport(BaseModel):
     semantic_entity_count: int = Field(ge=0)
     semantic_claim_count: int = Field(ge=0)
     semantic_relation_count: int = Field(ge=0)
-    summary_count: int = Field(ge=0)
     consistency_valid: bool
     rebuilt: bool = False
     warnings: list[str] = Field(default_factory=list)
+
     def public_dict(self) -> dict[str, object]:
         return self.model_dump(
             mode="json",

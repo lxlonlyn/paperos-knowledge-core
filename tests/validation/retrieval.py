@@ -1,4 +1,4 @@
-"""Real PDF→Chunk-first retrieval→LLM acceptance with review artifacts."""
+"""Real PDF-to-LLM acceptance for the single Chunk-first Search architecture."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import asyncio
 import json
 import shutil
 import sys
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -15,319 +16,985 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from paperos_core.application import create_application
 from paperos_core.config import load_settings
+from paperos_core.domain.provenance import SEMANTIC_RELATION_TYPES, RelationType
 from paperos_core.retrieval.candidates import QueryRequest, QueryResponse
-
-_DEFAULT_PAPERS = (
-    "volume_preserving.pdf",
-    "explicit_flows.pdf",
-    "nise.pdf",
-    "gaussian_splatting.pdf",
-)
-_QUERY = (
-    "How do neural implicit surface methods control geometric evolution, "
-    "regularity, and shape preservation?"
+from paperos_core.retrieval.corpus import CorpusView
+from paperos_core.retrieval.expansion import (
+    local_neighbor_expand,
+    semantic_post_hit_expand,
 )
 
+_DEFAULT_CONFIG_ROOT = Path("data/validation/search_graph_acceptance/config")
+_DEFAULT_CORPUS_ROOT = Path("data/validation/corpus/papers")
+_DEFAULT_OUTPUT_ROOT = Path("data/validation/search_graph_acceptance/output")
+_REQUIRED_STAGES = {
+    "explicit_filters",
+    "lexical_chunk_retrieval",
+    "vector_chunk_retrieval",
+    "rrf",
+    "chunk_id_dedup",
+    "final_selection",
+    "source_grounded_evidence",
+    "synthesis",
+}
+_FORBIDDEN_SEARCH_STAGES = {
+    "citation_expansion",
+    "citation_post_hit_expansion",
+    "typed_traversal",
+    "graph_traversal",
+    "entity_claim_search",
+    "global_context",
+    "confirmed_knowledge_retrieval",
+    "subject_about_retrieval",
+    "query_scope",
+    "profile_mapping",
+}
 
-def _graph_stats(graph_root: Path) -> tuple[dict[str, int], list[dict[str, Any]]]:
-    counts = {"claims": 0, "about": 0, "cites": 0}
+
+def _read_json(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise TypeError(f"Expected JSON object: {path}")
+    return payload
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _graph_records(graph_root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    nodes: list[dict[str, Any]] = []
     relations: list[dict[str, Any]] = []
     for path in sorted(graph_root.glob("*.json")):
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        counts["claims"] += sum(
-            node.get("__type__") == "ClaimDataPoint"
-            for node in payload.get("nodes", [])
-        )
-        for relation in payload.get("relations", []):
-            relations.append(relation)
-            kind = relation.get("relation_type")
-            counts["about"] += kind == "ABOUT"
-            counts["cites"] += kind == "CITES"
-    return counts, relations
+        payload = _read_json(path)
+        nodes.extend(item for item in payload.get("nodes", []) if isinstance(item, dict))
+        relations.extend(item for item in payload.get("relations", []) if isinstance(item, dict))
+    return nodes, relations
+
+
+def _contains_any(text: str, snippets: list[str]) -> bool:
+    folded = text.casefold()
+    return any(str(snippet).casefold() in folded for snippet in snippets)
 
 
 def _grounded(response: QueryResponse, chunks: dict[str, Any]) -> bool:
     return response.provenance_complete and all(
-        evidence.chunk_id in chunks
-        and evidence.document_id == chunks[evidence.chunk_id].document_id
-        and evidence.text == chunks[evidence.chunk_id].text
-        for evidence in response.evidence
+        item.chunk_id in chunks
+        and item.document_id == chunks[item.chunk_id].document_id
+        and item.text == chunks[item.chunk_id].text
+        for item in response.evidence
     )
 
 
-def _response_review(response: QueryResponse) -> dict[str, Any]:
+def _response_review(
+    case: dict[str, Any],
+    request: QueryRequest,
+    response: QueryResponse,
+    *,
+    symbolic_by_work: dict[str, str],
+    facts_by_id: dict[str, dict[str, Any]],
+    all_document_ids: set[str],
+) -> dict[str, Any]:
+    source_work_ids = list(
+        dict.fromkeys(
+            item.source_work_id for item in response.evidence if item.source_work_id is not None
+        )
+    )
+    source_symbols = [symbolic_by_work.get(work_id, work_id) for work_id in source_work_ids]
+    expected_facts = [
+        facts_by_id[fact_id]
+        for fact_id in case.get("expected_fact_ids_any_of", [])
+        if fact_id in facts_by_id
+    ]
+    evidence_text = "\n".join(item.text for item in response.evidence)
+    matched_facts = [
+        fact["id"]
+        for fact in expected_facts
+        if _contains_any(evidence_text, list(fact.get("evidence_any_of", [])))
+    ]
+    expected_any = set(case.get("expected_source_works_any_of", []))
+    expected_exact = set(case.get("expected_source_works_exact", []))
+    source_set = set(source_symbols)
+    source_ok = (
+        source_set == expected_exact
+        if expected_exact
+        else bool(source_set.intersection(expected_any))
+    )
+    minimum_sources = int(case.get("minimum_source_works", 0))
+    source_ok = source_ok and len(source_set) >= minimum_sources
+    minimum_external = int(case.get("minimum_external_source_works", 0))
+    if minimum_external:
+        source_ok = source_ok and len(source_set.intersection(expected_any)) >= minimum_external
+    natural_language_unfiltered = (
+        not case.get("assert_natural_language_work_name_does_not_hard_filter")
+        or set(response.trace.applied_document_ids) == all_document_ids
+    )
+    architecture_ok = (
+        _REQUIRED_STAGES.issubset(response.stages)
+        and not _FORBIDDEN_SEARCH_STAGES.intersection(response.stages)
+        and "semantic_relation_expansion" not in response.stages
+        and "local_post_hit_expansion" not in response.stages
+    )
+    passed = (
+        source_ok
+        and bool(matched_facts)
+        and natural_language_unfiltered
+        and architecture_ok
+        and bool(response.answer.strip())
+    )
+    status = "PASS" if passed else ("FAIL" if case.get("hard") else "WARN")
     return {
-        "query": response.query,
+        "id": case["id"],
+        "mode": case["mode"],
+        "query": case["query"],
+        "explicit_filters": request.model_dump(
+            mode="json",
+            include={"document_ids", "work_ids"},
+            exclude_none=True,
+        ),
+        "first_stage_top_chunk_ids": response.trace.first_stage_chunk_ids,
+        "first_reranked_chunk_ids": response.trace.first_reranked_chunk_ids,
+        "final_evidence_chunk_ids": [item.chunk_id for item in response.evidence],
+        "source_work_ids": source_work_ids,
+        "source_work_symbols": source_symbols,
+        "matched_ground_truth_fact_ids": matched_facts,
+        "source_expectation_met": source_ok,
+        "natural_language_did_not_hard_filter": natural_language_unfiltered,
+        "architecture_ok": architecture_ok,
         "stages": response.stages,
-        "channels": response.channels_used,
-        "top_retrieved_chunk_ids": response.trace.first_reranked_chunk_ids[:12],
-        "final_evidence": [item.model_dump(mode="json") for item in response.evidence],
-        "expansion_trace": response.trace.model_dump(mode="json"),
         "answer": response.answer,
+        "status": status,
+        "hard": bool(case.get("hard")),
+    }
+
+
+def _find_anchor_chunk(
+    corpus: CorpusView,
+    work_id: str,
+    anchors: list[str],
+) -> Any | None:
+    document_ids = corpus.document_ids_for_works({work_id})
+    return next(
+        (
+            chunk
+            for chunk in sorted(corpus.chunks.values(), key=lambda item: item.order)
+            if chunk.document_id in document_ids
+            and _contains_any(
+                "\n".join(filter(None, [chunk.text, chunk.retrieval_text])),
+                anchors,
+            )
+        ),
+        None,
+    )
+
+
+def _local_probes(
+    probes: list[dict[str, Any]],
+    corpus: CorpusView,
+    work_by_symbol: dict[str, str],
+    all_document_ids: set[str],
+) -> dict[str, Any]:
+    reviews: list[dict[str, Any]] = []
+    for probe in probes:
+        anchor = _find_anchor_chunk(
+            corpus,
+            work_by_symbol[probe["work"]],
+            list(probe["seed_anchor_any_of"]),
+        )
+        if anchor is None:
+            reviews.append({**probe, "status": "FAIL", "error": "seed not found"})
+            continue
+        seed = corpus.candidate_for_chunk(
+            anchor.id,
+            channel="validation_seed",
+            score=1.0,
+        )
+        expanded = local_neighbor_expand(
+            corpus,
+            [seed],
+            document_ids=all_document_ids,
+        )
+        adjacent_ids = [
+            chunk_id
+            for chunk_id in (anchor.previous_chunk_id, anchor.next_chunk_id)
+            if chunk_id is not None and chunk_id in corpus.chunks
+        ]
+        eligible_ids = [
+            chunk_id
+            for chunk_id in adjacent_ids
+            if corpus.chunks[chunk_id].document_id == anchor.document_id
+            and corpus.chunks[chunk_id].document_region == anchor.document_region
+            and corpus.chunks[chunk_id].major_section_id == anchor.major_section_id
+        ]
+        actual_ids = [item.chunk_id for item in expanded]
+        constraints_ok = len(actual_ids) == len(set(actual_ids)) and set(actual_ids) == set(
+            eligible_ids
+        )
+        blocked_ids = [chunk_id for chunk_id in adjacent_ids if chunk_id not in eligible_ids]
+        reviews.append(
+            {
+                "id": probe["id"],
+                "seed_chunk_id": anchor.id,
+                "adjacent_chunk_ids": adjacent_ids,
+                "eligible_chunk_ids": eligible_ids,
+                "boundary_blocked_chunk_ids": blocked_ids,
+                "boundary_blocked": bool(blocked_ids),
+                "expanded_chunk_ids": actual_ids,
+                "document_region": anchor.document_region,
+                "major_section_id": anchor.major_section_id,
+                "note": (
+                    "No adjacent Chunk is eligible after the required document/region/"
+                    "major-section boundary checks."
+                    if not eligible_ids
+                    else "Expansion exactly matches the eligible canonical ±1 neighbors."
+                ),
+                "status": "PASS" if constraints_ok else "FAIL",
+            }
+        )
+    return {
+        "status": "PASS"
+        if reviews and all(item["status"] == "PASS" for item in reviews)
+        else "FAIL",
+        "probes": reviews,
+    }
+
+
+async def _semantic_probes(
+    probes: list[dict[str, Any]],
+    application: Any,
+    corpus: CorpusView,
+    work_by_symbol: dict[str, str],
+    all_document_ids: set[str],
+    dataset_name: str,
+) -> dict[str, Any]:
+    reviews: list[dict[str, Any]] = []
+    for probe in probes:
+        anchor = _find_anchor_chunk(
+            corpus,
+            work_by_symbol[probe["work"]],
+            list(probe["seed_anchor_any_of"]),
+        )
+        if anchor is None:
+            reviews.append({**probe, "status": "NO_CASE", "error": "seed not found"})
+            continue
+        seed = corpus.candidate_for_chunk(
+            anchor.id,
+            channel="validation_seed",
+            score=1.0,
+        )
+        try:
+            expanded = await semantic_post_hit_expand(
+                application.knowledge_pipeline.compat,
+                corpus,
+                [seed],
+                dataset_name=dataset_name,
+                document_ids=all_document_ids,
+                limit=200,
+            )
+            valid = all(
+                item.chunk_id in corpus.chunks
+                and set(item.relation_types).issubset(
+                    {relation.value for relation in SEMANTIC_RELATION_TYPES}
+                )
+                and item.text == corpus.chunks[item.chunk_id].text
+                for item in expanded
+            )
+            new_ids = [item.chunk_id for item in expanded if item.chunk_id != anchor.id]
+            if not valid:
+                status = "FAIL"
+            elif new_ids:
+                status = "PASS"
+            elif expanded:
+                status = "NO_NEW_CHUNK"
+            else:
+                status = "NO_CASE"
+            reviews.append(
+                {
+                    "id": probe["id"],
+                    "seed_chunk_id": anchor.id,
+                    "expanded_chunk_ids": [item.chunk_id for item in expanded],
+                    "new_chunk_ids": new_ids,
+                    "relation_types": sorted(
+                        {relation for item in expanded for relation in item.relation_types}
+                    ),
+                    "derived_from_ids": list(
+                        dict.fromkeys(
+                            derived for item in expanded for derived in item.derived_from_ids
+                        )
+                    ),
+                    "dataset_name": dataset_name,
+                    "status": status,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - acceptance records boundary failure
+            reviews.append(
+                {
+                    "id": probe["id"],
+                    "seed_chunk_id": anchor.id,
+                    "status": "FAIL",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+    return {
+        "status": "FAIL" if any(item["status"] == "FAIL" for item in reviews) else "PASS",
+        "probes": reviews,
+    }
+
+
+async def _citation_checks(
+    ground_truth: dict[str, Any],
+    relations: list[dict[str, Any]],
+    application: Any,
+    corpus: CorpusView,
+    work_by_symbol: dict[str, str],
+    symbolic_by_work: dict[str, str],
+    dataset_name: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    expected = ground_truth["citation_edges_within_corpus"]
+    forbidden = ground_truth["forbidden_reverse_edges_within_corpus"]
+    contexts = {
+        (item["source_work"], item["target_work"]): item
+        for item in ground_truth["citation_contexts"]
+    }
+    cites = [item for item in relations if item.get("relation_type") == RelationType.CITES]
+    edge_reviews: list[dict[str, Any]] = []
+    incoming_reviews: list[dict[str, Any]] = []
+    for item in expected:
+        source_id = work_by_symbol[item["source"]]
+        target_id = work_by_symbol[item["target"]]
+        matching = [
+            edge
+            for edge in cites
+            if edge.get("source_id") == source_id and edge.get("target_id") == target_id
+        ]
+        chunk_ids = list(
+            dict.fromkeys(
+                chunk_id for edge in matching for chunk_id in edge.get("source_chunk_ids", [])
+            )
+        )
+        context = contexts.get((item["source"], item["target"]), {})
+        valid_chunks = [
+            chunk_id
+            for chunk_id in chunk_ids
+            if chunk_id in corpus.chunks
+            and corpus.work_id_by_document.get(corpus.chunks[chunk_id].document_id) == source_id
+            and str(corpus.chunks[chunk_id].document_region).casefold() != "references"
+            and target_id in corpus.cited_work_ids_by_chunk.get(chunk_id, set())
+        ]
+        context_matched = any(
+            _contains_any(
+                "\n".join(
+                    filter(
+                        None,
+                        [
+                            corpus.chunks[chunk_id].text,
+                            corpus.chunks[chunk_id].retrieval_text,
+                        ],
+                    )
+                ),
+                list(context.get("evidence_any_of", [])),
+            )
+            for chunk_id in valid_chunks
+        )
+        edge_reviews.append(
+            {
+                "source": item["source"],
+                "source_work_id": source_id,
+                "relation_type": "CITES",
+                "target": item["target"],
+                "target_work_id": target_id,
+                "source_chunk_ids": chunk_ids,
+                "valid_body_source_chunk_ids": valid_chunks,
+                "matched_context_id": context.get("id"),
+                "context_matched": context_matched,
+                "status": ("PASS" if matching and valid_chunks and context_matched else "FAIL"),
+            }
+        )
+        incoming = await application.knowledge_pipeline.compat.incoming_typed_relations(
+            [target_id],
+            dataset_name=dataset_name,
+            relation_type=RelationType.CITES.value,
+            limit=200,
+        )
+        incoming_match = next(
+            (
+                relation
+                for relation in incoming
+                if relation.source_canonical_id == source_id
+                and relation.target_canonical_id == target_id
+            ),
+            None,
+        )
+        same_chunks = (
+            incoming_match is not None
+            and set(incoming_match.source_chunk_ids) == set(chunk_ids)
+            and bool(chunk_ids)
+        )
+        incoming_reviews.append(
+            {
+                "target": item["target"],
+                "target_work_id": target_id,
+                "incoming_source": (
+                    symbolic_by_work.get(
+                        incoming_match.source_canonical_id,
+                        incoming_match.source_canonical_id,
+                    )
+                    if incoming_match is not None
+                    else None
+                ),
+                "incoming_source_work_id": (
+                    incoming_match.source_canonical_id if incoming_match is not None else None
+                ),
+                "source_chunk_ids": (
+                    list(incoming_match.source_chunk_ids) if incoming_match is not None else []
+                ),
+                "matches_outgoing_source_chunk_ids": same_chunks,
+                "status": "PASS" if same_chunks else "FAIL",
+            }
+        )
+    forbidden_reviews = [
+        {
+            **item,
+            "status": (
+                "PASS"
+                if not any(
+                    edge.get("source_id") == work_by_symbol[item["source"]]
+                    and edge.get("target_id") == work_by_symbol[item["target"]]
+                    for edge in cites
+                )
+                else "FAIL"
+            ),
+        }
+        for item in forbidden
+    ]
+    citation_status = (
+        "PASS"
+        if all(item["status"] == "PASS" for item in [*edge_reviews, *forbidden_reviews])
+        else "FAIL"
+    )
+    incoming_status = (
+        "PASS" if all(item["status"] == "PASS" for item in incoming_reviews) else "FAIL"
+    )
+    return (
+        {
+            "status": citation_status,
+            "edges": edge_reviews,
+            "forbidden_reverse_edges": forbidden_reviews,
+            "trace_example": edge_reviews[0] if edge_reviews else None,
+        },
+        {
+            "status": incoming_status,
+            "queries": incoming_reviews,
+            "trace_example": incoming_reviews[0] if incoming_reviews else None,
+        },
+    )
+
+
+def _element_payload(element: Any, bundle: Any) -> dict[str, Any]:
+    elements = {item.id: item for item in bundle.elements}
+    return {
+        "element_id": element.id,
+        "element_type": element.element_type.value,
+        "text": element.text,
+        "markdown": element.markdown,
+        "latex": element.latex,
+        "html": element.html,
+        "asset_path": str(element.asset_path) if element.asset_path else None,
+        "page": element.page,
+        "bounding_box": element.bounding_box,
+        "source_span": (
+            element.source_span.model_dump(mode="json") if element.source_span is not None else None
+        ),
+        "caption_elements": [
+            elements[item].model_dump(mode="json")
+            for item in element.caption_element_ids
+            if item in elements
+        ],
+        "footnote_elements": [
+            elements[item].model_dump(mode="json")
+            for item in element.footnote_element_ids
+            if item in elements
+        ],
+    }
+
+
+def _structure_checks(
+    probes: list[dict[str, Any]],
+    corpus: CorpusView,
+    work_by_symbol: dict[str, str],
+) -> dict[str, Any]:
+    reviews: list[dict[str, Any]] = []
+    for probe in probes:
+        work_id = work_by_symbol[probe["work"]]
+        document_ids = corpus.document_ids_for_works({work_id})
+        expected_types = set(probe["expected_element_type_any_of"])
+        matches: list[tuple[Any, Any, Any, Any]] = []
+        for document_id in document_ids:
+            bundle = corpus.bundles[document_id]
+            elements = {element.id: element for element in bundle.elements}
+            for chunk in corpus.chunks.values():
+                if chunk.document_id != document_id:
+                    continue
+                anchor_matches = _contains_any(
+                    "\n".join(filter(None, [chunk.text, chunk.retrieval_text])),
+                    [probe["anchor"]],
+                )
+                for element_id in chunk.element_ids:
+                    source_element = elements.get(element_id)
+                    if source_element is None:
+                        continue
+                    element = (
+                        elements.get(source_element.parent_element_id)
+                        if source_element.parent_element_id is not None
+                        else source_element
+                    )
+                    if element is None:
+                        continue
+                    element_page = element.page or (
+                        element.source_span.page if element.source_span is not None else None
+                    )
+                    type_matches = element.element_type.value in expected_types
+                    page_matches = element_page == probe["pdf_page"]
+                    source_element_anchor = _contains_any(
+                        "\n".join(
+                            filter(
+                                None,
+                                [
+                                    source_element.text,
+                                    source_element.markdown,
+                                    source_element.latex,
+                                    source_element.html,
+                                ],
+                            )
+                        ),
+                        [probe["anchor"]],
+                    )
+                    element_anchor = _contains_any(
+                        "\n".join(
+                            filter(
+                                None,
+                                [element.text, element.markdown, element.latex, element.html],
+                            )
+                        ),
+                        [probe["anchor"]],
+                    )
+                    if type_matches and page_matches and (
+                        anchor_matches or source_element_anchor or element_anchor
+                    ):
+                        matches.append((chunk, source_element, element, bundle))
+        if matches:
+            chunk, source_element, element, bundle = matches[0]
+            containment_path = [chunk.id, source_element.id]
+            if element.id != source_element.id:
+                containment_path.append(element.id)
+            reviews.append(
+                {
+                    "id": probe["id"],
+                    "work": probe["work"],
+                    "chunk_id": chunk.id,
+                    "section_id": chunk.section_id,
+                    "section_path": chunk.section_path,
+                    "chunk_page_start": chunk.page_start,
+                    "chunk_page_end": chunk.page_end,
+                    "chunk_element_ids": chunk.element_ids,
+                    "source_containment_path": containment_path,
+                    "source_element": _element_payload(source_element, bundle),
+                    "element": _element_payload(element, bundle),
+                    "required": probe["required"],
+                    "status": "PASS",
+                }
+            )
+        else:
+            reviews.append(
+                {
+                    "id": probe["id"],
+                    "work": probe["work"],
+                    "required": probe["required"],
+                    "status": "FAIL" if probe["required"] else "NO_CASE",
+                    "error": "No matching Chunk to source Element provenance path.",
+                }
+            )
+    return {
+        "status": "PASS"
+        if all(item["status"] == "PASS" for item in reviews if item["required"])
+        else "FAIL",
+        "probes": reviews,
+        "trace_example": next(
+            (item for item in reviews if item["status"] == "PASS"),
+            None,
+        ),
     }
 
 
 def _markdown(report: dict[str, Any]) -> str:
     lines = [
-        "# Chunk-first Search Acceptance",
+        "# Search / Cognee Graph Acceptance",
         "",
         f"Overall: **{report['overall_status']}**",
         "",
-        "## Counts",
+        f"PDF to LLM completed: **{report['pipeline_completed_pdf_to_llm']}**",
         "",
-        f"- Ingested papers: {report['counts']['ingested_papers']}",
-        f"- Canonical chunks: {report['counts']['chunks']}",
-        f"- Claims: {report['counts']['claims']}",
-        f"- ABOUT edges: {report['counts']['about_edges']}",
-        f"- CITES edges: {report['counts']['cites_edges']}",
-        "",
-        "## Status",
+        "## Acceptance status",
         "",
     ]
-    for key, value in report["status"].items():
-        lines.append(f"- {key.replace('_', ' ')}: **{value}**")
-    lines.extend(["", "## Citation anchor", "", "```json"])
-    lines.append(json.dumps(report["citation_example"], ensure_ascii=False, indent=2))
-    lines.extend(["```", "", "## Queries", ""])
-    for name, review in report["queries"].items():
+    for key in (
+        "default_search",
+        "explicit_filter",
+        "claim_off",
+        "local_expansion",
+        "semantic_relation_expansion",
+        "citation_provenance",
+        "incoming_cites_query",
+        "source_grounding",
+        "structure_provenance",
+    ):
+        lines.append(f"- {key}: **{report[key]['status']}**")
+    lines.extend(["", "## Query cases", ""])
+    for review in report["queries"]:
         lines.extend(
             [
-                f"### {name}",
+                f"### {review['id']}",
                 "",
-                f"Query: {review['query']}",
-                "",
-                "Top Chunks: " + ", ".join(review["top_retrieved_chunk_ids"][:8]),
-                "",
-                "```json",
-                json.dumps(review["expansion_trace"], ensure_ascii=False, indent=2),
-                "```",
+                f"- Status: **{review['status']}**",
+                f"- Query: {review['query']}",
+                "- Explicit filters: " + json.dumps(review["explicit_filters"], ensure_ascii=False),
+                "- First-stage Chunks: " + ", ".join(review["first_stage_top_chunk_ids"][:12]),
+                "- First-reranked Chunks: " + ", ".join(review["first_reranked_chunk_ids"][:12]),
+                "- Final Evidence Chunks: " + ", ".join(review["final_evidence_chunk_ids"]),
+                "- Source Works: " + ", ".join(review["source_work_symbols"]),
+                "- Matched facts: " + ", ".join(review["matched_ground_truth_fact_ids"]),
                 "",
             ]
         )
-    return "\n".join(lines) + "\n"
+    lines.extend(
+        [
+            "## Citation trace",
+            "",
+            "    "
+            + json.dumps(
+                report["citation_provenance"]["trace_example"],
+                ensure_ascii=False,
+            ),
+            "",
+            "## Incoming CITES trace",
+            "",
+            "    "
+            + json.dumps(
+                report["incoming_cites_query"]["trace_example"],
+                ensure_ascii=False,
+            ),
+            "",
+            "## Structure trace",
+            "",
+            "    "
+            + json.dumps(
+                report["structure_provenance"]["trace_example"],
+                ensure_ascii=False,
+            ),
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _package_review(output_root: Path) -> Path:
+    result_path = output_root / "result.zip"
+    review_paths = [
+        output_root / "acceptance.json",
+        output_root / "acceptance.md",
+        *sorted((output_root / "review").glob("*.json")),
+    ]
+    with zipfile.ZipFile(
+        result_path,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+    ) as archive:
+        for path in review_paths:
+            if path.is_file():
+                archive.write(path, path.relative_to(output_root))
+    return result_path
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
-    base = load_settings(args.config)
+    config_root = args.acceptance_config.resolve()
     output_root = args.output.resolve()
     runtime_root = output_root / "runtime"
     if args.rebuild and runtime_root.exists():
         shutil.rmtree(runtime_root)
     output_root.mkdir(parents=True, exist_ok=True)
+
+    corpus_spec = _read_json(config_root / "corpus_spec.json")
+    papers_config = _read_json(config_root / "papers.json")
+    queries_config = _read_json(config_root / "queries.json")
+    ground_truth = _read_json(config_root / "ground_truth.json")
+    paper_by_symbol = {item["id"]: item for item in corpus_spec["papers"]}
+    requested_stems = set(papers_config["papers"])
+    ingest_symbols = [
+        symbol
+        for symbol in corpus_spec["recommended_ingest_order"]
+        if paper_by_symbol[symbol]["paper_id"] in requested_stems
+    ]
+    if len(ingest_symbols) != 4:
+        raise RuntimeError("Acceptance config must resolve exactly four papers.")
+
+    base = load_settings(args.config)
     settings = base.model_copy(
         update={
             "data": base.data.model_copy(
                 update={"directory": runtime_root, "dataset": args.dataset}
             ),
-            "ingestion": base.ingestion.model_copy(
-                update={"claim_enrichment_enabled": False}
-            ),
+            "ingestion": base.ingestion.model_copy(update={"claim_enrichment_enabled": False}),
         }
     )
     application = create_application(settings)
     await application.start()
     try:
-        corpus_root = args.corpus.resolve()
-        pdfs = [corpus_root / name for name in args.papers]
-        ingestion_results = []
-        for pdf in pdfs:
+        ingestion_results: dict[str, Any] = {}
+        work_by_symbol: dict[str, str] = {}
+        document_by_symbol: dict[str, str] = {}
+        retained_by_filename = {
+            application.registry.get_source(
+                bundle.document.source_file_id
+            ).original_filename: bundle
+            for bundle in application.canonical_repository.list_bundles()
+            if bundle.snapshot.dataset_id == args.dataset
+        }
+        for symbol in ingest_symbols:
+            paper = paper_by_symbol[symbol]
+            pdf = args.corpus.resolve() / f"{paper['paper_id']}.pdf"
             if not pdf.is_file():
                 raise RuntimeError(f"Authoritative corpus PDF is missing: {pdf}")
-            ingestion_results.append(
-                await application.services.ingestion.ingest_pdf_to_knowledge(
-                    pdf, dataset=args.dataset
+            retained = retained_by_filename.get(pdf.name)
+            if retained is None:
+                result = await application.services.ingestion.ingest_pdf_to_knowledge(
+                    pdf,
+                    dataset=args.dataset,
+                )
+                ingestion_results[symbol] = result
+                document_id = result.canonical_result.canonical.document.id
+            else:
+                ingestion_results[symbol] = retained
+                document_id = retained.document.id
+            work = application.scholarly_registry.work_for_document(document_id)
+            if work is None:
+                raise RuntimeError(f"No runtime Work for {symbol}: {document_id}")
+            work_by_symbol[symbol] = work.id
+            document_by_symbol[symbol] = document_id
+
+        symbolic_by_work = {work_id: symbol for symbol, work_id in work_by_symbol.items()}
+        corpus = CorpusView.load(
+            application.paths,
+            application.canonical_repository,
+            application.registry,
+            application.scholarly_registry,
+        )
+        all_document_ids = set(document_by_symbol.values())
+        facts_by_id = {item["id"]: item for item in ground_truth["retrieval_facts"]}
+        query_reviews: list[dict[str, Any]] = []
+        responses: list[QueryResponse] = []
+        for case in queries_config["cases"]:
+            filters = case.get("filters", {})
+            work_ids = [work_by_symbol[symbol] for symbol in filters.get("work_ids", [])] or None
+            request = QueryRequest(
+                query=case["query"],
+                dataset=args.dataset,
+                work_ids=work_ids,
+                expand_context=bool(case["expansion"]["local"]),
+                expand_graph=bool(case["expansion"]["semantic"]),
+            )
+            response = await application.services.retrieval.query(request)
+            responses.append(response)
+            query_reviews.append(
+                _response_review(
+                    case,
+                    request,
+                    response,
+                    symbolic_by_work=symbolic_by_work,
+                    facts_by_id=facts_by_id,
+                    all_document_ids=all_document_ids,
                 )
             )
 
-        corpus = application.services.retrieval.canonical_repository
-        projections = {
-            result.canonical_result.canonical.snapshot.id:
-            corpus.get_chunk_projection(
-                result.canonical_result.canonical.snapshot.id
-            )
-            for result in ingestion_results
-        }
-        chunks = {
-            chunk.id: chunk
-            for projection in projections.values()
-            for chunk in projection.chunks
-        }
-        first_document_id = ingestion_results[0].canonical_result.canonical.document.id
-        default = await application.services.retrieval.query(QueryRequest(query=_QUERY))
-        explicit = await application.services.retrieval.query(
-            QueryRequest(query=_QUERY, document_ids=[first_document_id])
+        nodes, relations = _graph_records(application.paths.cognee / "graphs")
+        claim_count = sum(item.get("__type__") == "ClaimDataPoint" for item in nodes)
+        about_count = sum(item.get("relation_type") == RelationType.ABOUT for item in relations)
+        local = _local_probes(
+            ground_truth["operator_probes"]["local"],
+            corpus,
+            work_by_symbol,
+            all_document_ids,
         )
-        local = await application.services.retrieval.query(
-            QueryRequest(query=_QUERY, expand_context=True)
+        semantic = await _semantic_probes(
+            ground_truth["operator_probes"]["semantic"],
+            application,
+            corpus,
+            work_by_symbol,
+            all_document_ids,
+            args.dataset,
         )
-
-        citation_seed = next(
-            (chunk for chunk in chunks.values() if chunk.citation_reference_entry_ids),
-            None,
+        citation, incoming = await _citation_checks(
+            ground_truth,
+            relations,
+            application,
+            corpus,
+            work_by_symbol,
+            symbolic_by_work,
+            args.dataset,
         )
-        graph_query = (
-            " ".join((citation_seed.retrieval_text or citation_seed.text).split()[:24])
-            if citation_seed is not None
-            else _QUERY
+        structure = _structure_checks(
+            ground_truth["structure_probes"],
+            corpus,
+            work_by_symbol,
         )
-        graph = await application.services.retrieval.query(
-            QueryRequest(query=graph_query, expand_graph=True)
+        default_hard = [
+            item for item in query_reviews if item["mode"] == "default" and item["hard"]
+        ]
+        explicit_hard = [
+            item for item in query_reviews if item["mode"] == "explicit_filter" and item["hard"]
+        ]
+        default_status = (
+            "PASS"
+            if default_hard and all(item["status"] == "PASS" for item in default_hard)
+            else "FAIL"
         )
-
-        counts, relations = _graph_stats(application.paths.cognee / "graphs")
-        citation_example: dict[str, Any] | None = None
-        for chunk in chunks.values():
-            for reference_id in chunk.citation_reference_entry_ids:
-                work = application.scholarly_registry.work_for_reference(reference_id)
-                source_work = application.scholarly_registry.work_for_document(
-                    chunk.document_id
-                )
-                if work is None or source_work is None:
-                    continue
-                edge = next(
-                    (
-                        relation
-                        for relation in relations
-                        if relation.get("relation_type") == "CITES"
-                        and relation.get("source_id") == source_work.id
-                        and relation.get("target_id") == work.id
-                        and chunk.id in relation.get("source_chunk_ids", [])
-                    ),
-                    None,
-                )
-                if edge is not None:
-                    citation_example = {
-                        "chunk_id": chunk.id,
-                        "document_region": chunk.document_region,
-                        "reference_entry_id": reference_id,
-                        "source_work_id": source_work.id,
-                        "cited_work_id": work.id,
-                        "cites_source_chunk_ids": edge["source_chunk_ids"],
-                    }
-                    break
-            if citation_example is not None:
-                break
-
-        responses = [default, explicit, local, graph]
-        forbidden = {
-            "entity_claim_search",
-            "typed_traversal",
-            "global_context",
-            "confirmed_knowledge_retrieval",
-            "subject_about_retrieval",
-            "cognee_recall",
-            "profile_mapping",
-        }
-        default_ok = (
-            {"lexical", "vector"}.issuperset(default.channels_used)
-            and not forbidden.intersection(default.stages)
-            and "rrf" in default.stages
-            and "chunk_id_dedup" in default.stages
-            and "first_rerank" in default.stages
-            and bool(default.answer)
+        explicit_status = (
+            "PASS"
+            if explicit_hard and all(item["status"] == "PASS" for item in explicit_hard)
+            else "FAIL"
         )
-        explicit_ok = bool(explicit.evidence) and all(
-            item.document_id == first_document_id for item in explicit.evidence
+        grounding_status = (
+            "PASS"
+            if responses and all(_grounded(item, corpus.chunks) for item in responses)
+            else "FAIL"
         )
-        local_ok = bool(local.trace.local_expanded_chunk_ids)
-        graph_new = (
-            set(graph.trace.citation_expanded_chunk_ids)
-            | set(graph.trace.graph_expanded_chunk_ids)
-        ) - set(graph.trace.first_reranked_chunk_ids)
-        graph_status = "PASS" if graph_new else "NO_CASE"
-        grounding_ok = all(_grounded(response, chunks) for response in responses)
-        claim_off_ok = counts["claims"] == 0 and counts["about"] == 0
-        citation_ok = (
-            citation_example is not None
-            and citation_example["document_region"] != "REFERENCES"
+        pipeline_completed = (
+            len(ingestion_results) == 4
+            and len(responses) == len(queries_config["cases"])
+            and all(response.answer.strip() for response in responses)
         )
-        status = {
-            "default_query": "PASS" if default_ok else "FAIL",
-            "explicit_filter": "PASS" if explicit_ok else "FAIL",
-            "claim_off": "PASS" if claim_off_ok else "FAIL",
-            "citation_anchor": "PASS" if citation_ok else "FAIL",
-            "local_expansion": "PASS" if local_ok else "FAIL",
-            "graph_expansion": graph_status,
-            "source_grounding": "PASS" if grounding_ok else "FAIL",
-        }
-        hard_failures = [value for value in status.values() if value == "FAIL"]
-        report = {
-            "overall_status": "PASS" if not hard_failures else "FAIL",
-            "pipeline_completed_pdf_to_llm": all(response.answer for response in responses),
-            "papers": [pdf.name for pdf in pdfs],
+        report: dict[str, Any] = {
+            "overall_status": "PENDING",
+            "pipeline_completed_pdf_to_llm": pipeline_completed,
+            "dataset": args.dataset,
+            "ingest_order": ingest_symbols,
+            "runtime_work_ids": work_by_symbol,
+            "runtime_document_ids": document_by_symbol,
+            "semantic_relation_types": sorted(item.value for item in SEMANTIC_RELATION_TYPES),
+            "default_search": {"status": default_status},
+            "explicit_filter": {"status": explicit_status},
+            "claim_off": {
+                "status": ("PASS" if claim_count == 0 and about_count == 0 else "FAIL"),
+                "prompt_name": "semantic_enrichment_without_claims",
+                "claim_count": claim_count,
+                "about_edge_count": about_count,
+            },
+            "local_expansion": local,
+            "semantic_relation_expansion": semantic,
+            "citation_provenance": citation,
+            "incoming_cites_query": incoming,
+            "source_grounding": {"status": grounding_status},
+            "structure_provenance": structure,
+            "queries": query_reviews,
             "counts": {
                 "ingested_papers": len(ingestion_results),
-                "chunks": len(chunks),
-                "claims": counts["claims"],
-                "about_edges": counts["about"],
-                "cites_edges": counts["cites"],
+                "chunks": len(corpus.chunks),
+                "graph_nodes": len(nodes),
+                "graph_relations": len(relations),
+                "claims": claim_count,
+                "about_edges": about_count,
+                "cites_edges": sum(
+                    item.get("relation_type") == RelationType.CITES for item in relations
+                ),
             },
-            "status": status,
-            "claim_off": {
-                "prompt_name": "semantic_enrichment_without_claims",
-                "response_schema": "_SectionExtractionWithoutClaims",
-                "claim_count": counts["claims"],
-                "about_edge_count": counts["about"],
-            },
-            "citation_example": citation_example,
-            "graph_expansion_note": (
-                None
-                if graph_new
-                else "No effective cross-paper expansion case was present in this run."
+            "search_architecture": (
+                "Chunk lexical + Chunk vector -> RRF -> chunk_id dedup -> "
+                "rerank -> optional local/direct-semantic expansion -> "
+                "canonical Evidence -> LLM"
             ),
-            "queries": {
-                "default": _response_review(default),
-                "explicit_filter": _response_review(explicit),
-                "local_expansion": _response_review(local),
-                "graph_expansion": _response_review(graph),
-            },
+            "automatic_citation_expansion": False,
         }
-        (output_root / "acceptance.json").write_text(
-            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        hard_statuses = [
+            report[key]["status"]
+            for key in (
+                "default_search",
+                "explicit_filter",
+                "claim_off",
+                "local_expansion",
+                "semantic_relation_expansion",
+                "citation_provenance",
+                "incoming_cites_query",
+                "source_grounding",
+                "structure_provenance",
+            )
+        ]
+        report["overall_status"] = (
+            "PASS" if pipeline_completed and "FAIL" not in hard_statuses else "FAIL"
         )
+        _write_json(output_root / "acceptance.json", report)
         (output_root / "acceptance.md").write_text(
-            _markdown(report), encoding="utf-8"
+            _markdown(report),
+            encoding="utf-8",
         )
+        _write_json(output_root / "review" / "queries.json", query_reviews)
+        _write_json(
+            output_root / "review" / "citation.json",
+            {"outgoing": citation, "incoming": incoming},
+        )
+        _write_json(output_root / "review" / "structure.json", structure)
+        _write_json(
+            output_root / "review" / "expansions.json",
+            {"local": local, "semantic": semantic},
+        )
+        report["result_zip"] = str(_package_review(output_root))
+        _write_json(output_root / "acceptance.json", report)
+        _package_review(output_root)
         return report
     finally:
         await application.aclose()
+
+
+def _failure_report(output_root: Path, exc: Exception) -> dict[str, Any]:
+    report = {
+        "overall_status": "FAIL",
+        "pipeline_completed_pdf_to_llm": False,
+        "blocked_stage": "external_pipeline",
+        "error_type": type(exc).__name__,
+        "error": str(exc),
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    _write_json(output_root / "acceptance.json", report)
+    (output_root / "acceptance.md").write_text(
+        "# Search / Cognee Graph Acceptance\n\n"
+        "Overall: **FAIL**\n\n"
+        f"Error: {report['error_type']}: {report['error']}\n",
+        encoding="utf-8",
+    )
+    _package_review(output_root)
+    return report
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=Path("config/paperos.toml"))
     parser.add_argument(
-        "--corpus", type=Path, default=Path("data/validation/corpus/papers")
+        "--acceptance-config",
+        type=Path,
+        default=_DEFAULT_CONFIG_ROOT,
     )
-    parser.add_argument(
-        "--output", type=Path, default=Path("data/validation/retrieval/output")
-    )
-    parser.add_argument("--dataset", default="validation_chunk_first")
-    parser.add_argument("--papers", nargs="+", default=list(_DEFAULT_PAPERS))
+    parser.add_argument("--corpus", type=Path, default=_DEFAULT_CORPUS_ROOT)
+    parser.add_argument("--output", type=Path, default=_DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--dataset", default="search_graph_acceptance")
     parser.add_argument("--rebuild", action="store_true")
     args = parser.parse_args()
     try:
         report = asyncio.run(run(args))
-    except Exception as exc:  # noqa: BLE001 - persist any external-stage failure report
-        output_root = args.output.resolve()
-        output_root.mkdir(parents=True, exist_ok=True)
-        report = {
-            "overall_status": "FAIL",
-            "pipeline_completed_pdf_to_llm": False,
-            "blocked_stage": "external_pipeline",
-            "error_type": type(exc).__name__,
-            "error": str(exc),
-        }
-        (output_root / "acceptance.json").write_text(
-            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        (output_root / "acceptance.md").write_text(
-            "# Chunk-first Search Acceptance\n\n"
-            "Overall: **FAIL**\n\n"
-            f"Blocked stage: `{report['blocked_stage']}`\n\n"
-            f"Error: `{report['error_type']}: {report['error']}`\n",
-            encoding="utf-8",
-        )
+    except Exception as exc:  # noqa: BLE001 - always persist an acceptance artifact
+        report = _failure_report(args.output.resolve(), exc)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["overall_status"] != "PASS":
         raise SystemExit(1)

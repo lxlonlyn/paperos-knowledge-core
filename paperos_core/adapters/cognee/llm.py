@@ -6,9 +6,8 @@ source-chunk validation; Cognee's LLMGateway resolves the configured provider,
 model, endpoint, retries, and structured-output framework. Switching providers
 is a configuration-only change.
 
-Semantic enrichment is section-aware: chunks are grouped by section, each
-section is extracted in bounded batches, the section results are merged, and
-the document summary is produced from bounded document-level evidence. The
+Semantic enrichment is section-aware: chunks are grouped by section and each
+section is extracted in bounded batches. The
 manifest records exactly which chunks were input to the LLM
 (``covered_chunk_ids``), which were not (``uncovered_chunk_ids``), and the
 coverage ratio; chunks that were never fed to the model are never claimed as
@@ -36,7 +35,6 @@ from paperos_core.domain.knowledge import (
     Entity,
     KnowledgeStatus,
     SemanticEnrichment,
-    Summary,
 )
 from paperos_core.domain.scholarly import ScholarlyContext, ScholarlyWork
 from paperos_core.errors import SemanticEnrichmentError
@@ -94,11 +92,6 @@ class _SectionExtraction(_StrictModel):
 class _SectionExtractionWithoutClaims(_StrictModel):
     entities: list[_EntityExtraction]
     relations: list[_RelationExtraction]
-
-
-class _SummaryExtraction(_StrictModel):
-    text: str
-    source_chunk_ids: list[str] = Field(min_length=1)
 
 
 class AnswerOutput(_StrictModel):
@@ -226,7 +219,6 @@ class LLMClient:
             catalog=catalog,
             model=config.llm_model,
         )
-        summary = await self._summarize_document(bundle, chunks, prompt)
         covered_ids = list(dict.fromkeys(covered))
         covered_set = set(covered_ids)
         uncovered_ids = [chunk.id for chunk in chunks if chunk.id not in covered_set]
@@ -235,7 +227,6 @@ class LLMClient:
             entities=entities,
             claims=claims,
             relations=relations,
-            summaries=[summary],
             model=config.llm_model,
             provider=config.llm_provider,
             model_version=config.llm_model,
@@ -258,46 +249,44 @@ class LLMClient:
         claim_enrichment_enabled: bool,
     ) -> _SectionExtraction:
         extraction_schema: dict[str, Any] = {
-                "entities": [
-                    {
-                        "key": "unique local key",
-                        "name": "string",
-                        "entity_type": "string",
-                        "description": "optional string",
-                        "source_chunk_ids": ["chunk id"],
-                        "confidence": "optional number 0..1",
-                    }
-                ],
-                "relations": [
-                    {
-                        "source_key": "entity key",
-                        "target_key": "entity key",
-                        "relation_type": "string",
-                        "description": "optional string",
-                        "source_chunk_ids": ["chunk id"],
-                        "confidence": "optional number 0..1",
-                    }
-                ],
-            }
+            "entities": [
+                {
+                    "key": "unique local key",
+                    "name": "string",
+                    "entity_type": "string",
+                    "description": "optional string",
+                    "source_chunk_ids": ["chunk id"],
+                    "confidence": "optional number 0..1",
+                }
+            ],
+            "relations": [
+                {
+                    "source_key": "entity key",
+                    "target_key": "entity key",
+                    "relation_type": "string",
+                    "description": "optional string",
+                    "source_chunk_ids": ["chunk id"],
+                    "confidence": "optional number 0..1",
+                }
+            ],
+        }
         if claim_enrichment_enabled:
             extraction_schema["claims"] = [
-                    {
-                        "key": "unique local key",
-                        "text": "string",
-                        "claim_type": "optional string",
-                        "source_chunk_ids": ["chunk id"],
-                        "confidence": "optional number 0..1",
-                        "about": [
-                            {
-                                "work_key": "SELF or CITED_NNN from work_catalog",
-                                "role": "self|subject|comparison_target|topic",
-                                "source_chunk_ids": [
-                                    "optional; defaults to claim source_chunk_ids"
-                                ],
-                            }
-                        ],
-                    }
-                ]
+                {
+                    "key": "unique local key",
+                    "text": "string",
+                    "claim_type": "optional string",
+                    "source_chunk_ids": ["chunk id"],
+                    "confidence": "optional number 0..1",
+                    "about": [
+                        {
+                            "work_key": "SELF or CITED_NNN from work_catalog",
+                            "role": "self|subject|comparison_target|topic",
+                            "source_chunk_ids": ["optional; defaults to claim source_chunk_ids"],
+                        }
+                    ],
+                }
+            ]
         request = {
             "schema": extraction_schema,
             "document": {
@@ -371,146 +360,6 @@ class LLMClient:
             valid_chunks={chunk.id for chunk in chunks},
             valid_work_keys=set(catalog.key_to_work_id),
             snapshot_id=bundle.snapshot.id,
-        )
-
-    async def _summarize_document(
-        self,
-        bundle: CanonicalBundle,
-        chunks: list[Chunk],
-        prompt: PromptDescriptor,
-    ) -> Summary:
-        grouped = _chunks_by_section(chunks, bundle.sections)
-        if not grouped:
-            raise SemanticEnrichmentError(
-                "Canonical snapshot contains no non-empty chunks for a summary.",
-                affected=bundle.snapshot.id,
-            )
-        section_summaries: list[dict[str, Any]] = []
-        for section_id, section_chunks in grouped:
-            batches: list[_SummaryExtraction] = []
-            for batch_index, batch in enumerate(_chunk_batches(section_chunks)):
-                batches.append(
-                    await self._summarize_evidence(
-                        bundle,
-                        prompt,
-                        task=(
-                            f"summarize section {section_id or '(front matter)'} "
-                            f"batch {batch_index + 1}"
-                        ),
-                        evidence=_chunk_evidence(batch),
-                        valid_chunks={chunk.id for chunk in batch},
-                        object_key=(
-                            f"section_summary:{section_id or '(front matter)'}:"
-                            f"batch:{batch_index + 1}"
-                        ),
-                    )
-                )
-            source_ids = list(
-                dict.fromkeys(chunk_id for item in batches for chunk_id in item.source_chunk_ids)
-            )
-            if len(batches) == 1:
-                section_text = batches[0].text
-            else:
-                merged = await self._summarize_evidence(
-                    bundle,
-                    prompt,
-                    task=f"merge section {section_id or '(front matter)'} summaries",
-                    evidence=[
-                        {"text": item.text, "source_chunk_ids": item.source_chunk_ids}
-                        for item in batches
-                    ],
-                    valid_chunks=set(source_ids),
-                    object_key=f"section_summary:{section_id or '(front matter)'}:merge",
-                )
-                section_text = merged.text
-            section_summaries.append(
-                {
-                    "section_id": section_id,
-                    "text": section_text,
-                    "source_chunk_ids": source_ids,
-                }
-            )
-        extraction = await self._summarize_evidence(
-            bundle,
-            prompt,
-            task="merge all section summaries into one four-sentence document summary",
-            evidence=section_summaries,
-            valid_chunks={chunk.id for chunk in chunks},
-            object_key="document_summary",
-        )
-        summary_id = semantic_object_id(
-            "summary",
-            bundle.snapshot.id,
-            extraction.text,
-            extraction.source_chunk_ids,
-        )
-        return Summary(
-            id=summary_id,
-            canonical_snapshot_id=bundle.snapshot.id,
-            summary_type="document",
-            text=extraction.text,
-            status=KnowledgeStatus.INFERRED,
-            source_chunk_ids=extraction.source_chunk_ids,
-            derived_from_ids=extraction.source_chunk_ids,
-            model=self.model,
-            model_version=self.model,
-        )
-
-    async def _summarize_evidence(
-        self,
-        bundle: CanonicalBundle,
-        prompt: PromptDescriptor,
-        *,
-        task: str,
-        evidence: list[dict[str, Any]],
-        valid_chunks: set[str],
-        object_key: str,
-    ) -> _SummaryExtraction:
-        request: dict[str, Any] = {
-            "schema": {"text": "string", "source_chunk_ids": ["chunk id"]},
-            "document": {
-                "title": bundle.document.title,
-                "abstract": bundle.document.abstract,
-            },
-            "task": task,
-            "evidence": evidence,
-        }
-        failures: list[dict[str, Any]] = []
-        for attempt in range(1, 4):
-            extraction = await self._generate_structured(
-                system=prompt.text,
-                user=json.dumps(request, ensure_ascii=False),
-                response_model=_SummaryExtraction,
-            )
-            try:
-                source_ids = _validate_chunk_ids(
-                    extraction.source_chunk_ids,
-                    valid_chunks,
-                    object_key=object_key,
-                    snapshot_id=bundle.snapshot.id,
-                )
-                return extraction.model_copy(update={"source_chunk_ids": source_ids})
-            except SemanticEnrichmentError as exc:
-                failures.append(
-                    {
-                        "attempt": attempt,
-                        "affected": exc.affected,
-                        **exc.details,
-                    }
-                )
-                if attempt < 3:
-                    request["validation_feedback"] = {
-                        "instruction": (
-                            "Regenerate the complete summary. Every source_chunk_ids value "
-                            "must exactly equal a chunk_id present in evidence."
-                        ),
-                        "allowed_source_chunk_ids": sorted(valid_chunks),
-                        "previous_error": exc.details,
-                    }
-        raise SemanticEnrichmentError(
-            "LLM summary provenance remained invalid after finite retries.",
-            affected=object_key,
-            details={"snapshot_id": bundle.snapshot.id, "attempts": failures},
         )
 
     async def _generate_structured(
@@ -822,9 +671,7 @@ def _normalize_section_extraction(
             snapshot_id=snapshot_id,
             raise_on_invalid_work=True,
         )
-        claims.append(
-            item.model_copy(update={"source_chunk_ids": source_ids, "about": about})
-        )
+        claims.append(item.model_copy(update={"source_chunk_ids": source_ids, "about": about}))
     entity_keys = {item.key for item in entities}
     relations: list[_RelationExtraction] = []
     for item in extraction.relations:
@@ -895,9 +742,7 @@ def _sanitize_section_extraction(
             snapshot_id=snapshot_id,
             raise_on_invalid_work=False,
         )
-        claims.append(
-            item.model_copy(update={"source_chunk_ids": source_ids, "about": about})
-        )
+        claims.append(item.model_copy(update={"source_chunk_ids": source_ids, "about": about}))
 
     entity_keys = {item.key for item in entities}
     relations: list[_RelationExtraction] = []
@@ -958,19 +803,13 @@ def _build_work_catalog(
         _catalog_entry(_SELF_WORK_KEY, document_work, reference_texts.get(document_work.id, []))
     ]
     cited_works = sorted(
-        (
-            work
-            for work_id, work in works_by_id.items()
-            if work_id != document_work.id
-        ),
+        (work for work_id, work in works_by_id.items() if work_id != document_work.id),
         key=lambda work: work.id,
     )
     for index, work in enumerate(cited_works, start=1):
         key = f"CITED_{index:03d}"
         key_to_work_id[key] = work.id
-        entries.append(
-            _catalog_entry(key, work, reference_texts.get(work.id, []))
-        )
+        entries.append(_catalog_entry(key, work, reference_texts.get(work.id, [])))
     return _WorkCatalog(key_to_work_id=key_to_work_id, entries=entries)
 
 
@@ -1119,9 +958,7 @@ def _merge_section_extractions(
                         source_chunk_ids=[],
                     )
                     claim_merged.about_by_work[work_id] = about_merged
-                about_merged.roles = list(
-                    dict.fromkeys([*about_merged.roles, role])
-                )
+                about_merged.roles = list(dict.fromkeys([*about_merged.roles, role]))
                 about_merged.source_chunk_ids = list(
                     dict.fromkeys([*about_merged.source_chunk_ids, *about_ids])
                 )

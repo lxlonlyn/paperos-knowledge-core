@@ -27,9 +27,23 @@ class RelationType(StrEnum):
     EVALUATES_ON = "EVALUATES_ON"
     PROPOSES = "PROPOSES"
     RELATED_TO = "RELATED_TO"
-    SUMMARIZES = "SUMMARIZES"
     TRIPLET_SOURCE = "TRIPLET_SOURCE"
     TRIPLET_TARGET = "TRIPLET_TARGET"
+
+
+SEMANTIC_RELATION_TYPES: frozenset[RelationType] = frozenset(
+    {
+        RelationType.MENTIONS,
+        RelationType.SUPPORTS,
+        RelationType.CONTRADICTS,
+        RelationType.USES,
+        RelationType.EXTENDS,
+        RelationType.COMPARES_WITH,
+        RelationType.EVALUATES_ON,
+        RelationType.PROPOSES,
+        RelationType.RELATED_TO,
+    }
+)
 
 
 class RelationRecord(BaseModel):

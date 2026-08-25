@@ -14,8 +14,6 @@ class QueryRequest(BaseModel):
     dataset: str | None = Field(default=None, min_length=1)
     top_k: int | None = Field(default=None, gt=0, le=100)
     document_ids: list[str] | None = None
-    source_work_ids: list[str] | None = None
-    subject_work_ids: list[str] | None = None
     work_ids: list[str] | None = None
     expand_context: bool = False
     expand_graph: bool = False
@@ -62,7 +60,6 @@ class Candidate(BaseModel):
     derived_from_ids: list[str] = Field(default_factory=list)
     relation_types: list[str] = Field(default_factory=list)
     source_work_id: str | None = None
-    subject_work_ids: list[str] = Field(default_factory=list)
 
 
 class Evidence(BaseModel):
@@ -82,7 +79,6 @@ class Evidence(BaseModel):
     knowledge_kind: str
     derived_from_ids: list[str]
     source_work_id: str | None = None
-    subject_work_ids: list[str] = Field(default_factory=list)
 
 
 class RetrievalTrace(BaseModel):
@@ -94,8 +90,7 @@ class RetrievalTrace(BaseModel):
     first_stage_chunk_ids: list[str] = Field(default_factory=list)
     first_reranked_chunk_ids: list[str] = Field(default_factory=list)
     local_expanded_chunk_ids: list[str] = Field(default_factory=list)
-    citation_expanded_chunk_ids: list[str] = Field(default_factory=list)
-    graph_expanded_chunk_ids: list[str] = Field(default_factory=list)
+    semantic_expanded_chunk_ids: list[str] = Field(default_factory=list)
     seed_chunk_ids: list[str] = Field(default_factory=list)
     relation_types: list[str] = Field(default_factory=list)
     derived_from_ids: list[str] = Field(default_factory=list)

@@ -39,6 +39,7 @@ from cognee.modules.pipelines.tasks.task import (  # type: ignore[import-untyped
 )
 
 from paperos_core.domain.documents import SourceFile
+from paperos_core.domain.provenance import SEMANTIC_RELATION_TYPES
 from paperos_core.errors import CogneeStorageError
 from paperos_core.paths import DataPaths
 
@@ -48,9 +49,7 @@ if TYPE_CHECKING:
 
 # Cognee 1.4.0 public search cannot select custom-pipeline DataPoint
 # collections. Collection names remain private to this compatibility boundary.
-_COGNEE_1_4_RETRIEVAL_COLLECTIONS: dict[
-    str, tuple[tuple[str, str, str], ...]
-] = {
+_COGNEE_1_4_RETRIEVAL_COLLECTIONS: dict[str, tuple[tuple[str, str, str], ...]] = {
     "PAPEROS_CHUNKS": (("ChunkDataPoint_text", "text", "ChunkDataPoint"),),
 }
 
@@ -90,10 +89,11 @@ class CogneeVectorHit:
 
 
 @dataclass(frozen=True, slots=True)
-class CogneeTraversalEvidence:
+class CogneeSemanticRelation:
     source_canonical_id: str
     target_canonical_id: str
     relation_type: str
+    grounded_object_ids: tuple[str, ...]
     source_chunk_ids: tuple[str, ...]
     derived_from_ids: tuple[str, ...]
     score: float
@@ -165,9 +165,7 @@ class CogneeCompatibilityAdapter:
 
         await setup()
         user = await get_default_user()
-        datasets = await get_authorized_existing_datasets(
-            [dataset_name], "read", user
-        )
+        datasets = await get_authorized_existing_datasets([dataset_name], "read", user)
         if len(datasets) != 1:
             raise CogneeStorageError(
                 "Cognee dataset does not resolve uniquely for scoped readback.",
@@ -525,9 +523,7 @@ class CogneeCompatibilityAdapter:
             )
         return sorted({node.canonical_id for nodes in groups.values() for node in nodes})
 
-    async def vector_status(
-        self, *, dataset_name: str | None = None
-    ) -> dict[str, object]:
+    async def vector_status(self, *, dataset_name: str | None = None) -> dict[str, object]:
         if dataset_name is not None:
             async with await self._dataset_scope(dataset_name):
                 return await self.vector_status()
@@ -605,9 +601,7 @@ class CogneeCompatibilityAdapter:
         try:
             await setup()
             user = await get_default_user()
-            datasets = await get_authorized_existing_datasets(
-                [dataset_name], "read", user
-            )
+            datasets = await get_authorized_existing_datasets([dataset_name], "read", user)
             if len(datasets) != 1:
                 raise CogneeStorageError(
                     "Cognee dataset does not resolve uniquely for vector search.",
@@ -616,9 +610,7 @@ class CogneeCompatibilityAdapter:
             dataset = datasets[0]
             best: dict[str, CogneeVectorHit] = {}
             allowed_canonical_ids = set(canonical_ids.values())
-            async with set_database_global_context_variables(
-                dataset.id, dataset.owner_id
-            ):
+            async with set_database_global_context_variables(dataset.id, dataset.owner_id):
                 engine = await get_vector_engine_async()
                 for collection, text_field, object_type in collections:
                     if not await engine.has_collection(collection):
@@ -655,12 +647,8 @@ class CogneeCompatibilityAdapter:
                             object_type=object_type,
                             text=text,
                             score=1.0 / (1.0 + distance),
-                            source_chunk_ids=tuple(
-                                _string_list(payload.get("source_chunk_ids"))
-                            ),
-                            derived_from_ids=tuple(
-                                _string_list(payload.get("derived_from_ids"))
-                            ),
+                            source_chunk_ids=tuple(_string_list(payload.get("source_chunk_ids"))),
+                            derived_from_ids=tuple(_string_list(payload.get("derived_from_ids"))),
                             canonical_snapshot_id=(
                                 str(payload["canonical_snapshot_id"])
                                 if payload.get("canonical_snapshot_id")
@@ -670,9 +658,7 @@ class CogneeCompatibilityAdapter:
                         previous = best.get(cognee_id)
                         if previous is None or hit.score > previous.score:
                             best[cognee_id] = hit
-            return sorted(
-                best.values(), key=lambda item: (-item.score, item.canonical_id)
-            )[:top_k]
+            return sorted(best.values(), key=lambda item: (-item.score, item.canonical_id))[:top_k]
         except CogneeStorageError:
             raise
         except Exception as exc:
@@ -745,7 +731,9 @@ class CogneeCompatibilityAdapter:
         async with engine.get_async_session() as session:
             ledger_nodes = int(
                 await session.scalar(
-                    select(func.count()).select_from(Node).where(
+                    select(func.count())
+                    .select_from(Node)
+                    .where(
                         Node.dataset_id == dataset_id,
                         Node.data_id == data_id,
                     )
@@ -754,7 +742,9 @@ class CogneeCompatibilityAdapter:
             )
             ledger_edges = int(
                 await session.scalar(
-                    select(func.count()).select_from(Edge).where(
+                    select(func.count())
+                    .select_from(Edge)
+                    .where(
                         Edge.dataset_id == dataset_id,
                         Edge.data_id == data_id,
                     )
@@ -788,9 +778,7 @@ class CogneeCompatibilityAdapter:
             provenance_edge_count=edge_count,
         )
 
-    async def resolve_graph_nodes(
-        self, cognee_ids: list[str]
-    ) -> dict[str, dict[str, Any]]:
+    async def resolve_graph_nodes(self, cognee_ids: list[str]) -> dict[str, dict[str, Any]]:
         """Read Cognee 1.4.0 node identity/provenance absent from public results.
 
         Live contract capability: graph_node_provenance_readback.
@@ -827,10 +815,10 @@ class CogneeCompatibilityAdapter:
     ) -> dict[str, list[dict[str, Any]]]:
         """Read unfiltered nodes and typed edges for live graph contracts.
 
-        Cognee 1.4.0 has no public structured graph readback API. Unlike
-        ``typed_traverse``, this contract-only read preserves edges without
-        chunk provenance (notably ``REPRESENTS_WORK``) and does not infer
-        evidence. All private graph-engine access remains isolated here.
+        Cognee 1.4.0 has no public structured graph readback API. This
+        contract-only read preserves edges without chunk provenance (notably
+        ``REPRESENTS_WORK``) and does not infer evidence. All private
+        graph-engine access remains isolated here.
         """
         if not cognee_ids or depth <= 0:
             return {"nodes": [], "edges": []}
@@ -838,6 +826,7 @@ class CogneeCompatibilityAdapter:
         from cognee.infrastructure.databases.graph.get_graph_engine import (
             get_graph_engine,
         )
+
         seeds = sorted({str(item) for item in cognee_ids})
         async with await self._dataset_scope(dataset_name):
             engine = await get_graph_engine()
@@ -856,18 +845,14 @@ class CogneeCompatibilityAdapter:
         node_records = []
         for node_id, raw_properties in nodes:
             properties = (
-                _flatten_node(dict(raw_properties))
-                if isinstance(raw_properties, dict)
-                else {}
+                _flatten_node(dict(raw_properties)) if isinstance(raw_properties, dict) else {}
             )
             properties.setdefault("id", str(node_id))
             node_records.append(properties)
 
         edge_records = []
         for source_id, target_id, relation_type, raw_properties in edges:
-            properties = (
-                dict(raw_properties) if isinstance(raw_properties, dict) else {}
-            )
+            properties = dict(raw_properties) if isinstance(raw_properties, dict) else {}
             edge_records.append(
                 {
                     "source_id": str(source_id),
@@ -891,22 +876,76 @@ class CogneeCompatibilityAdapter:
             ),
         }
 
+    async def semantic_relations_for_chunks(
+        self,
+        chunk_ids: list[str],
+        *,
+        relation_types: set[str],
+        dataset_name: str,
+        limit: int = 200,
+    ) -> list[CogneeSemanticRelation]:
+        """Return one-hop relations on semantic objects grounded in seed Chunks.
+
+        The fixed operator is Chunk provenance -> grounded Entity -> one direct
+        semantic edge. Layout, citation, ABOUT, Summary, and arbitrary connector
+        paths are never traversed. Private graph access remains dataset-scoped
+        inside this compatibility boundary.
+        """
+        if not chunk_ids or not relation_types or limit <= 0:
+            return []
+        central_types = {item.value for item in SEMANTIC_RELATION_TYPES}
+        unsupported = relation_types - central_types
+        if unsupported:
+            raise CogneeStorageError(
+                "Semantic expansion requested non-semantic relation types.",
+                affected=dataset_name,
+                details={"unsupported_relation_types": sorted(unsupported)},
+            )
+        self.retrieval_fallback_types_used.add("direct_semantic_relations")
+        from cognee.infrastructure.databases.graph.get_graph_engine import (
+            get_graph_engine,
+        )
+
+        seeds = list(dict.fromkeys(str(item) for item in chunk_ids))
+        seed_cognee_ids = [str(cognee_uuid(item)) for item in seeds]
+        async with await self._dataset_scope(dataset_name):
+            engine = await get_graph_engine()
+            try:
+                nodes, edges = await engine.get_neighborhood(
+                    seed_cognee_ids,
+                    # Exactly enough to observe Entity -> Chunk provenance and
+                    # one direct Entity -> Entity semantic edge.
+                    depth=2,
+                    edge_types=None,
+                )
+            except Exception as exc:
+                raise CogneeStorageError(
+                    f"Cognee direct semantic relation read failed: {exc}",
+                    affected=self.paths.cognee,
+                ) from exc
+        return _direct_semantic_relations(
+            nodes,
+            edges,
+            seed_chunk_ids=set(seeds),
+            relation_types=relation_types,
+            limit=limit,
+        )
+
     async def incoming_typed_relations(
         self,
         target_canonical_ids: list[str],
         *,
         dataset_name: str,
         relation_type: str,
-        depth: int = 1,
         limit: int = 200,
     ) -> list[CogneeIncomingRelation]:
         """Read bounded incoming typed edges for exact canonical targets.
 
-        Production-compatible Cognee 1.4.0 path used by subject ABOUT retrieval.
-        Private graph access stays here: dataset-scoped, depth=1 by default,
+        Production-compatible Cognee 1.4.0 path used by scholarly navigation.
+        Private graph access stays here: dataset-scoped, fixed depth=1,
         relation-filtered, result-bounded, provenance-preserving.
         """
-        if not target_canonical_ids or depth <= 0 or limit <= 0:
+        if not target_canonical_ids or limit <= 0:
             return []
         self.retrieval_fallback_types_used.add("incoming_typed_relations")
         from cognee.infrastructure.databases.graph.get_graph_engine import (
@@ -915,17 +954,15 @@ class CogneeCompatibilityAdapter:
 
         target_ids = list(dict.fromkeys(str(item) for item in target_canonical_ids))
         seed_cognee_ids = [str(cognee_uuid(item)) for item in target_ids]
-        seed_by_cognee = {
-            str(cognee_uuid(item)): item for item in target_ids
-        }
+        seed_by_cognee = {str(cognee_uuid(item)): item for item in target_ids}
         async with await self._dataset_scope(dataset_name):
             engine = await get_graph_engine()
             try:
                 nodes, edges = await engine.get_neighborhood(
                     seed_cognee_ids,
-                    depth=depth,
-                    # Same Cognee 1.4 Kuzu limitation as typed_traverse: filter
-                    # relation types after an undirected neighborhood read.
+                    depth=1,
+                    # Cognee 1.4 Kuzu cannot bind the edge-type list reliably;
+                    # filter the single-hop relation after the scoped read.
                     edge_types=None,
                 )
             except Exception as exc:
@@ -935,8 +972,7 @@ class CogneeCompatibilityAdapter:
                 ) from exc
 
         node_properties = {
-            str(node_id): _flatten_node(dict(properties))
-            for node_id, properties in nodes
+            str(node_id): _flatten_node(dict(properties)) for node_id, properties in nodes
         }
         results: list[CogneeIncomingRelation] = []
         for source_id, target_id, edge_relation, raw_properties in edges:
@@ -946,14 +982,10 @@ class CogneeCompatibilityAdapter:
             target_key = str(target_id)
             if target_key not in seed_by_cognee:
                 continue
-            properties = (
-                dict(raw_properties) if isinstance(raw_properties, dict) else {}
-            )
+            properties = dict(raw_properties) if isinstance(raw_properties, dict) else {}
             source = node_properties.get(str(source_id), {})
             source_canonical_id = str(
-                properties.get("canonical_source_id")
-                or source.get("canonical_id")
-                or source_id
+                properties.get("canonical_source_id") or source.get("canonical_id") or source_id
             )
             target_canonical_id = seed_by_cognee[target_key]
             chunk_ids = list(
@@ -967,9 +999,11 @@ class CogneeCompatibilityAdapter:
             if not chunk_ids:
                 continue
             roles_value = properties.get("roles")
-            roles = tuple(
-                str(item) for item in roles_value if item is not None
-            ) if isinstance(roles_value, list) else ()
+            roles = (
+                tuple(str(item) for item in roles_value if item is not None)
+                if isinstance(roles_value, list)
+                else ()
+            )
             text = str(source.get("text") or "").strip()
             source_work_id = source.get("source_work_id")
             source_document_id = source.get("source_document_id")
@@ -989,12 +1023,8 @@ class CogneeCompatibilityAdapter:
                         )
                     ),
                     roles=roles,
-                    source_work_id=(
-                        str(source_work_id) if source_work_id else None
-                    ),
-                    source_document_id=(
-                        str(source_document_id) if source_document_id else None
-                    ),
+                    source_work_id=(str(source_work_id) if source_work_id else None),
+                    source_document_id=(str(source_document_id) if source_document_id else None),
                     text=text,
                     score=1.0,
                 )
@@ -1007,138 +1037,6 @@ class CogneeCompatibilityAdapter:
             )
         )
         return results[:limit]
-
-    async def typed_traverse(
-        self,
-        seeds: list[CogneeVectorHit],
-        *,
-        depth: int,
-        edge_types: set[str],
-        exclude_node_types: set[str] | None = None,
-    ) -> list[CogneeTraversalEvidence]:
-        """Return typed edge provenance absent from Cognee 1.4.0 public context.
-
-        Live contract capability: typed_graph_traversal. The traversal is
-        finite-depth and restricted to caller-approved relation types.
-        Optional ``exclude_node_types`` skips Claim (or other) nodes as
-        intermediates/results without changing the default production path.
-        """
-        if not seeds or depth <= 0:
-            return []
-        self.retrieval_fallback_types_used.add("typed_graph_traversal")
-        from cognee.infrastructure.databases.graph.get_graph_engine import (
-            get_graph_engine,
-        )
-
-        engine = await get_graph_engine()
-        try:
-            nodes, edges = await engine.get_neighborhood(
-                [seed.cognee_id for seed in seeds],
-                depth=depth,
-                # Cognee 1.4's Kuzu variable-path implementation cannot bind the
-                # edge-type list without triggering a parser assertion; traverse
-                # in the engine and filter typed edges here. This remains a real,
-                # bounded graph traversal and is portable to configured providers.
-                edge_types=None,
-            )
-        except Exception as exc:
-            raise CogneeStorageError(
-                f"Cognee graph traversal failed: {exc}", affected=self.paths.cognee
-            ) from exc
-        excluded = set(exclude_node_types or ())
-        node_properties = {
-            str(node_id): _flatten_node(dict(properties))
-            for node_id, properties in nodes
-        }
-        blocked_nodes = {
-            node_id
-            for node_id, properties in node_properties.items()
-            if str(properties.get("type") or properties.get("object_type") or "")
-            in excluded
-        }
-        adjacency: dict[str, set[str]] = {}
-        for source_id, target_id, _relation_type, _properties in edges:
-            source_key = str(source_id)
-            target_key = str(target_id)
-            if source_key in blocked_nodes or target_key in blocked_nodes:
-                continue
-            adjacency.setdefault(source_key, set()).add(target_key)
-            adjacency.setdefault(target_key, set()).add(source_key)
-        node_scores = {seed.cognee_id: seed.score for seed in seeds}
-        frontier = dict(node_scores)
-        for _hop in range(depth):
-            next_frontier: dict[str, float] = {}
-            for node_id, score in frontier.items():
-                if node_id in blocked_nodes:
-                    continue
-                propagated = score * 0.85
-                for neighbor_id in adjacency.get(node_id, set()):
-                    if neighbor_id in blocked_nodes:
-                        continue
-                    if propagated <= node_scores.get(neighbor_id, 0.0):
-                        continue
-                    node_scores[neighbor_id] = propagated
-                    next_frontier[neighbor_id] = propagated
-            frontier = next_frontier
-            if not frontier:
-                break
-        evidence: list[CogneeTraversalEvidence] = []
-        for source_id, target_id, relation_type, raw_properties in edges:
-            relation = str(relation_type)
-            if relation not in edge_types:
-                continue
-            source_key = str(source_id)
-            target_key = str(target_id)
-            if source_key in blocked_nodes or target_key in blocked_nodes:
-                continue
-            properties = (
-                dict(raw_properties) if isinstance(raw_properties, dict) else {}
-            )
-            source = node_properties.get(source_key, {})
-            target = node_properties.get(target_key, {})
-            chunk_ids = list(
-                dict.fromkeys(
-                    [
-                        *_string_list(properties.get("source_chunk_ids")),
-                        *_node_source_chunk_ids(source),
-                        *_node_source_chunk_ids(target),
-                    ]
-                )
-            )
-            if not chunk_ids:
-                continue
-            source_canonical_id = str(
-                properties.get("canonical_source_id")
-                or source.get("canonical_id")
-                or source_id
-            )
-            target_canonical_id = str(
-                properties.get("canonical_target_id")
-                or target.get("canonical_id")
-                or target_id
-            )
-            evidence.append(
-                CogneeTraversalEvidence(
-                    source_canonical_id=source_canonical_id,
-                    target_canonical_id=target_canonical_id,
-                    relation_type=relation,
-                    source_chunk_ids=tuple(chunk_ids),
-                    derived_from_ids=tuple(
-                        dict.fromkeys(
-                            [
-                                *_string_list(properties.get("derived_from_ids")),
-                                source_canonical_id,
-                                target_canonical_id,
-                            ]
-                        )
-                    ),
-                    score=max(
-                        node_scores.get(source_key, 0.0),
-                        node_scores.get(target_key, 0.0),
-                    ),
-                )
-            )
-        return evidence
 
     def read_manifest(self, snapshot_id: str) -> dict[str, Any]:
         path = self.manifest_root / f"{snapshot_id}.json"
@@ -1200,11 +1098,121 @@ def _string_list(value: Any) -> list[str]:
 
 
 def _node_source_chunk_ids(node: dict[str, Any]) -> list[str]:
-    """Exclude document-wide summary coverage from typed-edge provenance."""
-    object_type = str(node.get("type") or node.get("object_type") or "")
-    if object_type == "SummaryDataPoint":
-        return []
     return _string_list(node.get("source_chunk_ids"))
+
+
+def _direct_semantic_relations(
+    nodes: list[Any],
+    edges: list[Any],
+    *,
+    seed_chunk_ids: set[str],
+    relation_types: set[str],
+    limit: int,
+) -> list[CogneeSemanticRelation]:
+    """Apply the fixed grounded-Entity/direct-semantic-edge operator."""
+    node_properties = {
+        str(node_id): _flatten_node(dict(properties)) for node_id, properties in nodes
+    }
+    semantic_node_ids = {
+        node_id
+        for node_id, properties in node_properties.items()
+        if str(
+            properties.get("type")
+            or properties.get("object_type")
+            or properties.get("__type__")
+            or ""
+        )
+        == "EntityDataPoint"
+    }
+    seed_cognee_ids = {str(cognee_uuid(chunk_id)) for chunk_id in seed_chunk_ids}
+    grounded_node_ids = {
+        node_id
+        for node_id in semantic_node_ids
+        if seed_chunk_ids.intersection(_node_source_chunk_ids(node_properties[node_id]))
+    }
+    for source_id, target_id, relation_type, _properties in edges:
+        source_key = str(source_id)
+        target_key = str(target_id)
+        if (
+            str(relation_type) == "DERIVED_FROM"
+            and source_key in semantic_node_ids
+            and target_key in seed_cognee_ids
+        ):
+            grounded_node_ids.add(source_key)
+
+    results: list[CogneeSemanticRelation] = []
+    seen: set[tuple[str, str, str]] = set()
+    for source_id, target_id, relation_type, raw_properties in edges:
+        relation = str(relation_type)
+        source_key = str(source_id)
+        target_key = str(target_id)
+        if (
+            relation not in relation_types
+            or source_key not in semantic_node_ids
+            or target_key not in semantic_node_ids
+            or not {source_key, target_key}.intersection(grounded_node_ids)
+        ):
+            continue
+        properties = dict(raw_properties) if isinstance(raw_properties, dict) else {}
+        source = node_properties[source_key]
+        target = node_properties[target_key]
+        source_canonical_id = str(
+            properties.get("canonical_source_id") or source.get("canonical_id") or source_key
+        )
+        target_canonical_id = str(
+            properties.get("canonical_target_id") or target.get("canonical_id") or target_key
+        )
+        key = (source_canonical_id, relation, target_canonical_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        chunk_ids = tuple(
+            dict.fromkeys(
+                [
+                    *_string_list(properties.get("source_chunk_ids")),
+                    *_node_source_chunk_ids(source),
+                    *_node_source_chunk_ids(target),
+                ]
+            )
+        )
+        if not chunk_ids:
+            continue
+        grounded_object_ids = tuple(
+            canonical_id
+            for node_id, canonical_id in (
+                (source_key, source_canonical_id),
+                (target_key, target_canonical_id),
+            )
+            if node_id in grounded_node_ids
+        )
+        results.append(
+            CogneeSemanticRelation(
+                source_canonical_id=source_canonical_id,
+                target_canonical_id=target_canonical_id,
+                relation_type=relation,
+                grounded_object_ids=grounded_object_ids,
+                source_chunk_ids=chunk_ids,
+                derived_from_ids=tuple(
+                    dict.fromkeys(
+                        [
+                            *grounded_object_ids,
+                            source_canonical_id,
+                            target_canonical_id,
+                            *_string_list(properties.get("derived_from_ids")),
+                        ]
+                    )
+                ),
+                score=1.0,
+            )
+        )
+    results.sort(
+        key=lambda item: (
+            item.source_canonical_id,
+            item.relation_type,
+            item.target_canonical_id,
+        )
+    )
+    return results[:limit]
 
 
 def _atomic_json(path: Path, payload: dict[str, object]) -> None:

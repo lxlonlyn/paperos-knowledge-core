@@ -38,7 +38,6 @@ def _empty_enrichment() -> SemanticEnrichment:
         entities=[],
         claims=[],
         relations=[],
-        summaries=[],
         model="contract-model",
         provider="contract-provider",
         model_version="contract-model",
@@ -75,9 +74,7 @@ def current_snapshot_contract(live_data_dir: Path) -> dict[str, object]:
     repository = CanonicalRepository(build_data_paths(live_data_dir))
     all_ids = repository.list_snapshot_ids()
     latest_ids = repository.list_latest_snapshot_ids()
-    document_ids = {
-        repository.get_snapshot(snapshot_id).document_id for snapshot_id in all_ids
-    }
+    document_ids = {repository.get_snapshot(snapshot_id).document_id for snapshot_id in all_ids}
     _require(len(all_ids) > len(latest_ids), "Historical snapshots were not retained.")
     _require(
         len(latest_ids) == len(document_ids) == 4,

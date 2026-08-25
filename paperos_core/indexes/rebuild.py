@@ -75,8 +75,7 @@ class DerivedDataRebuilder:
             selected = current_snapshot_ids
         with sqlite3.connect(self.paths.registry_db) as connection:
             exists = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='document_tombstones'"
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_tombstones'"
             ).fetchone()
             deleted_documents = (
                 {
@@ -104,9 +103,7 @@ class DerivedDataRebuilder:
             if (enrichment_root / f"{selected_id}.json").is_file()
         ]
         existing_set = set(existing)
-        missing = [
-            selected_id for selected_id in selected if selected_id not in existing_set
-        ]
+        missing = [selected_id for selected_id in selected if selected_id not in existing_set]
         if missing and not refresh_enrichment:
             raise CogneeStorageError(
                 "Semantic enrichment is missing for current rebuild snapshots; "
@@ -153,7 +150,6 @@ class DerivedDataRebuilder:
         targets.extend((self.paths.cognee / "manifests").glob("*.json"))
         targets.extend((self.paths.cognee / "graphs").glob("*.json"))
         targets.extend((self.paths.cognee / "chunks").glob("*.jsonl"))
-        targets.extend((self.paths.cache / "query").glob("*.json"))
         deleted: list[Path] = []
         for target in targets:
             resolved = target.resolve(strict=False)

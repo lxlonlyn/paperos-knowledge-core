@@ -56,10 +56,7 @@ claim_enrichment_enabled = false
 [retrieval]
 top_k = 12
 candidate_pool_size = 40
-graph_depth = 2
 rerank_enabled = true
-max_chunks_per_document = 3
-max_chunks_per_section = 2
 
 [api]
 host = "127.0.0.1"

@@ -108,10 +108,43 @@ def test_author_year_in_brackets() -> None:
     _require(all(item.reference_entry_id for item in mentions), "all resolved")
 
 
+def test_ocred_symbolic_citation_inside_latex_math() -> None:
+    reference = _reference(0, "[LWJ∗22] Liu et al. Learning smooth neural functions.")
+    indexes = build_reference_indexes([reference])
+    surface = r"$\mathrm { [ L W J ^ { * } } 2 2 ]$"
+    text = f"Liu et al. {surface} propose Lipschitz regularization."
+    mentions = extract_citation_mentions_from_text(
+        document_id="doc_test",
+        snapshot_id="snapshot_test",
+        element_id="element_test",
+        text=text,
+        reference_index=indexes,
+    )
+    _require(len(mentions) == 1, "one OCR-spaced LaTeX citation mention")
+    mention = mentions[0]
+    _require(mention.reference_entry_id == reference.id, "symbolic label resolved")
+    _require(mention.resolution_status == "resolved", "citation resolution status")
+    _require(mention.surface_text == surface, "source surface is preserved")
+    _require(
+        text[mention.character_start : mention.character_end] == surface,
+        "source coordinates are exact",
+    )
+
+    formula_mentions = extract_citation_mentions_from_text(
+        document_id="doc_test",
+        snapshot_id="snapshot_test",
+        element_id="element_formula",
+        text=r"The tensor is $\mathrm{[X]} = A^2$.",
+        reference_index=indexes,
+    )
+    _require(not formula_mentions, "ordinary inline math is not a citation")
+
+
 def main() -> None:
     test_numeric_label_group_and_range()
     test_symbolic_labels()
     test_author_year_in_brackets()
+    test_ocred_symbolic_citation_inside_latex_math()
     print("PASS citation resolution contracts")
 
 

@@ -130,12 +130,8 @@ class LocalInferenceSettings(StrictSettings):
     enabled: bool = False
     host: Literal["127.0.0.1", "localhost"] = "127.0.0.1"
     port: int = Field(default=8081, ge=1, le=65535)
-    embedding_model_path: Path = Path(
-        "../data/models/embedding/embeddinggemma-300M-Q8_0.gguf"
-    )
-    reranker_model_path: Path = Path(
-        "../data/models/reranker/qwen3-reranker-0.6b-q8_0.gguf"
-    )
+    embedding_model_path: Path = Path("../data/models/embedding/embeddinggemma-300M-Q8_0.gguf")
+    reranker_model_path: Path = Path("../data/models/reranker/qwen3-reranker-0.6b-q8_0.gguf")
     cuda_devices: list[int] = Field(default_factory=lambda: [6, 7], min_length=1)
     startup_timeout: int = Field(default=180, gt=0)
     request_timeout: int = Field(default=120, gt=0)
@@ -153,10 +149,7 @@ class LocalInferenceSettings(StrictSettings):
 class RetrievalSettings(StrictSettings):
     top_k: int = Field(default=12, gt=0)
     candidate_pool_size: int = Field(default=40, gt=0)
-    graph_depth: int = Field(default=2, ge=0)
     rerank_enabled: bool = True
-    max_chunks_per_document: int = Field(default=3, gt=0)
-    max_chunks_per_section: int = Field(default=2, gt=0)
 
 
 class RuntimeSettings(StrictSettings):
@@ -249,10 +242,12 @@ def load_settings(
             f"Invalid PaperOS configuration: {exc}", affected=config_path
         ) from exc
     local = settings.local_inference
-    local = local.model_copy(update={
-        "embedding_model_path": _resolve_path(local.embedding_model_path, base_dir=config_root),
-        "reranker_model_path": _resolve_path(local.reranker_model_path, base_dir=config_root),
-    })
+    local = local.model_copy(
+        update={
+            "embedding_model_path": _resolve_path(local.embedding_model_path, base_dir=config_root),
+            "reranker_model_path": _resolve_path(local.reranker_model_path, base_dir=config_root),
+        }
+    )
     return settings.model_copy(
         update={
             "local_inference": local,

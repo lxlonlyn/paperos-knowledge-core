@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
+from paperos_core.adapters.cognee.compat import (
+    CogneeSemanticRelation,
+    _direct_semantic_relations,
+    cognee_uuid,
+)
 from paperos_core.adapters.cognee.llm import _SectionExtractionWithoutClaims
 from paperos_core.domain.canonical import Chunk
+from paperos_core.domain.provenance import SEMANTIC_RELATION_TYPES, RelationType
 from paperos_core.retrieval.candidates import Candidate, QueryRequest
 from paperos_core.retrieval.evidence import format_evidence
-from paperos_core.retrieval.expansion import local_neighbor_expand
+from paperos_core.retrieval.expansion import (
+    local_neighbor_expand,
+    semantic_post_hit_expand,
+)
 from paperos_core.retrieval.fusion import weighted_rrf
 
 
@@ -59,6 +69,10 @@ def test_query_request_rejects_removed_routing_fields() -> None:
         QueryRequest.model_validate({"query": "compare limitations", "profile": "truth"})
     with pytest.raises(ValidationError):
         QueryRequest.model_validate({"query": "paper title", "scope": {}})
+    with pytest.raises(ValidationError):
+        QueryRequest.model_validate({"query": "paper title", "source_work_ids": ["work_1"]})
+    with pytest.raises(ValidationError):
+        QueryRequest.model_validate({"query": "paper title", "subject_work_ids": ["work_1"]})
     request = QueryRequest(
         query="paper title comparison limitations",
         document_ids=["document_1"],
@@ -66,6 +80,173 @@ def test_query_request_rejects_removed_routing_fields() -> None:
         expand_graph=True,
     )
     assert request.document_ids == ["document_1"]
+    assert set(QueryRequest.model_fields) == {
+        "query",
+        "dataset",
+        "top_k",
+        "document_ids",
+        "work_ids",
+        "expand_context",
+        "expand_graph",
+    }
+
+
+def test_semantic_relation_grammar_is_central_and_excludes_infrastructure() -> None:
+    assert SEMANTIC_RELATION_TYPES == {
+        RelationType.MENTIONS,
+        RelationType.SUPPORTS,
+        RelationType.CONTRADICTS,
+        RelationType.USES,
+        RelationType.EXTENDS,
+        RelationType.COMPARES_WITH,
+        RelationType.EVALUATES_ON,
+        RelationType.PROPOSES,
+        RelationType.RELATED_TO,
+    }
+    assert not SEMANTIC_RELATION_TYPES.intersection(
+        {
+            RelationType.CITES,
+            RelationType.ABOUT,
+            RelationType.DERIVED_FROM,
+            RelationType.HAS_SECTION,
+            RelationType.HAS_CHUNK,
+            RelationType.HAS_ELEMENT,
+            RelationType.HAS_REFERENCE,
+            RelationType.RESOLVES_TO,
+        }
+    )
+
+
+def test_direct_semantic_operator_rejects_indirect_and_infrastructure_paths() -> None:
+    seed_id = "chunk_seed"
+    seed_graph_id = str(cognee_uuid(seed_id))
+    entity_a = "entity-a"
+    entity_b = "entity-b"
+    entity_c = "entity-c"
+    layout = "section-layout"
+    work_a = "work-a"
+    work_b = "work-b"
+    nodes = [
+        (seed_graph_id, {"type": "ChunkDataPoint", "canonical_id": seed_id}),
+        (
+            entity_a,
+            {
+                "type": "EntityDataPoint",
+                "canonical_id": "entity_a",
+                "source_chunk_ids": [seed_id],
+            },
+        ),
+        (
+            entity_b,
+            {
+                "type": "EntityDataPoint",
+                "canonical_id": "entity_b",
+                "source_chunk_ids": ["chunk_target"],
+            },
+        ),
+        (
+            entity_c,
+            {
+                "type": "EntityDataPoint",
+                "canonical_id": "entity_c",
+                "source_chunk_ids": ["chunk_indirect"],
+            },
+        ),
+        (layout, {"type": "SectionDataPoint", "canonical_id": "section_1"}),
+        (work_a, {"type": "ScholarlyWorkDataPoint", "canonical_id": "work_a"}),
+        (work_b, {"type": "ScholarlyWorkDataPoint", "canonical_id": "work_b"}),
+    ]
+    edges = [
+        (entity_a, seed_graph_id, "DERIVED_FROM", {}),
+        (
+            entity_a,
+            entity_b,
+            "USES",
+            {"source_chunk_ids": [seed_id, "chunk_target"]},
+        ),
+        (entity_b, entity_c, "EXTENDS", {"source_chunk_ids": ["chunk_indirect"]}),
+        (entity_a, layout, "MENTIONS", {"source_chunk_ids": [seed_id]}),
+        (layout, entity_c, "RELATED_TO", {"source_chunk_ids": ["chunk_indirect"]}),
+        (work_a, work_b, "CITES", {"source_chunk_ids": [seed_id]}),
+    ]
+    relations = _direct_semantic_relations(
+        nodes,
+        edges,
+        seed_chunk_ids={seed_id},
+        relation_types={item.value for item in SEMANTIC_RELATION_TYPES},
+        limit=20,
+    )
+    assert [
+        (item.source_canonical_id, item.relation_type, item.target_canonical_id)
+        for item in relations
+    ] == [("entity_a", "USES", "entity_b")]
+    assert relations[0].source_chunk_ids == (seed_id, "chunk_target")
+
+
+def test_semantic_expansion_is_dataset_scoped_and_rehydrates_canonical_chunks() -> None:
+    target = _chunk("chunk_target", 2)
+    chunks = {target.id: target}
+
+    class Corpus:
+        def __init__(self) -> None:
+            self.chunks = chunks
+
+        def candidate_for_chunk(self, chunk_id: str, **kwargs: object) -> Candidate:
+            candidate = _candidate(
+                chunk_id,
+                str(kwargs["channel"]),
+                candidate_id=chunk_id,
+            )
+            candidate.text = self.chunks[chunk_id].text
+            candidate.derived_from_ids = list(kwargs["derived_from_ids"])
+            candidate.relation_types = list(kwargs["relation_types"])
+            return candidate
+
+    class Compat:
+        def __init__(self) -> None:
+            self.dataset_name: str | None = None
+            self.relation_types: set[str] = set()
+
+        async def semantic_relations_for_chunks(
+            self,
+            chunk_ids: list[str],
+            *,
+            dataset_name: str,
+            relation_types: set[str],
+            limit: int,
+        ) -> list[CogneeSemanticRelation]:
+            assert chunk_ids == ["chunk_seed"]
+            assert limit == 10
+            self.dataset_name = dataset_name
+            self.relation_types = relation_types
+            return [
+                CogneeSemanticRelation(
+                    source_canonical_id="entity_a",
+                    target_canonical_id="entity_b",
+                    relation_type="USES",
+                    grounded_object_ids=("entity_a",),
+                    source_chunk_ids=("missing_chunk", "chunk_target"),
+                    derived_from_ids=("entity_a", "entity_b"),
+                    score=1.0,
+                )
+            ]
+
+    compat = Compat()
+    expanded = asyncio.run(
+        semantic_post_hit_expand(
+            compat,  # type: ignore[arg-type]
+            Corpus(),  # type: ignore[arg-type]
+            [_candidate("chunk_seed", "vector", candidate_id="chunk_seed")],
+            dataset_name="dataset_exact",
+            document_ids={"document_1"},
+            limit=10,
+        )
+    )
+    assert compat.dataset_name == "dataset_exact"
+    assert compat.relation_types == {item.value for item in SEMANTIC_RELATION_TYPES}
+    assert [item.chunk_id for item in expanded] == ["chunk_target"]
+    assert expanded[0].text == target.text
+    assert expanded[0].relation_types == ["USES"]
 
 
 def test_rrf_deduplicates_by_canonical_chunk_id() -> None:

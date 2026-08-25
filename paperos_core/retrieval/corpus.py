@@ -38,8 +38,7 @@ class CorpusView:
         bundles = {bundle.document.id: bundle for bundle in retained_bundles}
         with sqlite3.connect(paths.registry_db) as connection:
             exists = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='document_tombstones'"
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_tombstones'"
             ).fetchone()
             deleted = (
                 {
@@ -56,24 +55,16 @@ class CorpusView:
             for document_id, bundle in bundles.items()
             if document_id not in deleted
         }
-        retained_bundles = [
-            bundle
-            for bundle in retained_bundles
-            if bundle.document.id in bundles
-        ]
+        retained_bundles = [bundle for bundle in retained_bundles if bundle.document.id in bundles]
         chunks = {
             chunk.id: chunk
             for bundle in retained_bundles
-            for chunk in canonical_repository.get_chunk_projection(
-                bundle.snapshot.id
-            ).chunks
+            for chunk in canonical_repository.get_chunk_projection(bundle.snapshot.id).chunks
         }
         chunk_bundles = {
             chunk.id: bundle
             for bundle in retained_bundles
-            for chunk in canonical_repository.get_chunk_projection(
-                bundle.snapshot.id
-            ).chunks
+            for chunk in canonical_repository.get_chunk_projection(bundle.snapshot.id).chunks
         }
         source_filenames = {
             bundle.document.source_file_id: registry.get_source(
@@ -92,9 +83,7 @@ class CorpusView:
                 for reference_id in chunk.citation_reference_entry_ids:
                     work = scholarly_registry.work_for_reference(reference_id)
                     if work is not None:
-                        cited_work_ids_by_chunk.setdefault(chunk.id, set()).add(
-                            work.id
-                        )
+                        cited_work_ids_by_chunk.setdefault(chunk.id, set()).add(work.id)
             for document_id in bundles:
                 work = scholarly_registry.work_for_document(document_id)
                 if work is None:
@@ -131,14 +120,11 @@ class CorpusView:
         derived_from_ids: list[str] | None = None,
         relation_types: list[str] | None = None,
         source_work_id: str | None = None,
-        subject_work_ids: list[str] | None = None,
         candidate_id: str | None = None,
     ) -> Candidate:
         chunk = self.chunks[chunk_id]
         bundle = self.chunk_bundles[chunk_id]
-        resolved_source_work = source_work_id or self.work_id_by_document.get(
-            chunk.document_id
-        )
+        resolved_source_work = source_work_id or self.work_id_by_document.get(chunk.document_id)
         return Candidate(
             id=candidate_id or chunk.id,
             object_id=object_id or chunk.id,
@@ -159,7 +145,6 @@ class CorpusView:
             derived_from_ids=derived_from_ids or [],
             relation_types=relation_types or [],
             source_work_id=resolved_source_work,
-            subject_work_ids=list(subject_work_ids or []),
         )
 
     def filtered_document_ids(

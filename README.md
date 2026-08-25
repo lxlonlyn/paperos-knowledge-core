@@ -92,7 +92,6 @@ canonical/  versioned canonical snapshots
 cognee/     Cognee system, graph, vector, metadata, and enrichment data
 indexes/    rebuildable FTS and index manifests
 jobs/       registry, operational queue, and process records
-cache/      rebuildable query cache
 logs/       application and local-inference logs
 tmp/        managed upload staging
 ```
@@ -104,8 +103,8 @@ references; repositories decode them to absolute `Path` objects at runtime.
 Copying the project or `data/` therefore does not rewrite retained artifacts.
 
 Original PDFs and raw MinerU responses are immutable. Canonical snapshots are
-versioned. Cognee and FTS projections, enrichment, summaries, caches, and exports
-are rebuildable. Every derived object and graph relation retains canonical chunk
+versioned. Cognee and FTS projections, semantic enrichment, and exports are
+rebuildable. Every derived object and graph relation retains canonical chunk
 provenance.
 
 `registry.db` also owns stable `ScholarlyWork` identities independently of
@@ -117,8 +116,8 @@ permanent Work IDs.
 Cognee/LanceDB is the only semantic vector layer and SQLite FTS5 is the lexical
 supplement. Production query discovery searches only canonical
 ``ChunkDataPoint`` objects in ``PAPEROS_CHUNKS``. Query text never selects an
-Entity, Claim, Summary, or Graph search channel. Explicit context expansion
-starts from first-stage Chunk hits and returns only canonical source Chunks.
+Entity, Claim, or generic Graph search channel. Explicit context expansion starts
+from first-stage Chunk hits and returns only canonical source Chunks.
 Version-locked graph/vector access remains isolated in
 ``paperos_core/adapters/cognee/compat.py``; PaperOS does not create a second
 vector index, embedding client, or graph store.

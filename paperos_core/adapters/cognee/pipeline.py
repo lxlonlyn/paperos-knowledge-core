@@ -203,7 +203,6 @@ class CogneePipelineAdapter:
             semantic_entity_count=len(enrichment.entities),
             semantic_claim_count=len(enrichment.claims),
             semantic_relation_count=len(enrichment.relations),
-            summary_count=len(enrichment.summaries),
             consistency_valid=True,
             rebuilt=rebuilt,
         )
@@ -279,9 +278,7 @@ class CogneePipelineAdapter:
             "node_count": len(graph.nodes),
             "relation_count": len(graph.relations),
             "canonical_to_cognee_id": graph.id_mapping,
-            "relations": [
-                relation.model_dump(mode="json") for relation in graph.relations
-            ],
+            "relations": [relation.model_dump(mode="json") for relation in graph.relations],
         }
         _atomic_json(manifest_path, manifest)
         return manifest_path
@@ -300,9 +297,7 @@ def _single_run_info(run_infos: dict[str, Any], dataset_name: str) -> Any:
     return run_infos
 
 
-def _validate_semantic_provenance(
-    chunks: list[Any], enrichment: SemanticEnrichment
-) -> None:
+def _validate_semantic_provenance(chunks: list[Any], enrichment: SemanticEnrichment) -> None:
     chunk_ids = {chunk.id for chunk in chunks}
     for entity in enrichment.entities:
         _validate_provenance(entity.id, entity.source_chunk_ids, chunk_ids)
@@ -316,8 +311,6 @@ def _validate_semantic_provenance(
             )
     for relation in enrichment.relations:
         _validate_provenance(relation.id, relation.source_chunk_ids, chunk_ids)
-    for summary in enrichment.summaries:
-        _validate_provenance(summary.id, summary.source_chunk_ids, chunk_ids)
 
 
 def _validate_provenance(

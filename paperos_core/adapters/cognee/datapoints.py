@@ -110,13 +110,6 @@ class ConceptRelationDataPoint(CanonicalBackedDataPoint):
     metadata: dict[str, Any] = {"index_fields": ["description"]}  # noqa: RUF012
 
 
-class SummaryDataPoint(CanonicalBackedDataPoint):
-    summary_type: str
-    text: str
-    status: str
-    metadata: dict[str, Any] = {"index_fields": ["text"]}  # noqa: RUF012
-
-
 class TripletDataPoint(CanonicalBackedDataPoint):
     """Searchable typed-edge node with canonical provenance."""
 

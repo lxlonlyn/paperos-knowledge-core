@@ -80,8 +80,7 @@ class Application:
         status = self.storage.validate()
         if not status.valid:
             raise RuntimeError(
-                "PaperOS local schema validation failed: "
-                + ", ".join(status.missing_tables)
+                "PaperOS local schema validation failed: " + ", ".join(status.missing_tables)
             )
         try:
             if self.runtime.local_inference.required:
@@ -174,9 +173,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         llm,
         settings.ingestion,
     )
-    rebuilder = DerivedDataRebuilder(
-        paths, canonical_repository, knowledge_pipeline, storage
-    )
+    rebuilder = DerivedDataRebuilder(paths, canonical_repository, knowledge_pipeline, storage)
     feedback = FeedbackService(paths, canonical_repository)
     queue = JobQueue(paths)
     retrieval = RetrievalService(
@@ -190,7 +187,6 @@ def create_application(settings: RuntimeSettings) -> Application:
         index_manager,
         local_inference_client,
         llm,
-        feedback,
     )
     if settings.mineru.provider not in {"cloud", "mineru_cloud"}:
         from paperos_core.errors import MinerUConfigurationError

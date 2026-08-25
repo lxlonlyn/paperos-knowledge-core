@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field
 
 from paperos_core.ingestion.inline_domains import (
+    InlineDomainKind,
     bracket_inner,
     iter_bracket_scopes,
     scan_inline_domains,
@@ -41,6 +42,22 @@ _AUTHOR_YEAR_INLINE = re.compile(
     r"(?<![A-Za-z])(?P<author>[A-ZÀ-ÖØ-Þ][\w''\-]+(?:\s+et\s+al\.?)?"
     r"(?:\s+and\s+[A-ZÀ-ÖØ-Þ][\w''\-]+)?)\s+\((?P<year>[12]\d{3}[a-d]?)\)"
 )
+_OCR_SYMBOLIC_MATH_CITATION = re.compile(
+    r"""
+    ^\s*(?:\${1,2}|\\\()\s*
+    \\(?:mathrm|text)\s*\{\s*
+    \[\s*
+    (?P<label>(?:[A-Za-z]\s*){2,12})
+    (?P<star>\^\s*\{\s*(?:\\?ast|\*)\s*\})?
+    \s*(?:
+        \}\s*(?P<year_after_mathrm>(?:\d\s*){2,4}[a-d]?)\s*\]
+        |
+        (?P<year_inside_mathrm>(?:\d\s*){2,4}[a-d]?)\s*\]\s*\}
+    )
+    \s*(?:\${1,2}|\\\))\s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 
 def detect_citation_candidates(text: str) -> list[CitationCandidate]:
@@ -48,6 +65,27 @@ def detect_citation_candidates(text: str) -> list[CitationCandidate]:
     domains = scan_inline_domains(text)
     candidates: list[CitationCandidate] = []
     masked = text
+    for domain in domains:
+        if domain.kind != InlineDomainKind.INLINE_MATH:
+            continue
+        surface = text[domain.start : domain.end]
+        label = _ocred_symbolic_math_label(surface)
+        if label is None:
+            continue
+        bracket_offset = surface.find("[")
+        candidates.append(
+            CitationCandidate(
+                surface=surface,
+                start=domain.start,
+                end=domain.end,
+                kind="bracket",
+                bracket_start=(
+                    domain.start + bracket_offset if bracket_offset >= 0 else domain.start
+                ),
+                metadata={"inner": label, "source_domain": "inline_math"},
+            )
+        )
+        masked = _mask(masked, domain.start, domain.end)
     for bracket in iter_bracket_scopes(text, domains):
         inner = bracket_inner(text, bracket).strip()
         start = bracket.start
@@ -91,6 +129,20 @@ def detect_citation_candidates(text: str) -> list[CitationCandidate]:
             )
         )
     return sorted(candidates, key=lambda item: (item.start, item.end, item.kind))
+
+
+def _ocred_symbolic_math_label(surface: str) -> str | None:
+    match = _OCR_SYMBOLIC_MATH_CITATION.fullmatch(surface)
+    if match is None:
+        return None
+    label = re.sub(r"\s+", "", match.group("label"))
+    year = re.sub(
+        r"\s+",
+        "",
+        match.group("year_after_mathrm") or match.group("year_inside_mathrm"),
+    )
+    star = "*" if match.group("star") else ""
+    return f"{label}{star}{year}"
 
 
 def _left_author_match(text: str, bracket_start: int) -> tuple[str, int] | None:

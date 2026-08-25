@@ -16,13 +16,16 @@ from paperos_core.adapters.cognee.datapoints import (
     ReferenceDataPoint,
     ScholarlyWorkDataPoint,
     SectionDataPoint,
-    SummaryDataPoint,
     TripletDataPoint,
 )
 from paperos_core.domain.canonical import CanonicalBundle, Chunk
 from paperos_core.domain.ids import knowledge_triplet_id
 from paperos_core.domain.knowledge import SemanticEnrichment
-from paperos_core.domain.provenance import RelationRecord, RelationType
+from paperos_core.domain.provenance import (
+    SEMANTIC_RELATION_TYPES,
+    RelationRecord,
+    RelationType,
+)
 from paperos_core.domain.scholarly import ScholarlyContext
 from paperos_core.ingestion.retrieval_text import effective_index_text
 
@@ -42,9 +45,7 @@ class DataPointGraph:
                 {"__type__": type(node).__name__, **node.model_dump(mode="json")}
                 for node in self.nodes
             ],
-            "relations": [
-                relation.model_dump(mode="json") for relation in self.relations
-            ],
+            "relations": [relation.model_dump(mode="json") for relation in self.relations],
         }
 
 
@@ -78,7 +79,8 @@ def canonical_to_datapoints(
                 item.reference_id
                 for item in scholarly.reference_resolutions
                 if item.work_id == work.id
-            ] + ([document.id] if work.id == scholarly.document_work.id else []),
+            ]
+            + ([document.id] if work.id == scholarly.document_work.id else []),
         )
         for work in scholarly.works
     ]
@@ -154,9 +156,7 @@ def canonical_to_datapoints(
             doi=reference.doi,
             year=reference.year,
             resolved_work_id=(
-                resolutions[reference.id].work_id
-                if reference.id in resolutions
-                else None
+                resolutions[reference.id].work_id if reference.id in resolutions else None
             ),
             resolution_status=(
                 resolutions[reference.id].resolution_status
@@ -216,22 +216,8 @@ def canonical_to_datapoints(
         )
         for relation in enrichment.relations
     )
-    nodes.extend(
-        SummaryDataPoint(
-            id=cognee_uuid(summary.id),
-            canonical_id=summary.id,
-            summary_type=summary.summary_type,
-            text=summary.text,
-            status=summary.status.value,
-            source_chunk_ids=summary.source_chunk_ids,
-            derived_from_ids=summary.derived_from_ids,
-            **common,
-        )
-        for summary in enrichment.summaries
-    )
     relations = _consolidate_relations(
-        _canonical_relations(bundle, chunks, scholarly)
-        + _semantic_relations(bundle, enrichment)
+        _canonical_relations(bundle, chunks, scholarly) + _semantic_relations(bundle, enrichment)
     )
     triplet_nodes, triplet_links = _triplet_datapoints(
         bundle,
@@ -260,18 +246,12 @@ def _consolidate_relations(
             consolidated[key] = relation.model_copy(deep=True)
             continue
         existing.source_chunk_ids = list(
-            dict.fromkeys(
-                [*existing.source_chunk_ids, *relation.source_chunk_ids]
-            )
+            dict.fromkeys([*existing.source_chunk_ids, *relation.source_chunk_ids])
         )
         existing.derived_from_ids = list(
-            dict.fromkeys(
-                [*existing.derived_from_ids, *relation.derived_from_ids]
-            )
+            dict.fromkeys([*existing.derived_from_ids, *relation.derived_from_ids])
         )
-        existing.roles = list(
-            dict.fromkeys([*existing.roles, *relation.roles])
-        )
+        existing.roles = list(dict.fromkeys([*existing.roles, *relation.roles]))
     return list(consolidated.values())
 
 
@@ -285,19 +265,8 @@ def _triplet_datapoints(
     nodes_by_id = {node.canonical_id: node for node in nodes}
     triplets: list[TripletDataPoint] = []
     links: list[RelationRecord] = []
-    searchable_relations = {
-        RelationType.MENTIONS,
-        RelationType.SUPPORTS,
-        RelationType.CONTRADICTS,
-        RelationType.USES,
-        RelationType.EXTENDS,
-        RelationType.COMPARES_WITH,
-        RelationType.EVALUATES_ON,
-        RelationType.PROPOSES,
-        RelationType.RELATED_TO,
-    }
     for relation in relations:
-        if relation.relation_type not in searchable_relations:
+        if relation.relation_type not in SEMANTIC_RELATION_TYPES:
             continue
         source = nodes_by_id.get(relation.source_id)
         target = nodes_by_id.get(relation.target_id)
@@ -464,19 +433,10 @@ def _semantic_relations(
                     target_id=about.work_id,
                     relation_type=RelationType.ABOUT,
                     source_chunk_ids=list(about.source_chunk_ids),
-                    derived_from_ids=list(
-                        about.derived_from_ids or about.source_chunk_ids
-                    ),
+                    derived_from_ids=list(about.derived_from_ids or about.source_chunk_ids),
                     roles=list(about.roles),
                 )
             )
-    for summary in enrichment.summaries:
-        _append_provenance_relations(
-            relations,
-            summary.id,
-            summary.source_chunk_ids,
-            summary.derived_from_ids,
-        )
     for relation in enrichment.relations:
         try:
             kind = RelationType(relation.relation_type)
@@ -502,16 +462,6 @@ def _semantic_relations(
             relation.source_chunk_ids,
             relation.derived_from_ids,
         )
-    relations.extend(
-        RelationRecord(
-            source_id=summary.id,
-            target_id=bundle.document.id,
-            relation_type=RelationType.SUMMARIZES,
-            source_chunk_ids=summary.source_chunk_ids,
-            derived_from_ids=summary.derived_from_ids,
-        )
-        for summary in enrichment.summaries
-    )
     return relations
 
 

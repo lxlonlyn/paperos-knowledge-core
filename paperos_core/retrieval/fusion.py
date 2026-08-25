@@ -45,12 +45,8 @@ def weighted_rrf(
                 merged[incoming.chunk_id] = candidate
             _merge(candidate, incoming)
             candidate.channel_ranks[channel] = rank
-            candidate.channel_scores[channel] = incoming.channel_scores.get(
-                channel, 0.0
-            )
-            candidate.fused_score += weights.get(channel, 1.0) / (
-                rank_constant + rank
-            )
+            candidate.channel_scores[channel] = incoming.channel_scores.get(channel, 0.0)
+            candidate.fused_score += weights.get(channel, 1.0) / (rank_constant + rank)
     return sorted(
         merged.values(),
         key=lambda item: (-item.fused_score, item.chunk_id),
@@ -67,12 +63,7 @@ def _merge(target: Candidate, incoming: Candidate) -> None:
     target.derived_from_ids = list(
         dict.fromkeys([*target.derived_from_ids, *incoming.derived_from_ids])
     )
-    target.relation_types = list(
-        dict.fromkeys([*target.relation_types, *incoming.relation_types])
-    )
-    target.subject_work_ids = list(
-        dict.fromkeys([*target.subject_work_ids, *incoming.subject_work_ids])
-    )
+    target.relation_types = list(dict.fromkeys([*target.relation_types, *incoming.relation_types]))
     if incoming.source_work_id and not target.source_work_id:
         target.source_work_id = incoming.source_work_id
     if incoming.knowledge_kind != "source_fact":
