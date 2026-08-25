@@ -90,11 +90,14 @@ class RetrievalTrace(BaseModel):
     first_stage_chunk_ids: list[str] = Field(default_factory=list)
     first_reranked_chunk_ids: list[str] = Field(default_factory=list)
     local_expanded_chunk_ids: list[str] = Field(default_factory=list)
+    local_new_chunk_ids: list[str] = Field(default_factory=list)
     semantic_expanded_chunk_ids: list[str] = Field(default_factory=list)
+    semantic_new_chunk_ids: list[str] = Field(default_factory=list)
     seed_chunk_ids: list[str] = Field(default_factory=list)
     relation_types: list[str] = Field(default_factory=list)
     derived_from_ids: list[str] = Field(default_factory=list)
     second_reranked_chunk_ids: list[str] = Field(default_factory=list)
+    second_rerank_candidate_ids: list[str] = Field(default_factory=list)
     final_selected_chunk_ids: list[str] = Field(default_factory=list)
 
 

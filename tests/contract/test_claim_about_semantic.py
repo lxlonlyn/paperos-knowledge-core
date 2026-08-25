@@ -14,11 +14,9 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from paperos_core.adapters.cognee.datapoints import ClaimDataPoint, TripletDataPoint
+from paperos_core.adapters.cognee.datapoints import ClaimDataPoint
 from paperos_core.adapters.cognee.models import (
     _consolidate_relations,
-    _semantic_relations,
-    _triplet_datapoints,
     canonical_to_datapoints,
 )
 from paperos_core.domain.canonical import (
@@ -239,16 +237,14 @@ def about_mapper_contract() -> dict[str, object]:
     for node in claim_nodes:
         _require(node.source_document_id == document.id, "Claim source_document_id missing.")
         _require(node.source_work_id == source_work.id, "Claim source_work_id missing.")
-    about_triplets = [
-        node
-        for node in graph.nodes
-        if isinstance(node, TripletDataPoint) and node.relation_type == "ABOUT"
+    triplet_nodes = [
+        node for node in graph.nodes if type(node).__name__ == "TripletDataPoint"
     ]
-    _require(about_triplets == [], "ABOUT must not produce TripletDataPoint nodes.")
+    _require(triplet_nodes == [], "Removed TripletDataPoint projection reappeared.")
     return {
         "status": "passed",
         "about_edge_count": len(about_edges),
-        "about_triplet_count": 0,
+        "triplet_node_count": 0,
         "source_work_id": source_work.id,
         "external_target_work_id": target_work.id,
         "external_source_work_ne_target": source_work.id != target_work.id,
@@ -287,67 +283,6 @@ def about_dedup_contract() -> dict[str, object]:
         "ABOUT roles merge failed.",
     )
     return {"status": "passed", "deduped_about_count": 1, "roles": edge.roles}
-
-
-def about_no_triplet_contract() -> dict[str, object]:
-    snapshot = _snapshot()
-    relations = [
-        RelationRecord(
-            source_id="claim_1",
-            target_id="work_1",
-            relation_type=RelationType.ABOUT,
-            source_chunk_ids=["chunk_a"],
-            derived_from_ids=["chunk_a"],
-            roles=["subject"],
-        )
-    ]
-    enrichment = SemanticEnrichment(
-        entities=[],
-        claims=[],
-        relations=[],
-        model="contract",
-        provider="contract",
-        model_version="contract",
-        prompt_name="semantic_enrichment",
-        prompt_version="2",
-        prompt_sha256="1" * 64,
-    )
-    # Ensure ABOUT is excluded from searchable triplet generation.
-    nodes: list = []
-    common = {
-        "canonical_snapshot_id": snapshot.id,
-        "source_file_id": "src",
-        "parse_run_id": "parse",
-    }
-    triplets, _links = _triplet_datapoints(
-        CanonicalBundle(
-            snapshot=snapshot,
-            document=_document(snapshot),
-            sections=[],
-            elements=[],
-            references=[],
-        ),
-        nodes,
-        relations,
-        common,
-    )
-    about_triplets = [item for item in triplets if item.relation_type == "ABOUT"]
-    _require(about_triplets == [], "ABOUT leaked into TripletDataPoint generation.")
-    semantic = _semantic_relations(
-        CanonicalBundle(
-            snapshot=snapshot,
-            document=_document(snapshot),
-            sections=[],
-            elements=[],
-            references=[],
-        ),
-        enrichment,
-    )
-    _require(
-        all(item.relation_type is not RelationType.ABOUT for item in semantic),
-        "Empty enrichment unexpectedly produced ABOUT.",
-    )
-    return {"status": "passed", "about_triplet_count": 0}
 
 
 def work_catalog_contract() -> dict[str, object]:
@@ -430,7 +365,6 @@ def main() -> None:
         "work_catalog": work_catalog_contract(),
         "about_mapper": about_mapper_contract(),
         "about_dedup": about_dedup_contract(),
-        "about_no_triplet": about_no_triplet_contract(),
     }
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     if any(section.get("status") != "passed" for section in report.values()):

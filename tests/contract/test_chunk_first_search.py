@@ -8,14 +8,17 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from paperos_core.adapters.cognee import datapoints
 from paperos_core.adapters.cognee.compat import (
     CogneeSemanticRelation,
     _direct_semantic_relations,
+    _vector_groups,
     cognee_uuid,
 )
 from paperos_core.adapters.cognee.llm import _SectionExtractionWithoutClaims
 from paperos_core.domain.canonical import Chunk
 from paperos_core.domain.provenance import SEMANTIC_RELATION_TYPES, RelationType
+from paperos_core.errors import ConfigurationError
 from paperos_core.retrieval.candidates import Candidate, QueryRequest
 from paperos_core.retrieval.evidence import format_evidence
 from paperos_core.retrieval.expansion import (
@@ -23,6 +26,7 @@ from paperos_core.retrieval.expansion import (
     semantic_post_hit_expand,
 )
 from paperos_core.retrieval.fusion import weighted_rrf
+from paperos_core.retrieval.service import RetrievalService
 
 
 def _candidate(chunk_id: str, channel: str, *, candidate_id: str) -> Candidate:
@@ -133,7 +137,7 @@ def test_direct_semantic_operator_rejects_indirect_and_infrastructure_paths() ->
             {
                 "type": "EntityDataPoint",
                 "canonical_id": "entity_a",
-                "source_chunk_ids": [seed_id],
+                "source_chunk_ids": [seed_id, "source_entity_mention"],
             },
         ),
         (
@@ -141,7 +145,7 @@ def test_direct_semantic_operator_rejects_indirect_and_infrastructure_paths() ->
             {
                 "type": "EntityDataPoint",
                 "canonical_id": "entity_b",
-                "source_chunk_ids": ["chunk_target"],
+                "source_chunk_ids": ["target_entity_mention"],
             },
         ),
         (
@@ -181,6 +185,51 @@ def test_direct_semantic_operator_rejects_indirect_and_infrastructure_paths() ->
         for item in relations
     ] == [("entity_a", "USES", "entity_b")]
     assert relations[0].source_chunk_ids == (seed_id, "chunk_target")
+
+
+def test_direct_semantic_operator_requires_relation_level_source_provenance() -> None:
+    seed_id = "chunk_seed"
+    seed_graph_id = str(cognee_uuid(seed_id))
+    nodes = [
+        (seed_graph_id, {"type": "ChunkDataPoint", "canonical_id": seed_id}),
+        (
+            "entity-a",
+            {
+                "type": "EntityDataPoint",
+                "canonical_id": "entity_a",
+                "source_chunk_ids": [seed_id, "source_entity_mention"],
+            },
+        ),
+        (
+            "entity-b",
+            {
+                "type": "EntityDataPoint",
+                "canonical_id": "entity_b",
+                "source_chunk_ids": ["target_entity_mention"],
+            },
+        ),
+    ]
+    diagnostics = {
+        "raw_neighbor_nodes": 0,
+        "filtered_grounded_entities": 0,
+        "filtered_semantic_relations": 0,
+        "missing_relation_source_provenance": 0,
+    }
+    relations = _direct_semantic_relations(
+        nodes,
+        [("entity-a", "entity-b", "USES", {})],
+        seed_chunk_ids={seed_id},
+        relation_types={"USES"},
+        limit=20,
+        diagnostics=diagnostics,
+    )
+    assert relations == []
+    assert diagnostics == {
+        "raw_neighbor_nodes": 3,
+        "filtered_grounded_entities": 1,
+        "filtered_semantic_relations": 0,
+        "missing_relation_source_provenance": 1,
+    }
 
 
 def test_semantic_expansion_is_dataset_scoped_and_rehydrates_canonical_chunks() -> None:
@@ -309,3 +358,137 @@ def test_evidence_rehydrates_canonical_chunk_text() -> None:
     evidence = format_evidence([candidate], corpus)
     assert evidence[0].text == chunk.text
     assert evidence[0].document_id == chunk.document_id
+
+
+def _retrieval_service(*, rerank_enabled: bool) -> RetrievalService:
+    service = object.__new__(RetrievalService)
+    service.config = SimpleNamespace(
+        dataset="dataset_1",
+        retrieval=SimpleNamespace(
+            top_k=2,
+            candidate_pool_size=4,
+            rerank_enabled=rerank_enabled,
+        ),
+    )
+    service.paths = SimpleNamespace()
+    service.canonical_repository = object()
+    service.registry = object()
+    service.scholarly_registry = object()
+    service.search = object()
+    service.compat = object()
+    service.index_manager = SimpleNamespace(lexical=object())
+    service.model_client = object()
+    service.llm = SimpleNamespace(model="test-llm")
+    return service
+
+
+@pytest.mark.parametrize(
+    ("expand_context", "expand_graph"),
+    [(True, False), (False, True)],
+)
+def test_expansion_is_rejected_when_reranker_is_disabled(
+    expand_context: bool, expand_graph: bool
+) -> None:
+    service = _retrieval_service(rerank_enabled=False)
+    with pytest.raises(ConfigurationError, match="requires retrieval.rerank_enabled=true"):
+        asyncio.run(
+            service.query(
+                QueryRequest(
+                    query="test",
+                    expand_context=expand_context,
+                    expand_graph=expand_graph,
+                )
+            )
+        )
+
+
+def _pipeline_corpus() -> SimpleNamespace:
+    return SimpleNamespace(
+        chunks={
+            "chunk_seed": _chunk("chunk_seed", 1, next_="chunk_new"),
+            "chunk_new": _chunk("chunk_new", 2, previous="chunk_seed"),
+        },
+        filtered_document_ids=lambda _ids, _dataset: {"document_1"},
+        document_ids_for_works=lambda _ids: {"document_1"},
+    )
+
+
+def _run_expansion_pipeline(
+    monkeypatch: pytest.MonkeyPatch, expanded: list[Candidate]
+) -> tuple[object, list[list[str]]]:
+    import paperos_core.retrieval.service as service_module
+
+    seed = _candidate("chunk_seed", "lexical", candidate_id="chunk_seed")
+    service = _retrieval_service(rerank_enabled=True)
+    rerank_inputs: list[list[str]] = []
+
+    async def rerank(
+        _query: str, candidates: list[Candidate], *, limit: int
+    ) -> list[Candidate]:
+        rerank_inputs.append([item.chunk_id for item in candidates])
+        return candidates[:limit]
+
+    async def no_vector(*_args: object, **_kwargs: object) -> list[Candidate]:
+        return []
+
+    async def answer(*_args: object, **_kwargs: object) -> str:
+        return "grounded answer"
+
+    service._rerank = rerank  # type: ignore[method-assign]
+    monkeypatch.setattr(service_module.CorpusView, "load", lambda *_args: _pipeline_corpus())
+    monkeypatch.setattr(service_module, "lexical_retrieve", lambda *_args, **_kwargs: [seed])
+    monkeypatch.setattr(service_module, "semantic_retrieve", no_vector)
+    monkeypatch.setattr(
+        service_module, "local_neighbor_expand", lambda *_args, **_kwargs: expanded
+    )
+    monkeypatch.setattr(service_module, "format_evidence", lambda *_args: [])
+    monkeypatch.setattr(service_module, "synthesize_answer", answer)
+    response = asyncio.run(
+        service.query(QueryRequest(query="test", expand_context=True, top_k=2))
+    )
+    return response, rerank_inputs
+
+
+def test_new_expanded_chunk_enters_second_rerank_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expanded = [_candidate("chunk_new", "local_expansion", candidate_id="chunk_new")]
+    response, rerank_inputs = _run_expansion_pipeline(monkeypatch, expanded)
+    assert rerank_inputs == [["chunk_seed"], ["chunk_seed", "chunk_new"]]
+    assert response.trace.local_new_chunk_ids == ["chunk_new"]
+    assert response.trace.second_rerank_candidate_ids == ["chunk_seed", "chunk_new"]
+    assert "second_rerank" in response.stages
+
+
+def test_duplicate_only_expansion_skips_second_rerank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    duplicate = [_candidate("chunk_seed", "local_expansion", candidate_id="duplicate")]
+    response, rerank_inputs = _run_expansion_pipeline(monkeypatch, duplicate)
+    assert rerank_inputs == [["chunk_seed"]]
+    assert response.trace.local_new_chunk_ids == []
+    assert response.trace.second_rerank_candidate_ids == []
+    assert "second_rerank" not in response.stages
+
+
+def test_only_chunk_datapoints_declare_vector_indexes() -> None:
+    indexed = {
+        name: model.model_fields["metadata"].default["index_fields"]
+        for name, model in vars(datapoints).items()
+        if isinstance(model, type)
+        and issubclass(model, datapoints.PaperOSGraphDataPoint)
+        and "metadata" in model.model_fields
+        and model.model_fields["metadata"].default["index_fields"]
+    }
+    assert indexed == {"ChunkDataPoint": ["text"]}
+    assert not hasattr(datapoints, "TripletDataPoint")
+    assert "TRIPLET_SOURCE" not in RelationType.__members__
+    assert "TRIPLET_TARGET" not in RelationType.__members__
+
+    chunk_node_type = type("ChunkDataPoint", (), {})
+    chunk_node = chunk_node_type()
+    chunk_node.metadata = {"index_fields": ["text"]}
+    chunk_node.text = "canonical chunk"
+    graph = SimpleNamespace(nodes=[chunk_node])
+    # The production collection contract remains the Chunk text collection.
+    assert set(_vector_groups(graph)) == {"ChunkDataPoint_text"}

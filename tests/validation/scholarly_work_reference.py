@@ -216,7 +216,7 @@ def _stored_graph_contract(
     latest = _latest_bundles(application)
     corpus_work_ids = set(signature["work_ids"].values())
     observed: set[tuple[str, str, str]] = set()
-    triplet_backbone_count = 0
+    triplet_node_count = 0
     fake_external = []
     work_nodes: set[str] = set()
     for bundle in latest.values():
@@ -227,11 +227,8 @@ def _stored_graph_contract(
         for node in graph.get("nodes", []):
             if not isinstance(node, dict):
                 continue
-            if (
-                node.get("__type__") == "TripletDataPoint"
-                and node.get("relation_type") in BACKBONE_RELATIONS
-            ):
-                triplet_backbone_count += 1
+            if node.get("__type__") == "TripletDataPoint":
+                triplet_node_count += 1
             if node.get("__type__") != "ScholarlyWorkDataPoint":
                 continue
             canonical_id = str(node.get("canonical_id") or "")
@@ -287,7 +284,7 @@ def _stored_graph_contract(
         "work_node_ids": sorted(work_nodes),
         "backbone_edges": [list(item) for item in sorted(observed)],
         "backbone_records": [unique_records[key] for key in sorted(unique_records)],
-        "triplet_backbone_count": triplet_backbone_count,
+        "triplet_node_count": triplet_node_count,
         "fake_external_provenance": fake_external,
     }
 
@@ -571,8 +568,8 @@ def _validate_final(
             )
     report["reference_resolution"] = resolutions
 
-    if stored["triplet_backbone_count"]:
-        _record_failure(report, "Backbone edges were duplicated as TripletDataPoints.")
+    if stored["triplet_node_count"]:
+        _record_failure(report, "Removed TripletDataPoint projection is still stored.")
     if stored["fake_external_provenance"]:
         _record_failure(
             report, "Stored external Work contains fake canonical provenance."
@@ -960,7 +957,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         )
         report["cognee"] = {
             **after_live,
-            "stored_triplet_backbone_count": after_stored["triplet_backbone_count"],
+            "stored_triplet_node_count": after_stored["triplet_node_count"],
         }
         report["resolution_diagnostics"] = _resolution_diagnostics(
             application,

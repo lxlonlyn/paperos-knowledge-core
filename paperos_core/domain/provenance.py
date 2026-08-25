@@ -27,8 +27,6 @@ class RelationType(StrEnum):
     EVALUATES_ON = "EVALUATES_ON"
     PROPOSES = "PROPOSES"
     RELATED_TO = "RELATED_TO"
-    TRIPLET_SOURCE = "TRIPLET_SOURCE"
-    TRIPLET_TARGET = "TRIPLET_TARGET"
 
 
 SEMANTIC_RELATION_TYPES: frozenset[RelationType] = frozenset(

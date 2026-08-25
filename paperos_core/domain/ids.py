@@ -19,7 +19,6 @@ CLEANING_VERSION = "1"
 CLASSIFICATION_VERSION = "1"
 CHUNKING_VERSION = "5"
 REFERENCE_PROCESSING_VERSION = "1"
-KNOWLEDGE_TRIPLET_ID_VERSION = "1"
 QUERY_RESPONSE_ID_VERSION = "1"
 SCHOLARLY_WORK_SCHEMA_VERSION = "1.0"
 SCHOLARLY_WORK_ID_VERSION = "1"
@@ -234,26 +233,5 @@ def semantic_object_id(
         canonical_snapshot_id_value,
         content,
         *sorted(source_ids),
-        id_version=id_version,
-    )
-
-
-def knowledge_triplet_id(
-    canonical_snapshot_id_value: str,
-    source_id: str,
-    relation_type: str,
-    target_id: str,
-    source_chunk_ids: list[str],
-    *,
-    id_version: str = KNOWLEDGE_TRIPLET_ID_VERSION,
-) -> str:
-    """Identify one versioned, searchable projection of a typed graph edge."""
-    return stable_id(
-        "triplet",
-        canonical_snapshot_id_value,
-        source_id,
-        relation_type,
-        target_id,
-        *sorted(source_chunk_ids),
         id_version=id_version,
     )

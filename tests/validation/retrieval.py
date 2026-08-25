@@ -17,6 +17,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 from paperos_core.application import create_application
 from paperos_core.config import load_settings
 from paperos_core.domain.provenance import SEMANTIC_RELATION_TYPES, RelationType
+from paperos_core.errors import ConfigurationError
 from paperos_core.retrieval.candidates import QueryRequest, QueryResponse
 from paperos_core.retrieval.corpus import CorpusView
 from paperos_core.retrieval.expansion import (
@@ -99,6 +100,8 @@ def _response_review(
     facts_by_id: dict[str, dict[str, Any]],
     all_document_ids: set[str],
 ) -> dict[str, Any]:
+    local_requested = bool(case["expansion"]["local"])
+    semantic_requested = bool(case["expansion"]["semantic"])
     source_work_ids = list(
         dict.fromkeys(
             item.source_work_id for item in response.evidence if item.source_work_id is not None
@@ -136,15 +139,44 @@ def _response_review(
     architecture_ok = (
         _REQUIRED_STAGES.issubset(response.stages)
         and not _FORBIDDEN_SEARCH_STAGES.intersection(response.stages)
-        and "semantic_relation_expansion" not in response.stages
-        and "local_post_hit_expansion" not in response.stages
+        and ("semantic_relation_expansion" in response.stages) == semantic_requested
+        and ("local_post_hit_expansion" in response.stages) == local_requested
     )
+    local_new = response.trace.local_new_chunk_ids
+    semantic_new = response.trace.semantic_new_chunk_ids
+    new_ids = list(dict.fromkeys([*local_new, *semantic_new]))
+    second_candidates = response.trace.second_rerank_candidate_ids
+    entered_second_rerank = [item for item in new_ids if item in second_candidates]
+    second_rerank_executed = "second_rerank" in response.stages
+    if local_requested:
+        expansion_status = (
+            "PASS"
+            if local_new
+            and set(local_new).issubset(entered_second_rerank)
+            and second_rerank_executed
+            else "FAIL"
+        )
+    elif semantic_requested:
+        if semantic_new:
+            expansion_status = (
+                "PASS"
+                if set(semantic_new).issubset(entered_second_rerank)
+                and second_rerank_executed
+                else "FAIL"
+            )
+        elif response.trace.semantic_expanded_chunk_ids:
+            expansion_status = "NO_NEW_CHUNK"
+        else:
+            expansion_status = "NO_CASE"
+    else:
+        expansion_status = "NOT_REQUESTED"
     passed = (
         source_ok
         and bool(matched_facts)
         and natural_language_unfiltered
         and architecture_ok
         and bool(response.answer.strip())
+        and expansion_status != "FAIL"
     )
     status = "PASS" if passed else ("FAIL" if case.get("hard") else "WARN")
     return {
@@ -158,6 +190,20 @@ def _response_review(
         ),
         "first_stage_top_chunk_ids": response.trace.first_stage_chunk_ids,
         "first_reranked_chunk_ids": response.trace.first_reranked_chunk_ids,
+        "first_reranked_chunk_count": len(response.trace.first_reranked_chunk_ids),
+        "local_expanded_chunk_ids": response.trace.local_expanded_chunk_ids,
+        "local_expanded_chunk_count": len(response.trace.local_expanded_chunk_ids),
+        "local_new_chunk_ids": local_new,
+        "local_new_chunk_count": len(local_new),
+        "semantic_expanded_chunk_ids": response.trace.semantic_expanded_chunk_ids,
+        "semantic_expanded_chunk_count": len(response.trace.semantic_expanded_chunk_ids),
+        "semantic_new_chunk_ids": semantic_new,
+        "semantic_new_chunk_count": len(semantic_new),
+        "second_rerank_executed": second_rerank_executed,
+        "second_rerank_candidate_ids": second_candidates,
+        "second_rerank_candidate_count": len(second_candidates),
+        "expanded_chunk_ids_entered_second_rerank": entered_second_rerank,
+        "expansion_integration_status": expansion_status,
         "final_evidence_chunk_ids": [item.chunk_id for item in response.evidence],
         "source_work_ids": source_work_ids,
         "source_work_symbols": source_symbols,
@@ -206,7 +252,14 @@ def _local_probes(
             list(probe["seed_anchor_any_of"]),
         )
         if anchor is None:
-            reviews.append({**probe, "status": "FAIL", "error": "seed not found"})
+            reviews.append(
+                {
+                    **probe,
+                    "status": "FAIL",
+                    "boundary_guard_status": "FAIL",
+                    "error": "seed not found",
+                }
+            )
             continue
         seed = corpus.candidate_for_chunk(
             anchor.id,
@@ -235,6 +288,16 @@ def _local_probes(
             eligible_ids
         )
         blocked_ids = [chunk_id for chunk_id in adjacent_ids if chunk_id not in eligible_ids]
+        operator_status = (
+            "PASS"
+            if constraints_ok and eligible_ids
+            else ("NO_NEW_CHUNK" if constraints_ok else "FAIL")
+        )
+        boundary_status = (
+            "PASS"
+            if constraints_ok and blocked_ids
+            else ("NOT_APPLICABLE" if constraints_ok else "FAIL")
+        )
         reviews.append(
             {
                 "id": probe["id"],
@@ -252,13 +315,23 @@ def _local_probes(
                     if not eligible_ids
                     else "Expansion exactly matches the eligible canonical ±1 neighbors."
                 ),
-                "status": "PASS" if constraints_ok else "FAIL",
+                "status": operator_status,
+                "boundary_guard_status": boundary_status,
             }
         )
     return {
-        "status": "PASS"
-        if reviews and all(item["status"] == "PASS" for item in reviews)
-        else "FAIL",
+        "status": (
+            "PASS"
+            if any(item["status"] == "PASS" for item in reviews)
+            and not any(item["status"] == "FAIL" for item in reviews)
+            else "FAIL"
+        ),
+        "boundary_guard_status": (
+            "PASS"
+            if any(item["boundary_guard_status"] == "PASS" for item in reviews)
+            and not any(item["boundary_guard_status"] == "FAIL" for item in reviews)
+            else "FAIL"
+        ),
         "probes": reviews,
     }
 
@@ -327,6 +400,9 @@ async def _semantic_probes(
                         )
                     ),
                     "dataset_name": dataset_name,
+                    "performance_trace": dict(
+                        application.knowledge_pipeline.compat.last_semantic_relation_trace
+                    ),
                     "status": status,
                 }
             )
@@ -646,11 +722,14 @@ def _markdown(report: dict[str, Any]) -> str:
         "explicit_filter",
         "claim_off",
         "local_expansion",
+        "local_boundary_guard",
         "semantic_relation_expansion",
         "citation_provenance",
         "incoming_cites_query",
         "source_grounding",
         "structure_provenance",
+        "expansion_requires_reranker",
+        "vector_index_scope",
     ):
         lines.append(f"- {key}: **{report[key]['status']}**")
     lines.extend(["", "## Query cases", ""])
@@ -664,6 +743,20 @@ def _markdown(report: dict[str, Any]) -> str:
                 "- Explicit filters: " + json.dumps(review["explicit_filters"], ensure_ascii=False),
                 "- First-stage Chunks: " + ", ".join(review["first_stage_top_chunk_ids"][:12]),
                 "- First-reranked Chunks: " + ", ".join(review["first_reranked_chunk_ids"][:12]),
+                (
+                    "- Local expanded/new: "
+                    f"{review['local_expanded_chunk_count']}/{review['local_new_chunk_count']}"
+                ),
+                (
+                    "- Semantic expanded/new: "
+                    f"{review['semantic_expanded_chunk_count']}/"
+                    f"{review['semantic_new_chunk_count']}"
+                ),
+                "- Second-rerank candidates: "
+                + ", ".join(review["second_rerank_candidate_ids"][:12]),
+                "- Expanded Chunks entering second rerank: "
+                + ", ".join(review["expanded_chunk_ids_entered_second_rerank"]),
+                f"- Expansion integration: {review['expansion_integration_status']}",
                 "- Final Evidence Chunks: " + ", ".join(review["final_evidence_chunk_ids"]),
                 "- Source Works: " + ", ".join(review["source_work_symbols"]),
                 "- Matched facts: " + ", ".join(review["matched_ground_truth_fact_ids"]),
@@ -727,6 +820,16 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.rebuild and runtime_root.exists():
         shutil.rmtree(runtime_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    rebuild_review_path = output_root / "review" / "derived_rebuild.json"
+    previous_acceptance_path = output_root / "acceptance.json"
+    previous_acceptance = (
+        _read_json(previous_acceptance_path) if previous_acceptance_path.is_file() else {}
+    )
+    retained_rebuild_review = (
+        _read_json(rebuild_review_path)
+        if rebuild_review_path.is_file()
+        else previous_acceptance.get("derived_rebuild")
+    )
 
     corpus_spec = _read_json(config_root / "corpus_spec.json")
     papers_config = _read_json(config_root / "papers.json")
@@ -786,6 +889,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             work_by_symbol[symbol] = work.id
             document_by_symbol[symbol] = document_id
 
+        rebuild_report = None
+        if args.rebuild_derived:
+            rebuild_report = await application.services.rebuilder.rebuild()
+            retained_rebuild_review = rebuild_report.public_dict()
+            _write_json(rebuild_review_path, retained_rebuild_review)
+
         symbolic_by_work = {work_id: symbol for symbol, work_id in work_by_symbol.items()}
         corpus = CorpusView.load(
             application.paths,
@@ -803,26 +912,88 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             request = QueryRequest(
                 query=case["query"],
                 dataset=args.dataset,
+                top_k=case.get("top_k"),
                 work_ids=work_ids,
                 expand_context=bool(case["expansion"]["local"]),
                 expand_graph=bool(case["expansion"]["semantic"]),
             )
-            response = await application.services.retrieval.query(request)
-            responses.append(response)
-            query_reviews.append(
-                _response_review(
-                    case,
-                    request,
-                    response,
-                    symbolic_by_work=symbolic_by_work,
-                    facts_by_id=facts_by_id,
-                    all_document_ids=all_document_ids,
+            retrieval_service = application.services.retrieval
+            original_config = retrieval_service.config
+            acceptance_pool_size = case.get("acceptance_candidate_pool_size")
+            if acceptance_pool_size is not None:
+                retrieval_service.config = original_config.model_copy(
+                    update={
+                        "retrieval": original_config.retrieval.model_copy(
+                            update={"candidate_pool_size": int(acceptance_pool_size)}
+                        )
+                    }
                 )
+            try:
+                response = await retrieval_service.query(request)
+            finally:
+                retrieval_service.config = original_config
+            responses.append(response)
+            review = _response_review(
+                case,
+                request,
+                response,
+                symbolic_by_work=symbolic_by_work,
+                facts_by_id=facts_by_id,
+                all_document_ids=all_document_ids,
             )
+            review["acceptance_candidate_pool_size"] = acceptance_pool_size
+            if case["expansion"]["semantic"]:
+                review["semantic_performance_trace"] = dict(
+                    application.knowledge_pipeline.compat.last_semantic_relation_trace
+                )
+            query_reviews.append(review)
+
+        reranker_rejections: list[dict[str, Any]] = []
+        retrieval_service = application.services.retrieval
+        original_config = retrieval_service.config
+        retrieval_service.config = original_config.model_copy(
+            update={
+                "retrieval": original_config.retrieval.model_copy(
+                    update={"rerank_enabled": False}
+                )
+            }
+        )
+        try:
+            for expansion_field in ("expand_context", "expand_graph"):
+                try:
+                    await retrieval_service.query(
+                        QueryRequest(query="reranker invariant", **{expansion_field: True})
+                    )
+                except ConfigurationError as exc:
+                    reranker_rejections.append(
+                        {
+                            "request": expansion_field,
+                            "error_code": exc.code,
+                            "message": exc.message,
+                            "status": "PASS",
+                        }
+                    )
+                else:
+                    reranker_rejections.append(
+                        {"request": expansion_field, "status": "FAIL"}
+                    )
+        finally:
+            retrieval_service.config = original_config
+        reranker_invariant = {
+            "status": (
+                "PASS"
+                if len(reranker_rejections) == 2
+                and all(item["status"] == "PASS" for item in reranker_rejections)
+                else "FAIL"
+            ),
+            "rule": "Expansion requests are rejected unless reranking is enabled.",
+            "cases": reranker_rejections,
+        }
 
         nodes, relations = _graph_records(application.paths.cognee / "graphs")
         claim_count = sum(item.get("__type__") == "ClaimDataPoint" for item in nodes)
         about_count = sum(item.get("relation_type") == RelationType.ABOUT for item in relations)
+        triplet_count = sum(item.get("__type__") == "TripletDataPoint" for item in nodes)
         local = _local_probes(
             ground_truth["operator_probes"]["local"],
             corpus,
@@ -851,6 +1022,68 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             corpus,
             work_by_symbol,
         )
+        vector_runtime = await application.knowledge_pipeline.compat.vector_status(
+            dataset_name=args.dataset
+        )
+        vector_collections = dict(vector_runtime.get("collections") or {})
+        paperos_vector_collections = sorted(
+            name for name in vector_collections if "DataPoint_" in name
+        )
+        vector_scope = {
+            "status": (
+                "PASS"
+                if paperos_vector_collections == ["ChunkDataPoint_text"]
+                else "FAIL"
+            ),
+            "paperos_collections": paperos_vector_collections,
+            "all_runtime_collections": vector_collections,
+            "production_consumers": {
+                "ChunkDataPoint_text": [
+                    "CogneeSearchAdapter.search_chunks",
+                    "semantic_retrieve",
+                ]
+            },
+        }
+        local_query_reviews = [
+            item for item in query_reviews if item["mode"] == "local_expansion"
+        ]
+        semantic_query_reviews = [
+            item for item in query_reviews if item["mode"] == "semantic_expansion"
+        ]
+        local_e2e_status = (
+            "PASS"
+            if local_query_reviews
+            and all(
+                item["expansion_integration_status"] == "PASS"
+                for item in local_query_reviews
+            )
+            else "FAIL"
+        )
+        semantic_e2e_statuses = [
+            item["expansion_integration_status"] for item in semantic_query_reviews
+        ]
+        semantic_e2e_status = (
+            "FAIL"
+            if not semantic_e2e_statuses or "FAIL" in semantic_e2e_statuses
+            else (
+                "PASS"
+                if "PASS" in semantic_e2e_statuses
+                else (
+                    "NO_NEW_CHUNK"
+                    if "NO_NEW_CHUNK" in semantic_e2e_statuses
+                    else "NO_CASE"
+                )
+            )
+        )
+        local["end_to_end_status"] = local_e2e_status
+        local["status"] = (
+            "PASS"
+            if local["status"] == "PASS" and local_e2e_status == "PASS"
+            else "FAIL"
+        )
+        semantic["end_to_end_status"] = semantic_e2e_status
+        if semantic_e2e_status == "FAIL":
+            semantic["status"] = "FAIL"
         default_hard = [
             item for item in query_reviews if item["mode"] == "default" and item["hard"]
         ]
@@ -888,17 +1121,26 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "default_search": {"status": default_status},
             "explicit_filter": {"status": explicit_status},
             "claim_off": {
-                "status": ("PASS" if claim_count == 0 and about_count == 0 else "FAIL"),
+                "status": (
+                    "PASS"
+                    if claim_count == 0 and about_count == 0 and triplet_count == 0
+                    else "FAIL"
+                ),
                 "prompt_name": "semantic_enrichment_without_claims",
                 "claim_count": claim_count,
                 "about_edge_count": about_count,
+                "triplet_node_count": triplet_count,
             },
             "local_expansion": local,
+            "local_boundary_guard": {"status": local["boundary_guard_status"]},
             "semantic_relation_expansion": semantic,
             "citation_provenance": citation,
             "incoming_cites_query": incoming,
             "source_grounding": {"status": grounding_status},
             "structure_provenance": structure,
+            "expansion_requires_reranker": reranker_invariant,
+            "vector_index_scope": vector_scope,
+            "derived_rebuild": retained_rebuild_review,
             "queries": query_reviews,
             "counts": {
                 "ingested_papers": len(ingestion_results),
@@ -907,6 +1149,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 "graph_relations": len(relations),
                 "claims": claim_count,
                 "about_edges": about_count,
+                "triplet_nodes": triplet_count,
                 "cites_edges": sum(
                     item.get("relation_type") == RelationType.CITES for item in relations
                 ),
@@ -925,11 +1168,14 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 "explicit_filter",
                 "claim_off",
                 "local_expansion",
+                "local_boundary_guard",
                 "semantic_relation_expansion",
                 "citation_provenance",
                 "incoming_cites_query",
                 "source_grounding",
                 "structure_provenance",
+                "expansion_requires_reranker",
+                "vector_index_scope",
             )
         ]
         report["overall_status"] = (
@@ -948,8 +1194,14 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         _write_json(output_root / "review" / "structure.json", structure)
         _write_json(
             output_root / "review" / "expansions.json",
-            {"local": local, "semantic": semantic},
+            {
+                "local": local,
+                "local_boundary_guard": report["local_boundary_guard"],
+                "semantic": semantic,
+                "expansion_requires_reranker": report["expansion_requires_reranker"],
+            },
         )
+        _write_json(output_root / "review" / "vector_scope.json", vector_scope)
         report["result_zip"] = str(_package_review(output_root))
         _write_json(output_root / "acceptance.json", report)
         _package_review(output_root)
@@ -990,6 +1242,11 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=_DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--dataset", default="search_graph_acceptance")
     parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument(
+        "--rebuild-derived",
+        action="store_true",
+        help="Rebuild graph/vector/lexical projections while reusing retained enrichment.",
+    )
     args = parser.parse_args()
     try:
         report = asyncio.run(run(args))

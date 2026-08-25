@@ -151,6 +151,12 @@ class CogneeCompatibilityAdapter:
         self.paths = paths
         self.manifest_root = paths.cognee / "manifests"
         self.retrieval_fallback_types_used: set[str] = set()
+        self.last_semantic_relation_trace: dict[str, int] = {
+            "raw_neighbor_nodes": 0,
+            "filtered_grounded_entities": 0,
+            "filtered_semantic_relations": 0,
+            "missing_relation_source_provenance": 0,
+        }
 
     async def _dataset_scope(self, dataset_name: str) -> Any:
         """Return Cognee's dataset/user context manager for scoped readback."""
@@ -891,6 +897,12 @@ class CogneeCompatibilityAdapter:
         paths are never traversed. Private graph access remains dataset-scoped
         inside this compatibility boundary.
         """
+        self.last_semantic_relation_trace = {
+            "raw_neighbor_nodes": 0,
+            "filtered_grounded_entities": 0,
+            "filtered_semantic_relations": 0,
+            "missing_relation_source_provenance": 0,
+        }
         if not chunk_ids or not relation_types or limit <= 0:
             return []
         central_types = {item.value for item in SEMANTIC_RELATION_TYPES}
@@ -929,6 +941,7 @@ class CogneeCompatibilityAdapter:
             seed_chunk_ids=set(seeds),
             relation_types=relation_types,
             limit=limit,
+            diagnostics=self.last_semantic_relation_trace,
         )
 
     async def incoming_typed_relations(
@@ -1108,6 +1121,7 @@ def _direct_semantic_relations(
     seed_chunk_ids: set[str],
     relation_types: set[str],
     limit: int,
+    diagnostics: dict[str, int] | None = None,
 ) -> list[CogneeSemanticRelation]:
     """Apply the fixed grounded-Entity/direct-semantic-edge operator."""
     node_properties = {
@@ -1140,6 +1154,10 @@ def _direct_semantic_relations(
         ):
             grounded_node_ids.add(source_key)
 
+    if diagnostics is not None:
+        diagnostics["raw_neighbor_nodes"] = len(node_properties)
+        diagnostics["filtered_grounded_entities"] = len(grounded_node_ids)
+
     results: list[CogneeSemanticRelation] = []
     seen: set[tuple[str, str, str]] = set()
     for source_id, target_id, relation_type, raw_properties in edges:
@@ -1166,16 +1184,10 @@ def _direct_semantic_relations(
         if key in seen:
             continue
         seen.add(key)
-        chunk_ids = tuple(
-            dict.fromkeys(
-                [
-                    *_string_list(properties.get("source_chunk_ids")),
-                    *_node_source_chunk_ids(source),
-                    *_node_source_chunk_ids(target),
-                ]
-            )
-        )
+        chunk_ids = tuple(dict.fromkeys(_string_list(properties.get("source_chunk_ids"))))
         if not chunk_ids:
+            if diagnostics is not None:
+                diagnostics["missing_relation_source_provenance"] += 1
             continue
         grounded_object_ids = tuple(
             canonical_id
@@ -1212,6 +1224,8 @@ def _direct_semantic_relations(
             item.target_canonical_id,
         )
     )
+    if diagnostics is not None:
+        diagnostics["filtered_semantic_relations"] = len(results)
     return results[:limit]
 
 

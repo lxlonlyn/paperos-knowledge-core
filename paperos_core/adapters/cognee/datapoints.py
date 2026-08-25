@@ -31,7 +31,7 @@ class ScholarlyWorkDataPoint(PaperOSGraphDataPoint):
     authors: list[str] = Field(default_factory=list)
     identity_status: str
     identity_confidence: float
-    metadata: dict[str, Any] = {"index_fields": ["title"]}  # noqa: RUF012
+    metadata: dict[str, Any] = {"index_fields": []}  # noqa: RUF012
 
 
 class DocumentDataPoint(CanonicalBackedDataPoint):
@@ -41,7 +41,7 @@ class DocumentDataPoint(CanonicalBackedDataPoint):
     language: str
     doi: str | None = None
     year: int | None = None
-    metadata: dict[str, Any] = {"index_fields": ["title"]}  # noqa: RUF012
+    metadata: dict[str, Any] = {"index_fields": []}  # noqa: RUF012
 
 
 class SectionDataPoint(CanonicalBackedDataPoint):
@@ -49,7 +49,7 @@ class SectionDataPoint(CanonicalBackedDataPoint):
     title: str
     path: str
     level: int
-    metadata: dict[str, Any] = {"index_fields": ["title"]}  # noqa: RUF012
+    metadata: dict[str, Any] = {"index_fields": []}  # noqa: RUF012
 
 
 class ChunkDataPoint(CanonicalBackedDataPoint):
@@ -87,7 +87,7 @@ class EntityDataPoint(CanonicalBackedDataPoint):
     description: str | None = None
     status: str
     confidence: float | None = None
-    metadata: dict[str, Any] = {"index_fields": ["name", "description"]}  # noqa: RUF012
+    metadata: dict[str, Any] = {"index_fields": []}  # noqa: RUF012
 
 
 class ClaimDataPoint(CanonicalBackedDataPoint):
@@ -97,7 +97,7 @@ class ClaimDataPoint(CanonicalBackedDataPoint):
     confidence: float | None = None
     source_document_id: str | None = None
     source_work_id: str | None = None
-    metadata: dict[str, Any] = {"index_fields": ["text"]}  # noqa: RUF012
+    metadata: dict[str, Any] = {"index_fields": []}  # noqa: RUF012
 
 
 class ConceptRelationDataPoint(CanonicalBackedDataPoint):
@@ -107,14 +107,4 @@ class ConceptRelationDataPoint(CanonicalBackedDataPoint):
     description: str | None = None
     status: str
     confidence: float | None = None
-    metadata: dict[str, Any] = {"index_fields": ["description"]}  # noqa: RUF012
-
-
-class TripletDataPoint(CanonicalBackedDataPoint):
-    """Searchable typed-edge node with canonical provenance."""
-
-    relation_type: str
-    source_object_id: str
-    target_object_id: str
-    text: str
-    metadata: dict[str, Any] = {"index_fields": ["text"]}  # noqa: RUF012
+    metadata: dict[str, Any] = {"index_fields": []}  # noqa: RUF012

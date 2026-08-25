@@ -7,6 +7,7 @@ from paperos_core.adapters.cognee.llm import LLMClient
 from paperos_core.adapters.cognee.search import CogneeSearchAdapter
 from paperos_core.config import RuntimeSettings
 from paperos_core.domain.ids import QUERY_RESPONSE_ID_VERSION, stable_id
+from paperos_core.errors import ConfigurationError
 from paperos_core.indexes.manager import IndexManager
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.registry import SourceRegistry
@@ -63,6 +64,17 @@ class RetrievalService:
         self.llm = llm
 
     async def query(self, request: QueryRequest) -> QueryResponse:
+        if (request.expand_context or request.expand_graph) and not (
+            self.config.retrieval.rerank_enabled
+        ):
+            raise ConfigurationError(
+                "Post-hit expansion requires retrieval.rerank_enabled=true.",
+                details={
+                    "expand_context": request.expand_context,
+                    "expand_graph": request.expand_graph,
+                    "rerank_enabled": False,
+                },
+            )
         dataset_name = (request.dataset or self.config.dataset).strip()
         request = request.model_copy(update={"dataset": dataset_name})
         corpus = CorpusView.load(
@@ -127,12 +139,20 @@ class RetrievalService:
             stages.append("semantic_relation_expansion")
 
         expanded = deduplicate_candidates_by_chunk([*local_expanded, *semantic_expanded])
+        local_new = [item for item in local_expanded if item.chunk_id not in first_stage_ids]
+        semantic_new = [
+            item for item in semantic_expanded if item.chunk_id not in first_stage_ids
+        ]
         genuinely_new = [item for item in expanded if item.chunk_id not in first_stage_ids]
+        second_rerank_candidates: list[Candidate] = []
         if genuinely_new:
-            merged = deduplicate_candidates_by_chunk([*first_reranked, *genuinely_new])
-            reranked = await self._rerank(request.query, merged, limit=pool_size)
-            if self.config.retrieval.rerank_enabled:
-                stages.append("second_rerank")
+            second_rerank_candidates = deduplicate_candidates_by_chunk(
+                [*first_reranked, *genuinely_new]
+            )
+            reranked = await self._rerank(
+                request.query, second_rerank_candidates, limit=pool_size
+            )
+            stages.append("second_rerank")
         else:
             reranked = first_reranked
 
@@ -151,7 +171,9 @@ class RetrievalService:
             first_stage_chunk_ids=first_stage_chunk_ids,
             first_reranked_chunk_ids=[item.chunk_id for item in first_reranked],
             local_expanded_chunk_ids=[item.chunk_id for item in local_expanded],
+            local_new_chunk_ids=[item.chunk_id for item in local_new],
             semantic_expanded_chunk_ids=[item.chunk_id for item in semantic_expanded],
+            semantic_new_chunk_ids=[item.chunk_id for item in semantic_new],
             seed_chunk_ids=[item.chunk_id for item in seeds],
             relation_types=list(
                 dict.fromkeys(
@@ -166,6 +188,9 @@ class RetrievalService:
             second_reranked_chunk_ids=(
                 [item.chunk_id for item in reranked] if genuinely_new else []
             ),
+            second_rerank_candidate_ids=[
+                item.chunk_id for item in second_rerank_candidates
+            ],
             final_selected_chunk_ids=[item.chunk_id for item in selected],
         )
         response = QueryResponse(
