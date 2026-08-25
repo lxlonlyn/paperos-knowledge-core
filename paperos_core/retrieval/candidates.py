@@ -71,6 +71,8 @@ class Evidence(BaseModel):
     source_file_id: str
     source_filename: str
     title: str
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
     section_path: str | None = None
     page_start: int | None = None
     page_end: int | None = None
@@ -79,6 +81,15 @@ class Evidence(BaseModel):
     knowledge_kind: str
     derived_from_ids: list[str]
     source_work_id: str | None = None
+
+
+class QueryReplay(BaseModel):
+    """Portable representation of the exact final synthesis input."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    original_query: str
+    replay_text: str
 
 
 class RetrievalTrace(BaseModel):
@@ -112,6 +123,7 @@ class QueryResponse(BaseModel):
     stages: list[str]
     channels_used: list[str]
     evidence: list[Evidence]
+    replay: QueryReplay
     candidates: list[Candidate]
     distinct_documents: int
     provenance_complete: bool

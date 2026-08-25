@@ -243,7 +243,10 @@ Query
 -> optional explicit local/citation/graph post-hit expansion
 -> chunk_id deduplication and a second rerank when new Chunks were added
 -> canonical source-grounded Evidence
--> LLM synthesis
+-> FinalSynthesisContext
+-> one rendered Markdown synthesis prompt
+   |-> LLM synthesis -> answer
+   `-> QueryReplay.replay_text
 ```
 
 Only caller-provided document/work IDs are hard filters. There is no QueryScope
@@ -253,6 +256,10 @@ inside the same document region and major section. Graph expansion is
 ``Chunk -> typed graph -> source_chunk_ids -> Chunk``; the query itself never
 searches graph nodes. Derived text can aid discovery/provenance but never becomes
 paper evidence. Evidence is always rehydrated from the current ChunkProjection.
+The final synthesis renderer preserves the caller's original query, Evidence
+ordering, canonical `Chunk.text`, and available paper provenance. Its rendered
+prompt is both the exact LLM user input and the production Query Replay; Replay
+does not rerender, persist queries, or trigger another search or model call.
 
 Claim enrichment is optional and disabled by default. The disabled path uses a
 prompt and response schema with no Claim output field, creates no ClaimDataPoint

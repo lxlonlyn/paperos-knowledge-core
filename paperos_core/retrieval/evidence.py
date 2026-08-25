@@ -20,6 +20,8 @@ def format_evidence(candidates: list[Candidate], corpus: CorpusView) -> list[Evi
                 source_file_id=bundle.document.source_file_id,
                 source_filename=corpus.source_filenames[bundle.document.source_file_id],
                 title=bundle.document.title,
+                authors=[author.display_name for author in bundle.document.authors],
+                year=bundle.document.year,
                 section_path=chunk.section_path,
                 page_start=chunk.page_start,
                 page_end=chunk.page_end,

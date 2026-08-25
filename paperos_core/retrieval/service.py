@@ -15,6 +15,7 @@ from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
 from paperos_core.paths import DataPaths
 from paperos_core.retrieval.candidates import (
     Candidate,
+    QueryReplay,
     QueryRequest,
     QueryResponse,
     RetrievalTrace,
@@ -32,7 +33,11 @@ from paperos_core.retrieval.fusion import (
 from paperos_core.retrieval.lexical import lexical_retrieve
 from paperos_core.retrieval.rerank import rerank_candidates
 from paperos_core.retrieval.semantic import semantic_retrieve
-from paperos_core.retrieval.synthesis import synthesize_answer
+from paperos_core.retrieval.synthesis import (
+    FinalSynthesisContext,
+    render_synthesis_prompt,
+    synthesize_answer,
+)
 from paperos_core.runtime.local_inference.client import LocalInferenceClient
 
 
@@ -159,9 +164,14 @@ class RetrievalService:
         selected = deduplicate_candidates_by_chunk(reranked)[:top_k]
         stages.extend(["final_selection", "source_grounded_evidence"])
         evidence = format_evidence(selected, corpus)
+        synthesis_context = FinalSynthesisContext(
+            original_query=request.query,
+            evidence=evidence,
+        )
+        synthesis_prompt = render_synthesis_prompt(synthesis_context)
         answer = await synthesize_answer(
             self.llm,
-            query=request.query,
+            prompt=synthesis_prompt,
             evidence=evidence,
         )
         stages.append("synthesis")
@@ -208,6 +218,10 @@ class RetrievalService:
                 dict.fromkeys(channel for item in selected for channel in item.channels)
             ),
             evidence=evidence,
+            replay=QueryReplay(
+                original_query=request.query,
+                replay_text=synthesis_prompt,
+            ),
             candidates=selected,
             distinct_documents=len({item.document_id for item in evidence}),
             provenance_complete=all(

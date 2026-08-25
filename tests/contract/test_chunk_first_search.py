@@ -345,7 +345,12 @@ def test_claim_disabled_schema_has_no_claim_output_field() -> None:
 
 def test_evidence_rehydrates_canonical_chunk_text() -> None:
     chunk = _chunk("chunk_1", 1)
-    document = SimpleNamespace(source_file_id="source_1", title="Canonical Paper")
+    document = SimpleNamespace(
+        source_file_id="source_1",
+        title="Canonical Paper",
+        authors=[SimpleNamespace(display_name="Ada Author")],
+        year=2025,
+    )
     bundle = SimpleNamespace(document=document)
     corpus = SimpleNamespace(
         chunks={chunk.id: chunk},
@@ -358,6 +363,8 @@ def test_evidence_rehydrates_canonical_chunk_text() -> None:
     evidence = format_evidence([candidate], corpus)
     assert evidence[0].text == chunk.text
     assert evidence[0].document_id == chunk.document_id
+    assert evidence[0].authors == ["Ada Author"]
+    assert evidence[0].year == 2025
 
 
 def _retrieval_service(*, rerank_enabled: bool) -> RetrievalService:
@@ -415,12 +422,13 @@ def _pipeline_corpus() -> SimpleNamespace:
 
 def _run_expansion_pipeline(
     monkeypatch: pytest.MonkeyPatch, expanded: list[Candidate]
-) -> tuple[object, list[list[str]]]:
+) -> tuple[object, list[list[str]], list[str]]:
     import paperos_core.retrieval.service as service_module
 
     seed = _candidate("chunk_seed", "lexical", candidate_id="chunk_seed")
     service = _retrieval_service(rerank_enabled=True)
     rerank_inputs: list[list[str]] = []
+    synthesis_prompts: list[str] = []
 
     async def rerank(
         _query: str, candidates: list[Candidate], *, limit: int
@@ -431,7 +439,8 @@ def _run_expansion_pipeline(
     async def no_vector(*_args: object, **_kwargs: object) -> list[Candidate]:
         return []
 
-    async def answer(*_args: object, **_kwargs: object) -> str:
+    async def answer(*_args: object, **kwargs: object) -> str:
+        synthesis_prompts.append(str(kwargs["prompt"]))
         return "grounded answer"
 
     service._rerank = rerank  # type: ignore[method-assign]
@@ -446,25 +455,31 @@ def _run_expansion_pipeline(
     response = asyncio.run(
         service.query(QueryRequest(query="test", expand_context=True, top_k=2))
     )
-    return response, rerank_inputs
+    return response, rerank_inputs, synthesis_prompts
 
 
 def test_new_expanded_chunk_enters_second_rerank_input(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     expanded = [_candidate("chunk_new", "local_expansion", candidate_id="chunk_new")]
-    response, rerank_inputs = _run_expansion_pipeline(monkeypatch, expanded)
+    response, rerank_inputs, synthesis_prompts = _run_expansion_pipeline(
+        monkeypatch, expanded
+    )
     assert rerank_inputs == [["chunk_seed"], ["chunk_seed", "chunk_new"]]
     assert response.trace.local_new_chunk_ids == ["chunk_new"]
     assert response.trace.second_rerank_candidate_ids == ["chunk_seed", "chunk_new"]
     assert "second_rerank" in response.stages
+    assert response.replay.original_query == "test"
+    assert response.replay.replay_text == synthesis_prompts[0]
 
 
 def test_duplicate_only_expansion_skips_second_rerank(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     duplicate = [_candidate("chunk_seed", "local_expansion", candidate_id="duplicate")]
-    response, rerank_inputs = _run_expansion_pipeline(monkeypatch, duplicate)
+    response, rerank_inputs, _synthesis_prompts = _run_expansion_pipeline(
+        monkeypatch, duplicate
+    )
     assert rerank_inputs == [["chunk_seed"]]
     assert response.trace.local_new_chunk_ids == []
     assert response.trace.second_rerank_candidate_ids == []

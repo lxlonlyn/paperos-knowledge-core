@@ -397,26 +397,19 @@ class LLMClient:
     async def synthesize_answer(
         self,
         *,
-        query: str,
+        prompt: str,
         evidence: list[dict[str, Any]],
     ) -> str:
         """Synthesize one evidence-bound answer with an explicit Pydantic schema."""
         from cognee.infrastructure.llm import LLMGateway
 
-        compact_evidence: list[dict[str, Any]] = []
-        for item in evidence:
-            compact = dict(item)
-            text = compact.get("text")
-            if isinstance(text, str):
-                compact["text"] = text[:3_000]
-            compact_evidence.append(compact)
         failures: list[str] = []
         valid_chunk_ids = {
-            str(item["chunk_id"]) for item in compact_evidence if item.get("chunk_id")
+            str(item["chunk_id"]) for item in evidence if item.get("chunk_id")
         }
         evidence_to_chunk = {
             str(item["evidence_id"]): str(item["chunk_id"])
-            for item in compact_evidence
+            for item in evidence
             if item.get("evidence_id") and item.get("chunk_id")
         }
 
@@ -432,13 +425,7 @@ class LLMClient:
         for attempt in range(1, 4):
             try:
                 content = await LLMGateway.acreate_structured_output(
-                    text_input=json.dumps(
-                        {
-                            "question": query,
-                            "evidence": compact_evidence,
-                        },
-                        ensure_ascii=False,
-                    ),
+                    text_input=prompt,
                     system_prompt=self.prompts.load("answer_synthesis"),
                     response_model=AnswerOutput,
                     temperature=0.1,

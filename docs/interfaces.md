@@ -36,9 +36,11 @@ error, and result. Status is one of `pending`, `running`, `completed`, or
 ### Query
 
 `POST /api/v1/query` accepts the shared `QueryRequest` domain model and returns
-`QueryResponse` with answer, the raw-query trace, candidates, evidence, channel
-usage, and provenance. The first version routes the raw query through profile
-mapping to Cognee search/recall without query expansion or LLM planning.
+`QueryResponse` with answer, candidates, canonical evidence, channel usage,
+provenance, the retrieval trace, and `replay`. `replay.original_query` preserves
+the caller's exact question, while `replay.replay_text` is the same standalone
+Markdown user prompt sent to final synthesis. A caller can paste that text into
+a new web LLM conversation without rerunning retrieval.
 
 ### Documents and maintenance
 

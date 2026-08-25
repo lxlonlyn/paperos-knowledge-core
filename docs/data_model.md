@@ -38,6 +38,15 @@ SourceFile
 → Query evidence
 ```
 
+## Query Replay
+
+`QueryResponse` contains the final canonical `evidence` once and a `replay`
+object with `original_query` and `replay_text`. The latter is the exact rendered
+Markdown user prompt used for final synthesis. It contains the question,
+ordered evidence and available paper provenance, but not the current answer or
+retrieval-engine scores. Replay is returned with the query response and has no
+independent persistence lifecycle.
+
 ## Common persistence fields
 
 Every persisted object must include the fields that apply to its role.
