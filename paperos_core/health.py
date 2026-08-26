@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
+from paperos_core.errors import public_diagnostic
 from paperos_core.runtime.local_inference.runtime import (
     LocalRuntimeUsage,
     local_runtime_usage,
@@ -19,6 +21,23 @@ if TYPE_CHECKING:
     from paperos_core.jobs.queue import JobQueue
     from paperos_core.paths import DataPaths
     from paperos_core.runtime.local_inference.runtime import LocalInferenceRuntime
+
+
+logger = logging.getLogger(__name__)
+
+
+def _component_failure(code: str) -> dict[str, str | dict[str, str]]:
+    return {"status": "unavailable", "error": public_diagnostic(code)}
+
+
+def _log_component_failure(component: str, exc: Exception) -> None:
+    """Record failure class internally without logging exception-controlled text."""
+
+    logger.warning(
+        "Health component %s is unavailable (%s)",
+        component,
+        type(exc).__name__,
+    )
 
 
 def local_model_enablement(usage: LocalRuntimeUsage) -> dict[str, bool]:
@@ -56,15 +75,16 @@ class HealthService:
     async def report(self) -> dict[str, Any]:
         components: dict[str, Any] = {}
         try:
+            mineru = await self.mineru.provider.health_check()
             components["mineru"] = {
                 "status": "healthy",
-                **await self.mineru.provider.health_check(),
+                "provider": mineru.get("provider"),
+                "configured": mineru.get("configured"),
+                "reachable": mineru.get("reachable"),
             }
         except Exception as exc:  # noqa: BLE001 - health reports component failures.
-            components["mineru"] = {
-                "status": "unavailable",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
+            _log_component_failure("mineru", exc)
+            components["mineru"] = _component_failure("mineru_unavailable")
         try:
             model_status = await self.llm.health_check()
             components["llm"] = {
@@ -73,10 +93,8 @@ class HealthService:
                 "model": model_status["model"],
             }
         except Exception as exc:  # noqa: BLE001 - health reports component failures.
-            components["llm"] = {
-                "status": "unavailable",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
+            _log_component_failure("llm", exc)
+            components["llm"] = _component_failure("llm_unavailable")
         local_usage = local_runtime_usage(
             self.local_inference.settings,
             self.local_inference.cognee_config,
@@ -85,16 +103,26 @@ class HealthService:
         if local_usage.required:
             try:
                 local = await self.local_inference.client.health()
+                embedding = local.get("embedding", {})
+                reranker = local.get("reranker", {})
                 components["local_models"] = {
                     "status": "healthy",
                     **model_enablement,
-                    **local,
+                    "embedding": {
+                        "model": embedding.get("model"),
+                        "dimensions": embedding.get("dimensions"),
+                        "loaded": embedding.get("loaded"),
+                    },
+                    "reranker": {
+                        "model": reranker.get("model"),
+                        "loaded": reranker.get("loaded"),
+                    },
                 }
             except Exception as exc:  # noqa: BLE001 - health reports component failures.
+                _log_component_failure("local_models", exc)
                 components["local_models"] = {
-                    "status": "unavailable",
+                    **_component_failure("local_models_unavailable"),
                     **model_enablement,
-                    "error": f"{type(exc).__name__}: {exc}",
                 }
         else:
             components["local_models"] = {
@@ -127,14 +155,19 @@ class HealthService:
             }
         else:
             try:
+                vector = await self.cognee.vector_status(dataset_name=dataset_name)
                 components["vector"] = {
                     "status": "healthy",
-                    **await self.cognee.vector_status(dataset_name=dataset_name),
+                    "backend": vector.get("backend"),
+                    "collection_count": vector.get("collection_count"),
+                    "record_count": vector.get("record_count"),
+                    "dimensions": vector.get("dimensions"),
                 }
             except Exception as exc:  # noqa: BLE001 - health reports component failures.
+                _log_component_failure("vector", exc)
                 components["vector"] = {
+                    **_component_failure("vector_unavailable"),
                     "status": "degraded",
-                    "error": f"{type(exc).__name__}: {exc}",
                 }
         try:
             if bundles:
@@ -147,9 +180,10 @@ class HealthService:
                 "document_count": len(bundles),
             }
         except Exception as exc:  # noqa: BLE001 - health reports component failures.
+            _log_component_failure("cognee_graph", exc)
             components["cognee_graph"] = {
+                **_component_failure("cognee_graph_unavailable"),
                 "status": "degraded",
-                "error": f"{type(exc).__name__}: {exc}",
             }
         registry = self.registry.status()
         components["job_database"] = {

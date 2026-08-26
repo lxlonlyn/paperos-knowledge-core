@@ -41,7 +41,22 @@ _PUBLIC_MESSAGES = {
     "feedback_storage_error": "Feedback storage failed.",
     "document_not_found": "The requested document was not found.",
     "job_queue_error": "The job queue operation failed.",
+    "mineru_unavailable": "The document parser is unavailable.",
+    "llm_unavailable": "The language model is unavailable.",
+    "local_models_unavailable": "Local inference is unavailable.",
+    "vector_unavailable": "The vector index is unavailable.",
+    "cognee_graph_unavailable": "The knowledge graph is unavailable.",
+    "operational_job_failed": "The operation could not be completed.",
 }
+
+
+def public_diagnostic(code: str) -> dict[str, str]:
+    """Return a stable public diagnostic without internal exception text."""
+
+    return {
+        "code": code,
+        "message": _PUBLIC_MESSAGES.get(code, _DEFAULT_PUBLIC_MESSAGE),
+    }
 
 
 class PaperOSError(Exception):
@@ -80,8 +95,7 @@ class PaperOSError(Exception):
         """Serialize client-safe fields without machine-local path disclosure."""
 
         error: dict[str, Any] = {
-            "code": self.code,
-            "message": _PUBLIC_MESSAGES.get(self.code, _DEFAULT_PUBLIC_MESSAGE),
+            **public_diagnostic(self.code),
             "retryable": self.retryable,
         }
         details = _safe_api_value(self.details)

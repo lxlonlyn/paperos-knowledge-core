@@ -12,6 +12,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -19,11 +20,12 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from paperos_core.config import RuntimeSettings, load_settings
 from paperos_core.errors import ConfigurationError, PaperOSError
-from paperos_core.health import local_model_enablement
+from paperos_core.health import HealthService, local_model_enablement
 from paperos_core.indexes.manager import IndexManager
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.registry import SourceRegistry
 from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
+from paperos_core.jobs.queue import JobQueue
 from paperos_core.paths import build_data_paths
 from paperos_core.retrieval.candidates import QueryRequest, QueryResponse
 from paperos_core.retrieval.service import (
@@ -293,7 +295,156 @@ def api_error_contract() -> dict[str, object]:
     }
 
 
-def health_contract() -> dict[str, object]:
+_PRIVATE_POSIX_PATH = "/home/user/private.db"
+_PRIVATE_WINDOWS_PATH = r"C:\Users\user\secret.toml"
+_PRIVATE_FILE_URI = "file:///tmp/token"
+_PRIVATE_ENDPOINT = "https://internal.example.local:9443/private"
+_PRIVATE_SECRET = "task1c-test-secret"
+_PRIVATE_DIAGNOSTIC = (
+    f"{_PRIVATE_POSIX_PATH} | {_PRIVATE_WINDOWS_PATH} | {_PRIVATE_FILE_URI} | "
+    f"{_PRIVATE_ENDPOINT} | {_PRIVATE_SECRET}"
+)
+
+
+def _assert_public_json_safe(payload: object, label: str) -> None:
+    rendered = json.dumps(payload, ensure_ascii=False)
+    normalized = rendered.replace("\\\\", "\\")
+    for forbidden in (
+        _PRIVATE_POSIX_PATH,
+        _PRIVATE_WINDOWS_PATH,
+        _PRIVATE_FILE_URI,
+        _PRIVATE_ENDPOINT,
+        _PRIVATE_SECRET,
+        _PRIVATE_DIAGNOSTIC,
+    ):
+        _require(forbidden not in normalized, f"{label} leaked {forbidden}")
+
+
+class _Probe:
+    def __init__(self, result: dict[str, object] | None = None, *, fail: bool = False) -> None:
+        self.result = result or {}
+        self.fail = fail
+
+    async def health_check(self) -> dict[str, object]:
+        if self.fail:
+            raise RuntimeError(_PRIVATE_DIAGNOSTIC)
+        return self.result
+
+    async def health(self) -> dict[str, object]:
+        if self.fail:
+            raise RuntimeError(_PRIVATE_DIAGNOSTIC)
+        return self.result
+
+
+class _RuntimeConfig:
+    embedding_dimensions = 768
+
+    def embedding_targets(self, host: str, port: int) -> bool:
+        return True
+
+
+class _RuntimeConfigReader:
+    def read(self) -> _RuntimeConfig:
+        return _RuntimeConfig()
+
+
+class _CogneeProbe:
+    def __init__(self, *, fail: bool) -> None:
+        self.fail = fail
+
+    def read_manifest(self, snapshot_id: str) -> dict[str, object]:
+        return {"dataset": {"name": "health-contract"}}
+
+    async def vector_status(self, *, dataset_name: str | None = None) -> dict[str, object]:
+        if self.fail:
+            raise RuntimeError(_PRIVATE_DIAGNOSTIC)
+        return {
+            "backend": "cognee",
+            "collection_count": 2,
+            "record_count": 7,
+            "dimensions": 768,
+            "collections": {"private": 7},
+            "endpoint": _PRIVATE_ENDPOINT,
+            "path": _PRIVATE_POSIX_PATH,
+            "secret": _PRIVATE_SECRET,
+        }
+
+    async def get_datapoint(
+        self,
+        document_id: str,
+        *,
+        dataset_name: str | None = None,
+    ) -> object:
+        if self.fail:
+            raise RuntimeError(_PRIVATE_DIAGNOSTIC)
+        return {"secret": _PRIVATE_SECRET}
+
+
+def _health_service(*, fail: bool) -> HealthService:
+    settings = RuntimeSettings()
+    local_result = {
+        "status": "healthy",
+        "cuda_visible_devices": _PRIVATE_SECRET,
+        "endpoint": _PRIVATE_ENDPOINT,
+        "path": _PRIVATE_POSIX_PATH,
+        "secret": _PRIVATE_SECRET,
+        "embedding": {
+            "model": "embedding-contract",
+            "dimensions": 768,
+            "loaded": True,
+            "path": _PRIVATE_POSIX_PATH,
+            "secret": _PRIVATE_SECRET,
+        },
+        "reranker": {
+            "model": "reranker-contract",
+            "loaded": True,
+            "path": _PRIVATE_WINDOWS_PATH,
+            "secret": _PRIVATE_SECRET,
+        },
+    }
+    mineru_result = {
+        "provider": "mineru-contract",
+        "configured": True,
+        "reachable": True,
+        "endpoint": _PRIVATE_ENDPOINT,
+        "path": _PRIVATE_POSIX_PATH,
+        "secret": _PRIVATE_SECRET,
+    }
+    llm_result = {
+        "provider": "llm-contract",
+        "model": "model-contract",
+        "endpoint": _PRIVATE_ENDPOINT,
+        "path": _PRIVATE_WINDOWS_PATH,
+        "secret": _PRIVATE_SECRET,
+    }
+    bundle = SimpleNamespace(
+        snapshot=SimpleNamespace(id="snapshot:health-contract"),
+        document=SimpleNamespace(id="document:health-contract"),
+    )
+    return HealthService(
+        paths=SimpleNamespace(),
+        registry=SimpleNamespace(status=lambda: {"ingestion_job_count": 0}),
+        canonical_repository=SimpleNamespace(list_bundles=lambda: [bundle]),
+        mineru=SimpleNamespace(provider=_Probe(mineru_result, fail=fail)),
+        llm=SimpleNamespace(
+            health_check=_Probe(llm_result, fail=fail).health_check,
+        ),
+        local_inference=SimpleNamespace(
+            settings=settings,
+            cognee_config=_RuntimeConfigReader(),
+            client=_Probe(local_result, fail=fail),
+        ),
+        cognee=_CogneeProbe(fail=fail),
+        indexes=SimpleNamespace(
+            lexical=SimpleNamespace(
+                status=lambda: {"record_count": 0, "fts5": True}
+            )
+        ),
+        queue=SimpleNamespace(list_jobs=list),
+    )
+
+
+async def health_contract() -> dict[str, object]:
     enablement = local_model_enablement(
         LocalRuntimeUsage(embedding=False, reranker=True)
     )
@@ -301,7 +452,156 @@ def health_contract() -> dict[str, object]:
         enablement == {"embedding_enabled": False, "reranker_enabled": True},
         f"Health conflated embedding and reranker: {enablement}",
     )
-    return {"status": "passed", **enablement}
+    failed = await _health_service(fail=True).report()
+    expected_errors = {
+        "mineru": (
+            "unavailable",
+            "mineru_unavailable",
+            "The document parser is unavailable.",
+        ),
+        "llm": (
+            "unavailable",
+            "llm_unavailable",
+            "The language model is unavailable.",
+        ),
+        "local_models": (
+            "unavailable",
+            "local_models_unavailable",
+            "Local inference is unavailable.",
+        ),
+        "vector": (
+            "degraded",
+            "vector_unavailable",
+            "The vector index is unavailable.",
+        ),
+        "cognee_graph": (
+            "degraded",
+            "cognee_graph_unavailable",
+            "The knowledge graph is unavailable.",
+        ),
+    }
+    for component, (status, code, message) in expected_errors.items():
+        actual = failed["components"][component]
+        _require(actual["status"] == status, f"Unexpected {component} status")
+        _require(actual["error"]["code"] == code, f"Unexpected {component} code")
+        _require(
+            actual["error"]["message"] == message,
+            f"Unexpected {component} message",
+        )
+        _require(
+            set(actual["error"]) == {"code", "message"},
+            f"{component} error is not a stable public diagnostic",
+        )
+    _assert_public_json_safe(failed, "failed health response")
+
+    healthy = await _health_service(fail=False).report()
+    components = healthy["components"]
+    _require(
+        set(components["mineru"])
+        == {"status", "provider", "configured", "reachable"},
+        "MinerU health allowlist changed",
+    )
+    _require(
+        set(components["llm"]) == {"status", "provider", "model"},
+        "LLM health allowlist changed",
+    )
+    _require(
+        set(components["local_models"])
+        == {
+            "status",
+            "embedding_enabled",
+            "reranker_enabled",
+            "embedding",
+            "reranker",
+        },
+        "Local model health allowlist changed",
+    )
+    _require(
+        set(components["local_models"]["embedding"])
+        == {"model", "dimensions", "loaded"},
+        "Embedding health allowlist changed",
+    )
+    _require(
+        set(components["local_models"]["reranker"]) == {"model", "loaded"},
+        "Reranker health allowlist changed",
+    )
+    _require(
+        set(components["vector"])
+        == {
+            "status",
+            "backend",
+            "collection_count",
+            "record_count",
+            "dimensions",
+        },
+        "Vector health allowlist changed",
+    )
+    _require(
+        components["cognee_graph"]
+        == {"status": "healthy", "document_count": 1},
+        "Graph health response changed",
+    )
+    _assert_public_json_safe(healthy, "healthy health response")
+    return {
+        "status": "passed",
+        **enablement,
+        "failure_codes": sorted(code for _, code, _ in expected_errors.values()),
+        "healthy_allowlists": True,
+    }
+
+
+def job_status_contract(root: Path) -> dict[str, object]:
+    paths = build_data_paths(root / "job-data")
+    StorageInitializer(paths).initialize()
+    queue = JobQueue(paths)
+    pending = queue.enqueue(
+        "ingest",
+        {"path": paths.tmp / "staging.pdf", "source": "contract"},
+    )
+    pending_public = queue.public_dict(pending)
+    _require(pending_public["error"] is None, "Pending job has a public error")
+    _require("path" not in pending_public["payload"], "Staging path was exposed")
+    _assert_public_json_safe(pending_public, "pending job response")
+
+    running = queue.claim_next()
+    _require(running is not None, "Pending job was not claimed")
+    assert running is not None
+    running_public = queue.public_dict(running)
+    _require(running_public["error"] is None, "Running job has a public error")
+    _require("path" not in running_public["payload"], "Running staging path exposed")
+    _assert_public_json_safe(running_public, "running job response")
+
+    failed = queue.fail(running.id, f"RuntimeError: {_PRIVATE_DIAGNOSTIC}")
+    internal = queue.get(failed.id)
+    _require(
+        internal.error == f"RuntimeError: {_PRIVATE_DIAGNOSTIC}",
+        "Internal job error was not retained",
+    )
+    public = queue.public_dict(internal)
+    _require(
+        public["error"]
+        == {
+            "code": "operational_job_failed",
+            "message": "The operation could not be completed.",
+        },
+        "Failed job did not use the fixed public diagnostic",
+    )
+    _require("path" not in public["payload"], "Failed staging path was exposed")
+    _assert_public_json_safe(public, "failed job response")
+
+    completed = queue.enqueue("export", {"format": "json"})
+    result = {"export_id": "export:stable123", "count": 3}
+    completed = queue.complete(completed.id, result)
+    completed_public = queue.public_dict(completed)
+    _require(completed_public["error"] is None, "Completed job has a public error")
+    _require(completed_public["result"] == result, "Job result fields changed")
+    _assert_public_json_safe(completed_public, "completed job response")
+    return {
+        "status": "passed",
+        "internal_error_retained": True,
+        "public_error": public["error"],
+        "staging_path_hidden": True,
+    }
 
 
 async def run_contract() -> dict[str, Any]:
@@ -311,7 +611,8 @@ async def run_contract() -> dict[str, Any]:
             "configuration": configuration_contract(root),
             "retrieval": await empty_retrieval_contract(root),
             "api_errors": api_error_contract(),
-            "health": health_contract(),
+            "health": await health_contract(),
+            "jobs": job_status_contract(root),
         }
 
 

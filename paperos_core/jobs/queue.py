@@ -12,7 +12,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from paperos_core.domain.documents import utc_now
-from paperos_core.errors import JobQueueError
+from paperos_core.errors import JobQueueError, public_diagnostic
 from paperos_core.paths import DataPaths
 from paperos_core.storage.path_refs import DataPathCodec
 
@@ -45,9 +45,11 @@ class JobQueue:
         job_payload = payload.get("payload")
         if isinstance(job_payload, dict):
             job_payload.pop("path", None)
-        error = payload.get("error")
-        if isinstance(error, str):
-            payload["error"] = error.replace(str(self.paths.root), "<data>")
+        payload["error"] = (
+            public_diagnostic("operational_job_failed")
+            if job.status == "failed"
+            else None
+        )
         return payload
 
     def enqueue(self, job_type: str, payload: dict[str, Any] | None = None) -> OperationalJob:
