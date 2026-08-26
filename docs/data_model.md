@@ -50,6 +50,10 @@ ranked whole-Chunk prefix admitted by `retrieval.synthesis_max_input_tokens`;
 the response Evidence, Replay blocks, and actual synthesis input are therefore
 identical, and selected `Chunk.text` values are never partially truncated.
 
+If no usable Evidence exists, PaperOS does not invoke final synthesis and stores
+an empty `replay_text`; the response uses `paperos/no-evidence` as its
+deterministic `answer_model`.
+
 ## Common persistence fields
 
 Every persisted object must include the fields that apply to its role.

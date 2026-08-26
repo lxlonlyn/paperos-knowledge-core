@@ -1,11 +1,16 @@
 """Provider-neutral evidence-grounded answer synthesis."""
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from paperos_core.adapters.cognee.llm import LLMClient
 from paperos_core.errors import ConfigurationError
 from paperos_core.retrieval.candidates import Evidence
+
+if TYPE_CHECKING:
+    from paperos_core.adapters.cognee.llm import LLMClient
 
 _ESTIMATED_BYTES_PER_TOKEN = 3
 _BEGIN_SOURCE_EVIDENCE = "--- BEGIN SOURCE EVIDENCE ---"

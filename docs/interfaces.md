@@ -44,6 +44,10 @@ a new web LLM conversation without rerunning retrieval. The returned Evidence
 is limited by the total `retrieval.synthesis_max_input_tokens` budget, but every
 selected canonical Chunk remains complete.
 
+When retrieval yields no usable Evidence, final synthesis is not called:
+`answer_model` is `paperos/no-evidence` and `replay.replay_text` is the empty
+string. An empty Replay therefore means that no user prompt was sent to an LLM.
+
 ### Documents and maintenance
 
 ```text

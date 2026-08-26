@@ -2,8 +2,46 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path, PureWindowsPath
 from typing import Any
+
+_DEFAULT_PUBLIC_MESSAGE = "The request could not be completed."
+_PUBLIC_MESSAGES = {
+    "paperos_error": _DEFAULT_PUBLIC_MESSAGE,
+    "configuration_error": "PaperOS configuration is invalid.",
+    "invalid_dataset": "The requested dataset is invalid.",
+    "missing_source_file": "The source file is unavailable.",
+    "invalid_pdf": "The source PDF is invalid.",
+    "pdf_too_large": "The source PDF exceeds the configured size limit.",
+    "source_changed_during_ingestion": "The source changed during ingestion.",
+    "storage_integrity_error": "Stored data failed an integrity check.",
+    "source_registry_error": "The source registry operation failed.",
+    "source_not_found": "The requested source was not found.",
+    "ingestion_job_not_found": "The requested ingestion job was not found.",
+    "invalid_ingestion_job_transition": "The ingestion job transition is invalid.",
+    "mineru_configuration_error": "The document parser configuration is invalid.",
+    "mineru_authentication_error": "Document parser authentication failed.",
+    "mineru_quota_error": "The document parser quota is unavailable.",
+    "mineru_timeout": "The document parser timed out.",
+    "mineru_provider_error": "The document parser is unavailable.",
+    "mineru_parse_failure": "The document could not be parsed.",
+    "parser_artifact_validation_error": "A parser artifact failed validation.",
+    "canonical_mapping_error": "The parsed document could not be mapped.",
+    "canonical_validation_error": "Canonical document validation failed.",
+    "canonical_storage_error": "Canonical document storage failed.",
+    "local_inference_configuration_error": "Local inference configuration is invalid.",
+    "local_inference_unavailable": "Local inference is unavailable.",
+    "local_inference_response_error": "Local inference returned an invalid response.",
+    "cognee_configuration_error": "Knowledge engine configuration is invalid.",
+    "cognee_storage_error": "The knowledge engine is unavailable.",
+    "semantic_enrichment_error": "Semantic enrichment failed.",
+    "index_storage_error": "The retrieval index is unavailable.",
+    "feedback_validation_error": "Feedback validation failed.",
+    "feedback_storage_error": "Feedback storage failed.",
+    "document_not_found": "The requested document was not found.",
+    "job_queue_error": "The job queue operation failed.",
+}
 
 
 class PaperOSError(Exception):
@@ -43,16 +81,45 @@ class PaperOSError(Exception):
 
         error: dict[str, Any] = {
             "code": self.code,
-            "message": self.message,
+            "message": _PUBLIC_MESSAGES.get(self.code, _DEFAULT_PUBLIC_MESSAGE),
             "retryable": self.retryable,
         }
         details = _safe_api_value(self.details)
-        if details:
+        if isinstance(details, dict) and details:
             error["details"] = details
         return {"error": error}
 
 
 _PATH_DETAIL_KEYS = {"affected", "directory", "file", "filename", "path", "root"}
+_DANGEROUS_DETAIL_KEYS = {
+    "artifact_errors",
+    "attempts",
+    "exception",
+    "failures",
+    "last_error",
+    "message",
+    "stack",
+    "traceback",
+}
+_SAFE_STRING_KEY_SUFFIXES = (
+    "_code",
+    "_id",
+    "_ids",
+    "_key",
+    "_keys",
+    "_role",
+    "_roles",
+    "_sha256",
+    "_status",
+    "_type",
+    "_types",
+)
+_SAFE_STRING_KEYS = {"actual", "expected", "missing", "reason", "status"}
+_POSIX_PATH_IN_TEXT = re.compile(r"(?:^|[\s\[({'\"=:])/(?!/)[^\s\])}'\",;]+")
+_WINDOWS_PATH_IN_TEXT = re.compile(
+    r"(?:^|[\s\[({'\"=:])(?:[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/])"
+)
+_REDACTED = object()
 
 
 def _is_path_detail_key(key: str) -> bool:
@@ -62,28 +129,58 @@ def _is_path_detail_key(key: str) -> bool:
     )
 
 
+def _contains_local_reference(value: str) -> bool:
+    selected = value.strip()
+    return (
+        "file://" in selected.casefold()
+        or Path(selected).is_absolute()
+        or PureWindowsPath(selected).is_absolute()
+        or _POSIX_PATH_IN_TEXT.search(selected) is not None
+        or _WINDOWS_PATH_IN_TEXT.search(selected) is not None
+    )
+
+
+def _is_safe_string_key(key: str | None) -> bool:
+    if key is None:
+        return False
+    normalized = key.casefold()
+    return normalized in _SAFE_STRING_KEYS or normalized.endswith(
+        _SAFE_STRING_KEY_SUFFIXES
+    )
+
+
 def _safe_api_value(value: Any, *, key: str | None = None) -> Any:
-    if key is not None and _is_path_detail_key(key):
-        return None
+    normalized_key = key.casefold() if key is not None else None
+    if key is not None and (
+        _is_path_detail_key(key) or normalized_key in _DANGEROUS_DETAIL_KEYS
+    ):
+        return _REDACTED
     if isinstance(value, Path):
-        return None
+        return _REDACTED
     if isinstance(value, str):
-        if value.startswith("file://") or Path(value).is_absolute() or PureWindowsPath(
-            value
-        ).is_absolute():
-            return None
+        if _contains_local_reference(value) or not _is_safe_string_key(key):
+            return _REDACTED
         return value
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, dict):
-        return {
-            str(item_key): safe
-            for item_key, item_value in value.items()
-            if (safe := _safe_api_value(item_value, key=str(item_key))) is not None
-        }
+        safe_items: dict[str, Any] = {}
+        for item_key, item_value in value.items():
+            rendered_key = str(item_key)
+            if _contains_local_reference(rendered_key):
+                continue
+            safe = _safe_api_value(item_value, key=rendered_key)
+            if safe is not _REDACTED:
+                safe_items[rendered_key] = safe
+        return safe_items
     if isinstance(value, (list, tuple)):
-        return [safe for item in value if (safe := _safe_api_value(item)) is not None]
-    return None
+        safe_items = []
+        for item in value:
+            safe = _safe_api_value(item, key=key)
+            if safe is not _REDACTED:
+                safe_items.append(safe)
+        return safe_items
+    return _REDACTED
 
 
 class ConfigurationError(PaperOSError):

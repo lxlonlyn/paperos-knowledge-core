@@ -84,7 +84,7 @@ class Evidence(BaseModel):
 
 
 class QueryReplay(BaseModel):
-    """Portable representation of the exact final synthesis input."""
+    """Exact final synthesis input, or empty replay_text when no LLM was called."""
 
     model_config = ConfigDict(extra="forbid")
 

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from paperos_core.adapters.cognee.search import CogneeSearchAdapter
+from typing import TYPE_CHECKING
+
 from paperos_core.retrieval.candidates import Candidate
 from paperos_core.retrieval.corpus import CorpusView
+
+if TYPE_CHECKING:
+    from paperos_core.adapters.cognee.search import CogneeSearchAdapter
 
 _CHUNK_TYPE = "ChunkDataPoint"
 _CHUNK_SEARCH_TYPE = "PAPEROS_CHUNKS"

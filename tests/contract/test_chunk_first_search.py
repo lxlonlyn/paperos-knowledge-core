@@ -476,6 +476,8 @@ def test_new_expanded_chunk_enters_second_rerank_input(
     assert response.evidence == []
     assert response.candidates == []
     assert response.provenance_complete is False
+    assert response.answer_model == "paperos/no-evidence"
+    assert response.replay.replay_text == ""
     assert "no_evidence" in response.stages
     assert "synthesis" not in response.stages
 

@@ -2,20 +2,32 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
-from paperos_core.adapters.cognee.llm import LLMClient
-from paperos_core.adapters.mineru.client import MinerUClient
-from paperos_core.indexes.manager import IndexManager
-from paperos_core.ingestion.canonical_repository import CanonicalRepository
-from paperos_core.ingestion.registry import SourceRegistry
-from paperos_core.jobs.queue import JobQueue
-from paperos_core.paths import DataPaths
 from paperos_core.runtime.local_inference.runtime import (
-    LocalInferenceRuntime,
+    LocalRuntimeUsage,
     local_runtime_usage,
 )
+
+if TYPE_CHECKING:
+    from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
+    from paperos_core.adapters.cognee.llm import LLMClient
+    from paperos_core.adapters.mineru.client import MinerUClient
+    from paperos_core.indexes.manager import IndexManager
+    from paperos_core.ingestion.canonical_repository import CanonicalRepository
+    from paperos_core.ingestion.registry import SourceRegistry
+    from paperos_core.jobs.queue import JobQueue
+    from paperos_core.paths import DataPaths
+    from paperos_core.runtime.local_inference.runtime import LocalInferenceRuntime
+
+
+def local_model_enablement(usage: LocalRuntimeUsage) -> dict[str, bool]:
+    """Render the two independent local-model enablement flags for health."""
+
+    return {
+        "embedding_enabled": usage.embedding,
+        "reranker_enabled": usage.reranker,
+    }
 
 
 class HealthService:
@@ -69,10 +81,7 @@ class HealthService:
             self.local_inference.settings,
             self.local_inference.cognee_config,
         )
-        model_enablement = {
-            "embedding_enabled": local_usage.embedding,
-            "reranker_enabled": local_usage.reranker,
-        }
+        model_enablement = local_model_enablement(local_usage)
         if local_usage.required:
             try:
                 local = await self.local_inference.client.health()

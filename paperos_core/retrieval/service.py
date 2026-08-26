@@ -2,17 +2,10 @@
 
 from __future__ import annotations
 
-from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
-from paperos_core.adapters.cognee.llm import LLMClient
-from paperos_core.adapters.cognee.search import CogneeSearchAdapter
-from paperos_core.config import RuntimeSettings
+from typing import TYPE_CHECKING
+
 from paperos_core.domain.ids import QUERY_RESPONSE_ID_VERSION, stable_id
 from paperos_core.errors import ConfigurationError
-from paperos_core.indexes.manager import IndexManager
-from paperos_core.ingestion.canonical_repository import CanonicalRepository
-from paperos_core.ingestion.registry import SourceRegistry
-from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
-from paperos_core.paths import DataPaths
 from paperos_core.retrieval.candidates import (
     Candidate,
     QueryReplay,
@@ -39,9 +32,27 @@ from paperos_core.retrieval.synthesis import (
     select_synthesis_evidence,
     synthesize_answer,
 )
-from paperos_core.runtime.local_inference.client import LocalInferenceClient
+
+if TYPE_CHECKING:
+    from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
+    from paperos_core.adapters.cognee.llm import LLMClient
+    from paperos_core.adapters.cognee.search import CogneeSearchAdapter
+    from paperos_core.config import RuntimeSettings
+    from paperos_core.indexes.manager import IndexManager
+    from paperos_core.ingestion.canonical_repository import CanonicalRepository
+    from paperos_core.ingestion.registry import SourceRegistry
+    from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
+    from paperos_core.paths import DataPaths
+    from paperos_core.runtime.local_inference.client import LocalInferenceClient
 
 NO_EVIDENCE_ANSWER = "未检索到可用于回答的论文证据"
+NO_EVIDENCE_MODEL = "paperos/no-evidence"
+
+
+def effective_candidate_pool_size(candidate_pool_size: int, top_k: int) -> int:
+    """Return the real first-stage pool without silently truncating top_k."""
+
+    return max(candidate_pool_size, top_k)
 
 
 class RetrievalService:
@@ -98,7 +109,10 @@ class RetrievalService:
             document_ids.intersection_update(corpus.document_ids_for_works(explicit_work_ids))
 
         top_k = request.top_k or self.config.retrieval.top_k
-        pool_size = max(self.config.retrieval.candidate_pool_size, top_k)
+        pool_size = effective_candidate_pool_size(
+            self.config.retrieval.candidate_pool_size,
+            top_k,
+        )
         stages = ["explicit_filters", "lexical_chunk_retrieval"]
         channels: dict[str, list[Candidate]] = {
             "lexical": lexical_retrieve(
@@ -137,10 +151,10 @@ class RetrievalService:
 
         local_expanded: list[Candidate] = []
         semantic_expanded: list[Candidate] = []
-        if request.expand_context:
+        if request.expand_context and seeds:
             local_expanded = local_neighbor_expand(corpus, seeds, document_ids=document_ids)
             stages.append("local_post_hit_expansion")
-        if request.expand_graph:
+        if request.expand_graph and seeds:
             semantic_expanded = await semantic_post_hit_expand(
                 self.compat,
                 corpus,
@@ -182,21 +196,24 @@ class RetrievalService:
             else []
         )
         selected = selected[: len(evidence)]
-        synthesis_context = FinalSynthesisContext(
-            original_query=request.query,
-            evidence=evidence,
-        )
-        synthesis_prompt = render_synthesis_prompt(synthesis_context)
         if evidence:
+            synthesis_context = FinalSynthesisContext(
+                original_query=request.query,
+                evidence=evidence,
+            )
+            synthesis_prompt = render_synthesis_prompt(synthesis_context)
             answer = await synthesize_answer(
                 self.llm,
                 prompt=synthesis_prompt,
                 evidence=evidence,
             )
+            answer_model = self.llm.model
             stages.append("synthesis")
         else:
             selected = []
+            synthesis_prompt = ""
             answer = NO_EVIDENCE_ANSWER
+            answer_model = NO_EVIDENCE_MODEL
             stages.append("no_evidence")
 
         trace = RetrievalTrace(
@@ -235,7 +252,7 @@ class RetrievalService:
             query=request.query,
             dataset=dataset_name,
             answer=answer,
-            answer_model=self.llm.model,
+            answer_model=answer_model,
             stages=stages,
             channels_used=list(
                 dict.fromkeys(channel for item in selected for channel in item.channels)

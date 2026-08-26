@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from paperos_core.adapters.cognee.compat import (
-    CogneeCompatibilityAdapter,
-)
+from typing import TYPE_CHECKING
+
 from paperos_core.domain.provenance import SEMANTIC_RELATION_TYPES
 from paperos_core.retrieval.candidates import Candidate
 from paperos_core.retrieval.corpus import CorpusView
 from paperos_core.retrieval.fusion import deduplicate_candidates_by_chunk
+
+if TYPE_CHECKING:
+    from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
 
 
 def local_neighbor_expand(
