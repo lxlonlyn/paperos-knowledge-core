@@ -16,6 +16,7 @@ REGISTRY_TABLES = frozenset(
         "parse_runs",
         "parser_artifacts",
         "canonical_snapshots",
+        "active_canonical_snapshots",
         "operational_jobs",
         "feedback",
         "corrections",
@@ -50,7 +51,6 @@ class StorageInitializer:
             with sqlite3.connect(self.paths.registry_db, timeout=30) as connection:
                 connection.execute("PRAGMA foreign_keys = ON")
                 connection.executescript(_REGISTRY_SCHEMA)
-                _migrate_canonical_snapshot_projection_split(connection)
             self.initialize_lexical()
         except sqlite3.Error as exc:
             raise ConfigurationError(
@@ -153,6 +153,11 @@ CREATE TABLE IF NOT EXISTS canonical_snapshots (
     FOREIGN KEY (parse_run_id) REFERENCES parse_runs(id)
 );
 CREATE INDEX IF NOT EXISTS canonical_snapshot_source_idx ON canonical_snapshots(source_file_id);
+CREATE TABLE IF NOT EXISTS active_canonical_snapshots (
+    document_id TEXT PRIMARY KEY,
+    snapshot_id TEXT NOT NULL UNIQUE,
+    activated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS operational_jobs (
     id TEXT PRIMARY KEY, job_type TEXT NOT NULL, payload TEXT NOT NULL,
     status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -228,10 +233,11 @@ CREATE TABLE IF NOT EXISTS document_tombstones (
 
 _LEXICAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS lexical_records (
-    object_id TEXT PRIMARY KEY, object_type TEXT NOT NULL, document_id TEXT NOT NULL,
+    object_id TEXT NOT NULL, object_type TEXT NOT NULL, document_id TEXT NOT NULL,
     canonical_snapshot_id TEXT NOT NULL, schema_version TEXT NOT NULL,
     index_version TEXT NOT NULL, field_name TEXT NOT NULL, section_id TEXT,
-    section_path TEXT, text TEXT NOT NULL
+    section_path TEXT, text TEXT NOT NULL,
+    PRIMARY KEY(canonical_snapshot_id, object_id)
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS lexical_fts USING fts5(
     object_id UNINDEXED, text, content='lexical_records',
@@ -250,18 +256,6 @@ CREATE TRIGGER IF NOT EXISTS lexical_records_au AFTER UPDATE ON lexical_records 
     INSERT INTO lexical_fts(rowid, object_id, text) VALUES (new.rowid, new.object_id, new.text);
 END;
 CREATE INDEX IF NOT EXISTS lexical_document_idx ON lexical_records(document_id);
+CREATE INDEX IF NOT EXISTS lexical_snapshot_idx
+    ON lexical_records(canonical_snapshot_id);
 """
-
-
-def _migrate_canonical_snapshot_projection_split(
-    connection: sqlite3.Connection,
-) -> None:
-    """Remove the legacy chunking column without touching canonical rows."""
-    columns = {
-        str(row[1])
-        for row in connection.execute("PRAGMA table_info(canonical_snapshots)")
-    }
-    if "chunking_version" in columns:
-        connection.execute(
-            "ALTER TABLE canonical_snapshots DROP COLUMN chunking_version"
-        )

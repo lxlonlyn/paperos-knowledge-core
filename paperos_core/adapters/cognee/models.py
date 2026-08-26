@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from paperos_core.adapters.cognee.compat import cognee_uuid
+from paperos_core.adapters.cognee.compat import cognee_snapshot_uuid, cognee_uuid
 from paperos_core.adapters.cognee.datapoints import (
-    ChunkDataPoint,
     ClaimDataPoint,
     ConceptRelationDataPoint,
     DocumentDataPoint,
     ElementDataPoint,
     EntityDataPoint,
+    PaperOSChunkDataPoint,
     PaperOSGraphDataPoint,
     ReferenceDataPoint,
     ScholarlyWorkDataPoint,
@@ -83,7 +83,7 @@ def canonical_to_datapoints(
     ]
     nodes.append(
         DocumentDataPoint(
-            id=cognee_uuid(document.id),
+            id=cognee_snapshot_uuid(snapshot.id, document.id),
             canonical_id=document.id,
             work_id=scholarly.document_work.id,
             title=document.title,
@@ -96,7 +96,7 @@ def canonical_to_datapoints(
     )
     nodes.extend(
         SectionDataPoint(
-            id=cognee_uuid(section.id),
+            id=cognee_snapshot_uuid(snapshot.id, section.id),
             canonical_id=section.id,
             document_id=document.id,
             title=section.title,
@@ -107,8 +107,8 @@ def canonical_to_datapoints(
         for section in bundle.sections
     )
     nodes.extend(
-        ChunkDataPoint(
-            id=cognee_uuid(chunk.id),
+        PaperOSChunkDataPoint(
+            id=cognee_snapshot_uuid(snapshot.id, chunk.id),
             canonical_id=chunk.id,
             document_id=document.id,
             section_id=chunk.section_id,
@@ -132,7 +132,7 @@ def canonical_to_datapoints(
             citing_chunks_by_reference.setdefault(reference_id, []).append(chunk.id)
     nodes.extend(
         ElementDataPoint(
-            id=cognee_uuid(element.id),
+            id=cognee_snapshot_uuid(snapshot.id, element.id),
             canonical_id=element.id,
             document_id=document.id,
             section_id=element.section_id,
@@ -146,7 +146,7 @@ def canonical_to_datapoints(
     )
     nodes.extend(
         ReferenceDataPoint(
-            id=cognee_uuid(reference.id),
+            id=cognee_snapshot_uuid(snapshot.id, reference.id),
             canonical_id=reference.id,
             document_id=document.id,
             raw_text=reference.raw_text,
@@ -168,7 +168,7 @@ def canonical_to_datapoints(
     )
     nodes.extend(
         EntityDataPoint(
-            id=cognee_uuid(entity.id),
+            id=cognee_snapshot_uuid(snapshot.id, entity.id),
             canonical_id=entity.id,
             entity_type=entity.entity_type,
             name=entity.name,
@@ -183,7 +183,7 @@ def canonical_to_datapoints(
     )
     nodes.extend(
         ClaimDataPoint(
-            id=cognee_uuid(claim.id),
+            id=cognee_snapshot_uuid(snapshot.id, claim.id),
             canonical_id=claim.id,
             text=claim.text,
             claim_type=claim.claim_type,
@@ -199,7 +199,7 @@ def canonical_to_datapoints(
     )
     nodes.extend(
         ConceptRelationDataPoint(
-            id=cognee_uuid(relation.id),
+            id=cognee_snapshot_uuid(snapshot.id, relation.id),
             canonical_id=relation.id,
             relation_type=relation.relation_type,
             source_object_id=relation.source_object_id,

@@ -7,6 +7,14 @@ to choose or repair a namespace.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
+
+if TYPE_CHECKING:
+    from paperos_core.ingestion.document_regions import (
+        DocumentRegion,
+        ElementRegionInfo,
+    )
+
 import re
 from dataclasses import dataclass, field
 
@@ -22,6 +30,7 @@ FAILURE_NAMESPACE_NOT_ASSIGNED = "NAMESPACE_NOT_ASSIGNED"
 # Kept for consumers that import the old constant; no new code emits it.
 FAILURE_SCOPE_NOT_FOUND = FAILURE_NAMESPACE_NOT_ASSIGNED
 
+_IndexT = TypeVar("_IndexT")
 
 @dataclass(slots=True)
 class CitationNamespace:
@@ -40,10 +49,10 @@ BibliographyScope = CitationNamespace
 
 
 @dataclass(slots=True)
-class ScopedBibliography:
+class ScopedBibliography(Generic[_IndexT]):
     scopes: dict[str, CitationNamespace]
     reference_scope: dict[str, str]
-    scope_indexes: dict[str, object]
+    scope_indexes: dict[str, _IndexT]
 
     @property
     def namespaces(self) -> dict[str, CitationNamespace]:
@@ -72,7 +81,7 @@ def resolve_element_region(
     return REGION_MAIN
 
 
-def scopes_for_region(region: str, scoped: ScopedBibliography) -> list[str]:
+def scopes_for_region(region: str, scoped: ScopedBibliography[Any]) -> list[str]:
     """Compatibility report helper; never used to route a citation."""
     accepted = (
         {REGION_SUPPLEMENT}
@@ -88,9 +97,9 @@ def scopes_for_region(region: str, scoped: ScopedBibliography) -> list[str]:
 
 def scope_for_element(
     element_id: str,
-    element_regions: dict,
-    scoped: ScopedBibliography,
-    document_regions: list,
+    element_regions: dict[str, ElementRegionInfo],
+    scoped: ScopedBibliography[Any],
+    document_regions: list[DocumentRegion],
 ) -> tuple[str | None, str | None]:
     """Read the namespace assigned during the region phase, without fallback."""
     _ = document_regions

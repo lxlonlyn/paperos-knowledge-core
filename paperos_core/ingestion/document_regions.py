@@ -342,25 +342,26 @@ def _assign_citation_namespaces(
     previous_body: DocumentRegion | None = None
     for region in regions:
         if region.region_type == REGION_REFERENCES:
-            namespace_id = namespace_by_region[region.region_id]
+            reference_namespace_id = namespace_by_region[region.region_id]
             assigned.append(
                 replace(
                     region,
-                    citation_namespace_id=namespace_id,
-                    bibliography_scope_id=namespace_id,
+                    citation_namespace_id=reference_namespace_id,
+                    bibliography_scope_id=reference_namespace_id,
                     owner_body_region_id=(
                         previous_body.region_id if previous_body else None
                     ),
                 )
             )
         else:
-            namespace_id = namespace_for_body[region.region_id]
+            body_namespace_id = namespace_for_body[region.region_id]
             assigned.append(
                 replace(
                     region,
-                    citation_namespace_id=namespace_id,
-                    bibliography_scope_id=namespace_id,
+                    citation_namespace_id=body_namespace_id,
+                    bibliography_scope_id=body_namespace_id,
                 )
             )
             previous_body = region
+
     return assigned

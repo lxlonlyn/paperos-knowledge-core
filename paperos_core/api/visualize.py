@@ -22,7 +22,7 @@ async def visualize_dataset(
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
     snapshot_ids: list[str] = []
-    for bundle in application.canonical_repository.list_bundles():
+    for bundle in application.canonical_repository.list_active_bundles():
         if bundle.snapshot.dataset_id != dataset_name:
             continue
         path = application.paths.cognee / "graphs" / f"{bundle.snapshot.id}.json"

@@ -22,7 +22,7 @@ class RebuildReport(BaseModel):
     deleted_paths: list[Path]
     reports: list[IndexingReport]
     all_snapshot_count: int
-    current_snapshot_count: int
+    active_snapshot_count: int
     enrichment_existing_count: int
     enrichment_missing_count: int
     enrichment_generated_count: int
@@ -35,7 +35,7 @@ class RebuildReport(BaseModel):
             "rebuilt_snapshot_ids": self.rebuilt_snapshot_ids,
             "reports": [report.public_dict() for report in self.reports],
             "all_snapshot_count": self.all_snapshot_count,
-            "current_snapshot_count": self.current_snapshot_count,
+            "active_snapshot_count": self.active_snapshot_count,
             "enrichment_existing_count": self.enrichment_existing_count,
             "enrichment_missing_count": self.enrichment_missing_count,
             "enrichment_generated_count": self.enrichment_generated_count,
@@ -58,21 +58,29 @@ class DerivedDataRebuilder:
         self.pipeline = pipeline
         self.storage = storage
 
+    def select_snapshot_ids(self, snapshot_id: str | None = None) -> list[str]:
+        """Select only active revisions for the public rebuild path."""
+
+        active_snapshot_ids = self.canonical_repository.list_active_snapshot_ids()
+        if snapshot_id is None:
+            return active_snapshot_ids
+        if snapshot_id not in active_snapshot_ids:
+            raise CogneeStorageError(
+                "Only an active canonical snapshot can be rebuilt.",
+                affected=snapshot_id,
+                details={"reason": "inactive_canonical_snapshot"},
+            )
+        return [snapshot_id]
+
     async def rebuild(
         self,
         snapshot_id: str | None = None,
         *,
         refresh_enrichment: bool = False,
-        include_history: bool = False,
     ) -> RebuildReport:
-        all_snapshot_ids = self.canonical_repository.list_snapshot_ids()
-        current_snapshot_ids = self.canonical_repository.list_latest_snapshot_ids()
-        if snapshot_id is not None:
-            selected = [snapshot_id]
-        elif include_history:
-            selected = all_snapshot_ids
-        else:
-            selected = current_snapshot_ids
+        all_snapshot_ids = self.canonical_repository.list_all_snapshot_ids()
+        active_snapshot_ids = self.canonical_repository.list_active_snapshot_ids()
+        selected = self.select_snapshot_ids(snapshot_id)
         with sqlite3.connect(self.paths.registry_db) as connection:
             exists = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_tombstones'"
@@ -115,8 +123,7 @@ class DerivedDataRebuilder:
         # Work identity is authoritative, persistent registry state; populate it
         # before deleting and recreating any Cognee/FTS projections.
         self.pipeline.scholarly_registry.backfill(self.canonical_repository)
-        deleted = await self._delete_derived_data()
-        self.storage.initialize_lexical()
+        deleted = await self._delete_derived_data(selected)
         reports: list[IndexingReport] = []
         for selected_id in selected:
             bundle = self.canonical_repository.get_bundle(selected_id)
@@ -132,7 +139,7 @@ class DerivedDataRebuilder:
             deleted_paths=deleted,
             reports=reports,
             all_snapshot_count=len(all_snapshot_ids),
-            current_snapshot_count=len(current_snapshot_ids),
+            active_snapshot_count=len(active_snapshot_ids),
             enrichment_existing_count=len(existing),
             enrichment_missing_count=len(missing),
             enrichment_generated_count=len(missing),
@@ -141,20 +148,13 @@ class DerivedDataRebuilder:
             llm_enrichment_call_count=len(missing),
         )
 
-    async def _delete_derived_data(self) -> list[Path]:
-        from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
-
-        await CogneeCompatibilityAdapter.prune_derived_data()
-        targets = [self.paths.indexes / "lexical.sqlite3"]
-        targets.extend((self.paths.indexes / "manifests").glob("*.json"))
-        targets.extend((self.paths.cognee / "manifests").glob("*.json"))
-        targets.extend((self.paths.cognee / "graphs").glob("*.json"))
-        targets.extend((self.paths.cognee / "chunks").glob("*.jsonl"))
+    async def _delete_derived_data(self, snapshot_ids: list[str]) -> list[Path]:
         deleted: list[Path] = []
-        for target in targets:
-            resolved = target.resolve(strict=False)
-            self.paths.assert_within_root(resolved)
-            if resolved.is_file():
-                resolved.unlink()
-                deleted.append(resolved)
+        for snapshot_id in snapshot_ids:
+            deleted.extend(
+                await self.pipeline.cleanup_snapshot_derived(
+                    snapshot_id,
+                    preserve_enrichment=True,
+                )
+            )
         return deleted

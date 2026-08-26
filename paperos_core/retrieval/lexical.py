@@ -24,7 +24,11 @@ def lexical_retrieve(
     for query in queries[:8]:
         for query_rank, fts_query in enumerate(_fts_queries(query)):
             try:
-                rows = store.search(fts_query, limit=limit * 2)
+                rows = store.search(
+                    fts_query,
+                    active_snapshot_ids=corpus.active_snapshot_ids,
+                    limit=limit * 2,
+                )
             except IndexStorageError:
                 continue
             for result_rank, row in enumerate(rows, 1):

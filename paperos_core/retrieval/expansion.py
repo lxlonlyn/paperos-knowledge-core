@@ -58,7 +58,7 @@ async def semantic_post_hit_expand(
 ) -> list[Candidate]:
     """Expand only through one direct relation on seed-grounded semantic objects."""
     relations = await compat.semantic_relations_for_chunks(
-        [seed.chunk_id for seed in seeds],
+        {seed.chunk_id: seed.canonical_snapshot_id for seed in seeds},
         dataset_name=dataset_name,
         relation_types={item.value for item in SEMANTIC_RELATION_TYPES},
         limit=limit,

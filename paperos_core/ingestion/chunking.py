@@ -34,6 +34,7 @@ from paperos_core.ingestion.citations import (
     extract_citation_mentions_from_text,
 )
 from paperos_core.ingestion.document_regions import (
+    ElementRegionInfo,
     build_document_regions,
     citation_namespace_for_element,
     region_for_element,
@@ -103,8 +104,8 @@ def build_chunks(
     all_mentions: list[CitationMention] = []
     order = 0
     group_keys = _major_region_group_order(sections, grouped)
-    for major_id, region_id in group_keys:
-        elements_in_group = grouped.get((major_id, region_id), [])
+    for major_id, group_region_id in group_keys:
+        elements_in_group = grouped.get((major_id, group_region_id), [])
         units: list[SentenceUnit] = []
         for index, element in enumerate(elements_in_group):
             section = (
@@ -132,7 +133,7 @@ def build_chunks(
                 region_info = element_regions.get(element.id)
                 if region_info and region_info.region_type == REGION_REFERENCES:
                     continue
-                region_id = region_info.region_id if region_info else None
+                element_region_id = region_info.region_id if region_info else None
                 scope_id = citation_namespace_for_element(element.id, element_regions)
                 scope_diag = (
                     None
@@ -147,7 +148,7 @@ def build_chunks(
                     reference_index=reference_indexes,
                     document_region=region,
                     citation_namespace_id=scope_id,
-                    region_instance_id=region_id,
+                    region_instance_id=element_region_id,
                 )
                 if scope_diag:
                     extracted = [
@@ -182,7 +183,7 @@ def build_chunks(
             start_order=order,
             section_by_id=section_by_id,
             element_regions=element_regions,
-            region_instance_id=region_id,
+            region_instance_id=group_region_id,
         )
         built.extend(section_chunks)
         order += len(section_chunks)
@@ -305,7 +306,7 @@ def _chunks_from_ranges(
     overlap_tokens: int,
     start_order: int,
     section_by_id: dict[str, Section],
-    element_regions: dict,
+    element_regions: dict[str, ElementRegionInfo],
     region_instance_id: str | None = None,
 ) -> list[Chunk]:
     built: list[Chunk] = []
@@ -373,7 +374,7 @@ def _make_chunk(
     overlap_source_chunk_ids: list[str],
     overlap_spans: list[SentenceUnit],
     section_by_id: dict[str, Section],
-    element_regions: dict,
+    element_regions: dict[str, ElementRegionInfo],
     region_instance_id: str | None = None,
 ) -> Chunk:
     text = _join_unit_text(units)

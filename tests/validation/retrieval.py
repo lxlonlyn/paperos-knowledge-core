@@ -1032,13 +1032,13 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         vector_scope = {
             "status": (
                 "PASS"
-                if paperos_vector_collections == ["ChunkDataPoint_text"]
+                if paperos_vector_collections == ["PaperOSChunkDataPoint_text"]
                 else "FAIL"
             ),
             "paperos_collections": paperos_vector_collections,
             "all_runtime_collections": vector_collections,
             "production_consumers": {
-                "ChunkDataPoint_text": [
+                "PaperOSChunkDataPoint_text": [
                     "CogneeSearchAdapter.search_chunks",
                     "semantic_retrieve",
                 ]

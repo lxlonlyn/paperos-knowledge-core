@@ -24,6 +24,7 @@ from paperos_core.domain.canonical import (
     ReferenceEntry,
     Section,
 )
+from paperos_core.domain.documents import utc_now
 from paperos_core.domain.ids import CHUNKING_VERSION, canonical_snapshot_id
 from paperos_core.errors import CanonicalStorageError, CanonicalValidationError
 from paperos_core.ingestion.validation import calculate_sha256
@@ -260,39 +261,78 @@ class CanonicalRepository:
             citation_mentions=citation_mentions,
         )
 
-    def list_snapshot_ids(self) -> list[str]:
+    def activate_snapshot(self, snapshot_id: str) -> str | None:
+        """Atomically replace one Document's active canonical revision pointer."""
+
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                snapshot = connection.execute(
+                    "SELECT document_id FROM canonical_snapshots WHERE id = ?",
+                    (snapshot_id,),
+                ).fetchone()
+                if snapshot is None:
+                    raise CanonicalStorageError(
+                        f"CanonicalSnapshot '{snapshot_id}' does not exist.",
+                        affected=snapshot_id,
+                    )
+                document_id = str(snapshot["document_id"])
+                current = connection.execute(
+                    "SELECT snapshot_id FROM active_canonical_snapshots "
+                    "WHERE document_id = ?",
+                    (document_id,),
+                ).fetchone()
+                previous = str(current["snapshot_id"]) if current is not None else None
+                connection.execute(
+                    """
+                    INSERT INTO active_canonical_snapshots (
+                        document_id, snapshot_id, activated_at
+                    ) VALUES (?, ?, ?)
+                    ON CONFLICT(document_id) DO UPDATE SET
+                        snapshot_id = excluded.snapshot_id,
+                        activated_at = excluded.activated_at
+                    """,
+                    (document_id, snapshot_id, utc_now().isoformat()),
+                )
+                return previous
+        except CanonicalStorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise CanonicalStorageError(
+                f"Unable to activate canonical snapshot: {exc}",
+                affected=snapshot_id,
+            ) from exc
+
+    def active_snapshot_id(self, document_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT snapshot_id FROM active_canonical_snapshots WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()
+        return str(row["snapshot_id"]) if row is not None else None
+
+    def list_active_snapshot_ids(self) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT snapshot_id FROM active_canonical_snapshots "
+                "ORDER BY activated_at, snapshot_id"
+            ).fetchall()
+        return [str(row["snapshot_id"]) for row in rows]
+
+    def list_active_bundles(self) -> list[CanonicalBundle]:
+        return [
+            self.get_bundle(snapshot_id)
+            for snapshot_id in self.list_active_snapshot_ids()
+        ]
+
+    def list_all_snapshot_ids(self) -> list[str]:
+        """List candidates and revisions for internal cleanup and diagnostics."""
+
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT id FROM canonical_snapshots ORDER BY created_at, id"
             ).fetchall()
         return [str(row["id"]) for row in rows]
-
-    def list_latest_snapshot_ids(self) -> list[str]:
-        """Return the current canonical snapshot for every Document."""
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT current.id
-                FROM canonical_snapshots AS current
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM canonical_snapshots AS newer
-                    WHERE newer.document_id = current.document_id
-                      AND (
-                          newer.created_at > current.created_at
-                          OR (
-                              newer.created_at = current.created_at
-                              AND newer.id > current.id
-                          )
-                      )
-                )
-                ORDER BY current.created_at, current.id
-                """
-            ).fetchall()
-        return [str(row["id"]) for row in rows]
-
-    def list_bundles(self) -> list[CanonicalBundle]:
-        return [self.get_bundle(snapshot_id) for snapshot_id in self.list_snapshot_ids()]
 
     def verify_snapshot(self, snapshot_id: str) -> None:
         snapshot = self.get_snapshot(snapshot_id)

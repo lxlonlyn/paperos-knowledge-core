@@ -611,21 +611,9 @@ class ScholarlyRegistry:
     def backfill(
         self, repository: CanonicalRepository
     ) -> list[ScholarlyContext]:
-        latest_by_document: dict[str, CanonicalBundle] = {}
-        for bundle in repository.list_bundles():
-            current = latest_by_document.get(bundle.document.id)
-            if (
-                current is None
-                or bundle.snapshot.created_at > current.snapshot.created_at
-                or (
-                    bundle.snapshot.created_at == current.snapshot.created_at
-                    and bundle.snapshot.id > current.snapshot.id
-                )
-            ):
-                latest_by_document[bundle.document.id] = bundle
         contexts: list[ScholarlyContext] = []
         for bundle in sorted(
-            latest_by_document.values(),
+            repository.list_active_bundles(),
             key=lambda item: (item.snapshot.created_at, item.snapshot.id),
         ):
             projection = repository.get_chunk_projection(bundle.snapshot.id)

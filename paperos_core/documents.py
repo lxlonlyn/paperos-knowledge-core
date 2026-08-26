@@ -31,7 +31,6 @@ class DocumentSummary(BaseModel):
 
 class DocumentDetail(DocumentSummary):
     parse_run_id: str
-    snapshot_ids: list[str]
     reference_count: int
     element_count: int
     raw_pdf_path: Path = Field(exclude=True)
@@ -78,12 +77,13 @@ class DocumentService:
 
     def list_documents(self, *, include_deleted: bool = False) -> list[DocumentSummary]:
         deleted = self.deleted_document_ids()
-        latest = {}
-        for bundle in self.canonical_repository.list_bundles():
-            latest[bundle.document.id] = bundle
+        active = {
+            bundle.document.id: bundle
+            for bundle in self.canonical_repository.list_active_bundles()
+        }
         result: list[DocumentSummary] = []
         for document_id, bundle in sorted(
-            latest.items(), key=lambda item: (item[1].document.title, item[0])
+            active.items(), key=lambda item: (item[1].document.title, item[0])
         ):
             is_deleted = document_id in deleted
             if is_deleted and not include_deleted:
@@ -115,17 +115,17 @@ class DocumentService:
             raise DocumentNotFoundError(
                 f"Document '{document_id}' does not exist.", affected=document_id
             )
-        bundles = [
-            bundle
-            for bundle in self.canonical_repository.list_bundles()
-            if bundle.document.id == document_id
-        ]
-        bundle = bundles[-1]
+        snapshot_id = self.canonical_repository.active_snapshot_id(document_id)
+        if snapshot_id is None:
+            raise DocumentNotFoundError(
+                f"Document '{document_id}' has no active canonical snapshot.",
+                affected=document_id,
+            )
+        bundle = self.canonical_repository.get_bundle(snapshot_id)
         source = self.ingestion.get_source(bundle.document.source_file_id)
         return DocumentDetail(
             **summaries[document_id].model_dump(),
             parse_run_id=bundle.snapshot.parse_run_id,
-            snapshot_ids=[item.snapshot.id for item in bundles],
             reference_count=len(bundle.references),
             element_count=len(bundle.elements),
             raw_pdf_path=source.storage_path,
@@ -143,19 +143,21 @@ class DocumentService:
 
     async def delete(self, document_id: str) -> DocumentDeletionReport:
         self.inspect(document_id)
-        lexical_count = len(self.indexes.lexical.object_ids(document_id))
-        bundle = next(
-            bundle
-            for bundle in reversed(self.canonical_repository.list_bundles())
-            if bundle.document.id == document_id
-        )
+        snapshot_id = self.canonical_repository.active_snapshot_id(document_id)
+        if snapshot_id is None:
+            raise DocumentNotFoundError(
+                f"Document '{document_id}' has no active canonical snapshot.",
+                affected=document_id,
+            )
+        lexical_count = len(self.indexes.lexical.object_ids(snapshot_id))
+        bundle = self.canonical_repository.get_bundle(snapshot_id)
         vector_count = await self.cognee.delete_document_data(bundle.snapshot.id)
         with self._connect() as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO document_tombstones(document_id) VALUES (?)",
                 (document_id,),
             )
-        self.indexes.lexical.delete_document(document_id)
+        self.indexes.lexical.delete_snapshot(snapshot_id)
         return DocumentDeletionReport(
             document_id=document_id,
             removed_lexical_objects=lexical_count,

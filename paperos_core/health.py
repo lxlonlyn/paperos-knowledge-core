@@ -134,7 +134,7 @@ class HealthService:
             "status": "healthy",
             **self.indexes.lexical.status(),
         }
-        bundles = self.canonical_repository.list_bundles()
+        bundles = self.canonical_repository.list_active_bundles()
         dataset_name: str | None = None
         if bundles:
             manifest = self.cognee.read_manifest(bundles[-1].snapshot.id)
@@ -174,6 +174,7 @@ class HealthService:
                 await self.cognee.get_datapoint(
                     bundles[-1].document.id,
                     dataset_name=dataset_name,
+                    snapshot_id=bundles[-1].snapshot.id,
                 )
             components["cognee_graph"] = {
                 "status": "healthy",

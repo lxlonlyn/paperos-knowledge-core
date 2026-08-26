@@ -52,14 +52,14 @@ class SectionDataPoint(CanonicalBackedDataPoint):
     metadata: dict[str, Any] = {"index_fields": []}  # noqa: RUF012
 
 
-class ChunkDataPoint(CanonicalBackedDataPoint):
+class PaperOSChunkDataPoint(CanonicalBackedDataPoint):
     document_id: str
     section_id: str | None = None
     section_path: str | None = None
     text: str
     page_start: int | None = None
     page_end: int | None = None
-    metadata: dict[str, Any] = {"index_fields": ["text"]}  # noqa: RUF012
+    metadata: dict[str, Any] = {"index_fields": []}  # noqa: RUF012
 
 
 class ElementDataPoint(CanonicalBackedDataPoint):

@@ -20,7 +20,7 @@ def validate_feedback(
         )
     chunk_ids = {
         chunk.id
-        for bundle in canonical_repository.list_bundles()
+        for bundle in canonical_repository.list_active_bundles()
         for chunk in canonical_repository.get_chunk_projection(
             bundle.snapshot.id
         ).chunks

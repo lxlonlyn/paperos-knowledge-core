@@ -53,7 +53,7 @@ class IndexManager:
         chunks: list[Chunk],
     ) -> None:
         chunk_ids = {chunk.id for chunk in chunks}
-        lexical_ids = set(self.lexical.object_ids(bundle.document.id))
+        lexical_ids = set(self.lexical.object_ids(bundle.snapshot.id))
         failures: dict[str, object] = {}
         if not chunk_ids.issubset(lexical_ids):
             failures["lexical_missing_chunks"] = sorted(chunk_ids - lexical_ids)

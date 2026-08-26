@@ -6,25 +6,19 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+from typing import TypeVar
 
-from paperos_core.domain.canonical import Chunk, CitationMention, ReferenceEntry, Section
+from paperos_core.domain.canonical import Chunk, CitationMention, Element, ReferenceEntry, Section
 from paperos_core.domain.ids import citation_mention_id, citation_span_id
-from paperos_core.ingestion.citation_candidates import detect_citation_candidates
-from paperos_core.ingestion.inline_domains import (
-    bracket_inner,
-    iter_bracket_scopes,
-    scan_inline_domains,
-)
 from paperos_core.ingestion.bibliography_scope import (
-    BibliographyScope,
-    REGION_ABSTRACT,
+    FAILURE_NAMESPACE_NOT_ASSIGNED,
     REGION_MAIN,
-    REGION_SUPPLEMENT,
+    BibliographyScope,
     ScopedBibliography,
     assign_bibliography_scopes,
-    FAILURE_NAMESPACE_NOT_ASSIGNED,
     repair_numeric_label_sequence,
 )
+from paperos_core.ingestion.citation_candidates import detect_citation_candidates
 from paperos_core.ingestion.normalization import plain_text
 
 REF_LABEL_RE = re.compile(
@@ -90,6 +84,7 @@ FAILURE_AMBIGUOUS_AUTHOR_YEAR = "AMBIGUOUS_AUTHOR_YEAR"
 FAILURE_SCOPE_NOT_FOUND = "SCOPE_NOT_FOUND"
 FAILURE_UNPARSEABLE = "UNPARSEABLE"
 
+_KeyT = TypeVar("_KeyT")
 
 @dataclass
 class ReferenceIndexes:
@@ -166,9 +161,9 @@ def build_reference_indexes(references: list[ReferenceEntry]) -> ReferenceIndexe
 def build_scoped_reference_indexes(
     *,
     references: list[ReferenceEntry],
-    elements: list,
+    elements: list[Element],
     sections: list[Section],
-) -> ScopedBibliography:
+) -> ScopedBibliography[ReferenceIndexes]:
     reference_scope, assigned_scopes = assign_bibliography_scopes(
         references=references,
         elements=elements,
@@ -278,9 +273,7 @@ def _looks_like_author_year_bracket(inner: str) -> bool:
     if not _YEAR_RE.search(inner):
         return False
     compact = re.sub(r"\s+", "", inner)
-    if re.fullmatch(r"[\d,;\-–−—]+", compact):
-        return False
-    return True
+    return not re.fullmatch(r"[\d,;\-–−—]+", compact)
 
 
 def resolve_bracket(
@@ -320,7 +313,11 @@ def extract_citation_mentions_from_text(
     snapshot_id: str,
     element_id: str,
     text: str,
-    reference_index: dict[str, ReferenceEntry] | ReferenceIndexes | ScopedBibliography,
+    reference_index: (
+        dict[str, ReferenceEntry]
+        | ReferenceIndexes
+        | ScopedBibliography[ReferenceIndexes]
+    ),
     document_region: str | None = None,
     bibliography_scope_ids: list[str] | None = None,
     bibliography_scope_id: str | None = None,
@@ -394,9 +391,12 @@ def _emit_bracket_mentions(
     left_context: str | None = None,
     mentions: list[CitationMention],
 ) -> bool:
-    if not _looks_like_author_year_bracket(inner) and not _looks_like_citation_bracket(inner):
-        if _split_ocred_symbolic_group(inner) is None:
-            return False
+    if (
+        not _looks_like_author_year_bracket(inner)
+        and not _looks_like_citation_bracket(inner)
+        and _split_ocred_symbolic_group(inner) is None
+    ):
+        return False
     resolved = resolve_bracket(inner, indexes, left_context=left_context)
     if resolved:
         if not _should_emit_bracket_citation(inner, resolved, indexes):
@@ -476,11 +476,7 @@ def _should_emit_bracket_citation(
         return True
     if any(item.resolution_status == "resolved" for item in resolutions):
         return True
-    if any(
-        normalize_citation_label(item.atomic_key) in indexes.label_map for item in resolutions
-    ):
-        return True
-    return False
+    return bool(any(normalize_citation_label(item.atomic_key) in indexes.label_map for item in resolutions))
 
 
 def _author_year_mentions(
@@ -529,12 +525,19 @@ def attach_mentions_to_chunks(
 
 
 def _resolve_reference_context(
-    reference_index: dict[str, ReferenceEntry] | ReferenceIndexes | ScopedBibliography,
+    reference_index: (
+        dict[str, ReferenceEntry]
+        | ReferenceIndexes
+        | ScopedBibliography[ReferenceIndexes]
+    ),
     *,
     document_region: str | None,
     bibliography_scope_ids: list[str] | None,
     bibliography_scope_id: str | None = None,
-) -> tuple[ScopedBibliography | None, ReferenceIndexes]:
+) -> tuple[
+    ScopedBibliography[ReferenceIndexes] | None,
+    ReferenceIndexes,
+]:
     if isinstance(reference_index, ScopedBibliography):
         scoped = reference_index
         scope_id = bibliography_scope_id
@@ -882,7 +885,7 @@ def _all_author_surnames(authors_text: str) -> list[str]:
         lowered = cleaned.casefold()
         if lowered in {"et al", "et al.", "eds", "ed", "ed."}:
             continue
-        if lowered.endswith("et al.") or lowered.endswith("et al"):
+        if lowered.endswith(("et al.", "et al")):
             cleaned = re.sub(r"\s+et\s+al\.?$", "", cleaned, flags=re.IGNORECASE)
         surname = _surname_from_author(cleaned)
         if surname and surname.casefold() not in {"et", "al"}:
@@ -890,7 +893,7 @@ def _all_author_surnames(authors_text: str) -> list[str]:
     return surnames
 
 
-def _citation_author_constraints(author: str) -> tuple[str | None, str | None]:
+def _citation_author_constraints(author: str) -> tuple[str, str | None]:
     normalized = _normalize_author_key(author)
     if " et al" in normalized:
         return normalized.split(" et al", 1)[0].strip(), None
@@ -980,14 +983,10 @@ def _fuzzy_surname_match(citation_token: str, bibliography_token: str) -> bool:
             return True
         if len(left) == 3 and (right.startswith(left) or right.endswith(left)):
             return True
-        if len(right) == 3 and (left.startswith(right) or left.endswith(right)):
-            return True
-        return False
+        return bool(len(right) == 3 and (left.startswith(right) or left.endswith(right)))
     if SequenceMatcher(None, left, right).ratio() >= 0.84:
         return True
-    if left[:3] == right[:3] and abs(len(left) - len(right)) <= 2:
-        return True
-    return False
+    return bool(left[:3] == right[:3] and abs(len(left) - len(right)) <= 2)
 
 
 def _reference_matches_year(
@@ -1118,13 +1117,13 @@ def _resolve_unique(
         return entries[0], None
     identities = {_work_identity(entry) for entry in entries}
     if len(identities) == 1:
-        return sorted(entries, key=lambda item: item.order)[0], None
+        return min(entries, key=lambda item: item.order), None
     return None, FAILURE_AMBIGUOUS_LABEL
 
 
 def _append_unique(
-    mapping: dict,
-    key,
+    mapping: dict[_KeyT, list[ReferenceEntry]],
+    key: _KeyT,
     reference: ReferenceEntry,
 ) -> None:
     bucket = mapping.setdefault(key, [])
@@ -1132,7 +1131,11 @@ def _append_unique(
         bucket.append(reference)
 
 
-def _extend_unique(mapping: dict, key, entries: list[ReferenceEntry]) -> None:
+def _extend_unique(
+    mapping: dict[_KeyT, list[ReferenceEntry]],
+    key: _KeyT,
+    entries: list[ReferenceEntry],
+) -> None:
     for reference in entries:
         _append_unique(mapping, key, reference)
 
@@ -1299,18 +1302,18 @@ def _is_negative_bracket_domain(inner: str, text: str, start: int) -> bool:
         return True
     if "," in inner and not re.search(r"\d\s*[-–−—]\s*\d", inner):
         parts = [part.strip() for part in inner.split(",")]
-        if len(parts) > 1 and all(part.isdigit() for part in parts):
-            # Tensor/image shapes such as [64, 64] and [256, 256, 256]
-            # are structured dimensions, not grouped citation labels.
-            if len(set(parts)) == 1:
-                return True
+        if (
+            len(parts) > 1
+            and all(part.isdigit() for part in parts)
+            and len(set(parts)) == 1
+        ):
+            # Repeated tensor/image dimensions are not citation labels.
+            return True
         if len(parts) == 2 and parts[0].isdigit():
             if parts[0] == "0" and parts[1].casefold() in {"1", "t"}:
                 return True
             if parts[1].isdigit():
-                if int(parts[0]) == 0 and int(parts[1]) == 1:
-                    return True
-                return False
+                return bool(int(parts[0]) == 0 and int(parts[1]) == 1)
             if not _is_numeric_citation_part(parts[1]):
                 return True
     if _YEAR_ONLY_BRACKET_RE.fullmatch(inner.strip()):
@@ -1328,9 +1331,7 @@ def _is_numeric_citation_part(part: str) -> bool:
         return True
     if NUMERIC_RANGE_RE.match(value):
         return True
-    if re.fullmatch(r"\d+\s*[-–−—]\s*\d+", value):
-        return True
-    return False
+    return bool(re.fullmatch(r"\d+\s*[-–−—]\s*\d+", value))
 
 
 def _left_author_match(text: str, bracket_start: int) -> tuple[str, int] | None:
@@ -1382,9 +1383,7 @@ def _is_venue_false_positive(text: str, start: int, surface: str) -> bool:
     if _VENUE_FALSE_POSITIVE_RE.search(window):
         return True
     author = surface.strip().strip("()")
-    if author.casefold().startswith("processing "):
-        return True
-    return False
+    return bool(author.casefold().startswith("processing "))
 
 
 def _looks_like_citation_bracket(inner: str) -> bool:
@@ -1405,8 +1404,6 @@ def _looks_like_citation_bracket(inner: str) -> bool:
         return False
     if re.fullmatch(r"[a-z]{2,12}\.[A-Za-z]{2,12}", inner.strip()):
         return False
-    if re.search(r"\bsec(?:tion)?\b|\bcor(?:ollary)?\b|\beq(?:uation)?\b", inner, re.I):
+    if re.search(r"\bsec(?:tion)?\b|\bcor(?:ollary)?\b|\beq(?:uation)?\b", inner, re.IGNORECASE):
         return False
-    if re.fullmatch(r";\s*", inner.strip()):
-        return False
-    return True
+    return not re.fullmatch(r";\s*", inner.strip())

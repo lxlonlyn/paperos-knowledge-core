@@ -131,7 +131,7 @@ def test_direct_semantic_operator_rejects_indirect_and_infrastructure_paths() ->
     work_a = "work-a"
     work_b = "work-b"
     nodes = [
-        (seed_graph_id, {"type": "ChunkDataPoint", "canonical_id": seed_id}),
+        (seed_graph_id, {"type": "PaperOSChunkDataPoint", "canonical_id": seed_id}),
         (
             entity_a,
             {
@@ -191,7 +191,7 @@ def test_direct_semantic_operator_requires_relation_level_source_provenance() ->
     seed_id = "chunk_seed"
     seed_graph_id = str(cognee_uuid(seed_id))
     nodes = [
-        (seed_graph_id, {"type": "ChunkDataPoint", "canonical_id": seed_id}),
+        (seed_graph_id, {"type": "PaperOSChunkDataPoint", "canonical_id": seed_id}),
         (
             "entity-a",
             {
@@ -504,15 +504,15 @@ def test_only_chunk_datapoints_declare_vector_indexes() -> None:
         and "metadata" in model.model_fields
         and model.model_fields["metadata"].default["index_fields"]
     }
-    assert indexed == {"ChunkDataPoint": ["text"]}
+    assert indexed == {}
     assert not hasattr(datapoints, "TripletDataPoint")
     assert "TRIPLET_SOURCE" not in RelationType.__members__
     assert "TRIPLET_TARGET" not in RelationType.__members__
 
-    chunk_node_type = type("ChunkDataPoint", (), {})
+    chunk_node_type = type("PaperOSChunkDataPoint", (), {})
     chunk_node = chunk_node_type()
     chunk_node.metadata = {"index_fields": ["text"]}
     chunk_node.text = "canonical chunk"
     graph = SimpleNamespace(nodes=[chunk_node])
     # The production collection contract remains the Chunk text collection.
-    assert set(_vector_groups(graph)) == {"ChunkDataPoint_text"}
+    assert set(_vector_groups(graph)) == {"PaperOSChunkDataPoint_text"}

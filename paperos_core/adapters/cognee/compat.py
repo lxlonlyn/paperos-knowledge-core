@@ -19,6 +19,7 @@ Only narrowly version-locked private access is justified and centralized here:
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import os
 import tempfile
@@ -50,12 +51,34 @@ if TYPE_CHECKING:
 # Cognee 1.4.0 public search cannot select custom-pipeline DataPoint
 # collections. Collection names remain private to this compatibility boundary.
 _COGNEE_1_4_RETRIEVAL_COLLECTIONS: dict[str, tuple[tuple[str, str, str], ...]] = {
-    "PAPEROS_CHUNKS": (("ChunkDataPoint_text", "text", "ChunkDataPoint"),),
+    "PAPEROS_CHUNKS": (("PaperOSChunkDataPoint_text", "text", "PaperOSChunkDataPoint"),),
 }
+_PAPEROS_CHUNK_COLLECTION = "PaperOSChunkDataPoint_text"
 
 
 def cognee_uuid(canonical_id: str, *, mapping_version: str = "1") -> UUID:
     return uuid5(NAMESPACE_URL, f"paperos:cognee:{mapping_version}:{canonical_id}")
+
+
+def cognee_snapshot_uuid(
+    snapshot_id: str,
+    canonical_id: str,
+    *,
+    mapping_version: str = "1",
+) -> UUID:
+    """Map canonical provenance to snapshot-isolated Cognee storage identity."""
+
+    return uuid5(
+        NAMESPACE_URL,
+        f"paperos:cognee-snapshot:{mapping_version}:{snapshot_id}:{canonical_id}",
+    )
+
+
+def cognee_data_identity(source_sha256: str, snapshot_id: str) -> str:
+    """Return stable identity material unique to one canonical revision."""
+
+    material = f"paperos:cognee-data:1:{source_sha256.casefold()}:{snapshot_id}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def resolve_cognee_tokenizer() -> Any:
@@ -397,6 +420,7 @@ class CogneeCompatibilityAdapter:
                     "canonical_snapshot_id": snapshot_id,
                     "document_id": document_id,
                     "source_sha256": source.sha256,
+                    "data_identity_version": "snapshot-v1",
                 }
             },
             "pipeline_status": {"paperos_knowledge_ingestion": "registered"},
@@ -404,11 +428,7 @@ class CogneeCompatibilityAdapter:
             "data_size": source.size_bytes,
             "importance_weight": 0.5,
         }
-        from cognee.modules.data.methods import (
-            get_unique_data_id,
-        )
-
-        data_id = await get_unique_data_id(source.sha256, user)
+        data_id = await self.snapshot_data_id(source.sha256, snapshot_id)
         engine = get_relational_engine()
         try:
             async with engine.get_async_session() as session:
@@ -435,6 +455,23 @@ class CogneeCompatibilityAdapter:
             ) from exc
         return UUID(str(data_id))
 
+    async def snapshot_data_id(self, source_sha256: str, snapshot_id: str) -> UUID:
+        """Resolve the production Data ID for one source revision without writing it."""
+
+        from cognee.modules.data.methods import (
+            get_unique_data_id,
+        )
+        from cognee.modules.users.methods import (
+            get_default_user,
+        )
+
+        user = await get_default_user()
+        data_id = await get_unique_data_id(
+            cognee_data_identity(source_sha256, snapshot_id),
+            user,
+        )
+        return UUID(str(data_id))
+
     async def add_data_points(
         self,
         data_points: list[Any],
@@ -448,6 +485,8 @@ class CogneeCompatibilityAdapter:
         )
 
         try:
+            await self._record_candidate_vector_ids(data_points)
+            await self._index_paperos_chunk_vectors(data_points)
             result = await add_data_points(
                 data_points,
                 custom_edges=custom_edges,
@@ -461,10 +500,54 @@ class CogneeCompatibilityAdapter:
                 affected=self.paths.cognee,
             ) from exc
 
+    async def _record_candidate_vector_ids(self, data_points: list[Any]) -> None:
+        chunks = [
+            node for node in data_points if type(node).__name__ == "PaperOSChunkDataPoint"
+        ]
+        if not chunks:
+            return
+        snapshot_ids = {str(node.canonical_snapshot_id) for node in chunks}
+        if len(snapshot_ids) != 1:
+            raise CogneeStorageError(
+                "PaperOS vector batch spans canonical snapshots.",
+                details={"snapshot_count": len(snapshot_ids)},
+            )
+        snapshot_id = next(iter(snapshot_ids))
+        manifest = self.read_manifest(snapshot_id)
+        manifest["candidate_cognee_ids"] = sorted(str(node.id) for node in chunks)
+        _atomic_json(
+            self.paths.cognee / "manifests" / f"{snapshot_id}.json",
+            manifest,
+        )
+
+    @staticmethod
+    async def _index_paperos_chunk_vectors(data_points: list[Any]) -> None:
+        """Write complete PaperOS chunk payloads through the real vector engine."""
+        from cognee.infrastructure.databases.vector import (  # type: ignore[import-untyped]
+            get_vector_engine_async,
+        )
+
+        chunks = [
+            node.model_copy(update={"metadata": {"index_fields": ["text"]}}, deep=True)
+            for node in data_points
+            if type(node).__name__ == "PaperOSChunkDataPoint"
+        ]
+        if not chunks:
+            return
+        engine = await get_vector_engine_async()
+        await engine.create_collection(
+            _PAPEROS_CHUNK_COLLECTION,
+            payload_schema=type(chunks[0]),
+        )
+        await engine.create_data_points(_PAPEROS_CHUNK_COLLECTION, chunks)
+
     async def verify_graph(self, graph: DataPointGraph) -> None:
         failures: list[str] = []
         for node in graph.nodes:
-            result = await self.get_datapoint(node.canonical_id)
+            result = await self.get_datapoint(
+                node.canonical_id,
+                snapshot_id=getattr(node, "canonical_snapshot_id", None),
+            )
             properties = _flatten_node(result)
             if properties.get("canonical_id") != node.canonical_id:
                 failures.append(node.canonical_id)
@@ -480,17 +563,26 @@ class CogneeCompatibilityAdapter:
         canonical_id: str,
         *,
         dataset_name: str | None = None,
+        snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         if dataset_name is not None:
             async with await self._dataset_scope(dataset_name):
-                return await self.get_datapoint(canonical_id)
+                return await self.get_datapoint(
+                    canonical_id,
+                    snapshot_id=snapshot_id,
+                )
         from cognee.infrastructure.databases.graph.get_graph_engine import (
             get_graph_engine,
         )
 
         engine = await get_graph_engine()
+        storage_id = (
+            cognee_snapshot_uuid(snapshot_id, canonical_id)
+            if snapshot_id is not None
+            else cognee_uuid(canonical_id)
+        )
         try:
-            result = await engine.get_node(str(cognee_uuid(canonical_id)))
+            result = await engine.get_node(str(storage_id))
         except Exception as exc:
             raise CogneeStorageError(
                 f"Cognee failed to read DataPoint: {exc}", affected=canonical_id
@@ -501,7 +593,7 @@ class CogneeCompatibilityAdapter:
 
     async def verify_vector_indexes(self, graph: DataPointGraph) -> list[str]:
         """Read back every declared DataPoint vector from Cognee's vector engine."""
-        from cognee.infrastructure.databases.vector import (  # type: ignore[import-untyped]
+        from cognee.infrastructure.databases.vector import (
             get_vector_engine_async,
         )
 
@@ -565,13 +657,14 @@ class CogneeCompatibilityAdapter:
         dataset_name: str,
         search_type: str,
         canonical_ids: dict[str, str],
+        active_snapshot_ids: set[str],
         top_k: int,
     ) -> list[CogneeVectorHit]:
         """Search PaperOS DataPoint collections in one Cognee dataset.
 
         Cognee 1.4's public ``CHUNKS`` retriever is bound to its built-in
         ``DocumentChunk_text`` collection.  A custom pipeline correctly creates
-        collections such as ``ChunkDataPoint_text`` instead, but the public
+        collections such as ``PaperOSChunkDataPoint_text`` instead, but the public
         search API cannot name them.  Keep this version-specific vector-engine
         access here and return only normalized, provenance-bearing hits.
 
@@ -633,6 +726,12 @@ class CogneeCompatibilityAdapter:
                         if not isinstance(payload, dict):
                             continue
                         cognee_id = str(payload.get("id") or result.id)
+                        payload_snapshot_id = payload.get("canonical_snapshot_id")
+                        if (
+                            payload_snapshot_id is None
+                            or str(payload_snapshot_id) not in active_snapshot_ids
+                        ):
+                            continue
                         canonical_id = canonical_ids.get(cognee_id)
                         payload_canonical_id = payload.get("canonical_id")
                         if (
@@ -656,9 +755,7 @@ class CogneeCompatibilityAdapter:
                             source_chunk_ids=tuple(_string_list(payload.get("source_chunk_ids"))),
                             derived_from_ids=tuple(_string_list(payload.get("derived_from_ids"))),
                             canonical_snapshot_id=(
-                                str(payload["canonical_snapshot_id"])
-                                if payload.get("canonical_snapshot_id")
-                                else None
+                                str(payload_snapshot_id)
                             ),
                         )
                         previous = best.get(cognee_id)
@@ -688,6 +785,11 @@ class CogneeCompatibilityAdapter:
         try:
             dataset_id = UUID(str(dataset["id"]))
             data_id = UUID(str(data_item["id"]))
+            await self._delete_paperos_chunk_vectors(
+                manifest=manifest,
+                dataset_id=dataset_id,
+                data_id=data_id,
+            )
             await datasets.delete_data(dataset_id=dataset_id, data_id=data_id)
         except Exception as exc:
             raise CogneeStorageError(
@@ -696,6 +798,59 @@ class CogneeCompatibilityAdapter:
             ) from exc
         node_count = manifest.get("node_count", 0)
         return int(node_count) if isinstance(node_count, int) else 0
+
+    @staticmethod
+    async def _delete_paperos_chunk_vectors(
+        *,
+        manifest: dict[str, Any],
+        dataset_id: UUID,
+        data_id: UUID,
+    ) -> None:
+        """Idempotently delete one revisions explicit PaperOS vector rows."""
+        from cognee.infrastructure.databases.graph.get_graph_engine import (
+            get_graph_engine,
+        )
+        from cognee.infrastructure.databases.provenance import (  # type: ignore[import-untyped]
+            make_source_ref_key,
+        )
+        from cognee.infrastructure.databases.relational import (
+            get_relational_engine,
+        )
+        from cognee.infrastructure.databases.vector import (
+            get_vector_engine_async,
+        )
+        from cognee.modules.graph.models import Node  # type: ignore[import-untyped]
+        from sqlalchemy import select
+
+        node_ids: set[str] = set()
+        mapping = manifest.get("canonical_to_cognee_id")
+        if isinstance(mapping, dict):
+            node_ids.update(str(value) for value in mapping.values())
+        candidate_ids = manifest.get("candidate_cognee_ids")
+        if isinstance(candidate_ids, list):
+            node_ids.update(str(value) for value in candidate_ids)
+        try:
+            graph = await get_graph_engine()
+            source_ref = make_source_ref_key(dataset_id, data_id)
+            node_ids.update(
+                str(value) for value in await graph.find_nodes_by_source_ref(source_ref)
+            )
+        except Exception:  # noqa: BLE001, S110 - relational provenance remains available.
+            pass
+        engine = get_relational_engine()
+        async with engine.get_async_session() as session:
+            rows = await session.scalars(
+                select(Node.slug).where(
+                    Node.dataset_id == dataset_id,
+                    Node.data_id == data_id,
+                )
+            )
+            node_ids.update(str(value) for value in rows)
+        if not node_ids:
+            return
+        vector = await get_vector_engine_async()
+        if await vector.has_collection(_PAPEROS_CHUNK_COLLECTION):
+            await vector.delete_data_points(_PAPEROS_CHUNK_COLLECTION, sorted(node_ids))
 
     async def provenance_counts(
         self,
@@ -722,13 +877,13 @@ class CogneeCompatibilityAdapter:
         from cognee.infrastructure.databases.graph.get_graph_engine import (
             get_graph_engine,
         )
-        from cognee.infrastructure.databases.provenance import (  # type: ignore[import-untyped]
+        from cognee.infrastructure.databases.provenance import (
             make_source_ref_key,
         )
         from cognee.infrastructure.databases.relational import (
             get_relational_engine,
         )
-        from cognee.modules.graph.models import Edge, Node  # type: ignore[import-untyped]
+        from cognee.modules.graph.models import Edge, Node
         from sqlalchemy import func, select
 
         engine = get_relational_engine()
@@ -884,7 +1039,7 @@ class CogneeCompatibilityAdapter:
 
     async def semantic_relations_for_chunks(
         self,
-        chunk_ids: list[str],
+        chunk_snapshot_ids: dict[str, str],
         *,
         relation_types: set[str],
         dataset_name: str,
@@ -903,7 +1058,7 @@ class CogneeCompatibilityAdapter:
             "filtered_semantic_relations": 0,
             "missing_relation_source_provenance": 0,
         }
-        if not chunk_ids or not relation_types or limit <= 0:
+        if not chunk_snapshot_ids or not relation_types or limit <= 0:
             return []
         central_types = {item.value for item in SEMANTIC_RELATION_TYPES}
         unsupported = relation_types - central_types
@@ -918,8 +1073,11 @@ class CogneeCompatibilityAdapter:
             get_graph_engine,
         )
 
-        seeds = list(dict.fromkeys(str(item) for item in chunk_ids))
-        seed_cognee_ids = [str(cognee_uuid(item)) for item in seeds]
+        seeds = list(dict.fromkeys(str(item) for item in chunk_snapshot_ids))
+        seed_cognee_ids = [
+            str(cognee_snapshot_uuid(chunk_snapshot_ids[item], item))
+            for item in seeds
+        ]
         async with await self._dataset_scope(dataset_name):
             engine = await get_graph_engine()
             try:
@@ -938,7 +1096,9 @@ class CogneeCompatibilityAdapter:
         return _direct_semantic_relations(
             nodes,
             edges,
-            seed_chunk_ids=set(seeds),
+            seed_chunk_snapshot_ids={
+                item: chunk_snapshot_ids[item] for item in seeds
+            },
             relation_types=relation_types,
             limit=limit,
             diagnostics=self.last_semantic_relation_trace,
@@ -1063,16 +1223,6 @@ class CogneeCompatibilityAdapter:
             raise CogneeStorageError("Invalid Cognee manifest.", affected=path)
         return payload
 
-    @staticmethod
-    async def prune_derived_data() -> None:
-        """Destructively prune Cognee's derived graph/vector/metadata stores."""
-        from cognee.modules.data.deletion import (  # type: ignore[import-untyped]
-            prune_data,
-            prune_system,
-        )
-
-        await prune_data()
-        await prune_system(graph=True, vector=True, metadata=True, cache=True)
 
 
 def _close_subprocess_queues(session: Any) -> None:
@@ -1091,6 +1241,9 @@ def _close_subprocess_queues(session: Any) -> None:
 def _vector_groups(graph: DataPointGraph) -> dict[str, list[Any]]:
     groups: dict[str, list[Any]] = {}
     for node in graph.nodes:
+        if type(node).__name__ == "PaperOSChunkDataPoint" and node.text.strip():
+            groups.setdefault(_PAPEROS_CHUNK_COLLECTION, []).append(node)
+            continue
         for field_name in node.metadata.get("index_fields", []):
             value = getattr(node, field_name, None)
             if value is None or (isinstance(value, str) and not value.strip()):
@@ -1118,7 +1271,7 @@ def _direct_semantic_relations(
     nodes: list[Any],
     edges: list[Any],
     *,
-    seed_chunk_ids: set[str],
+    seed_chunk_snapshot_ids: dict[str, str],
     relation_types: set[str],
     limit: int,
     diagnostics: dict[str, int] | None = None,
@@ -1138,7 +1291,11 @@ def _direct_semantic_relations(
         )
         == "EntityDataPoint"
     }
-    seed_cognee_ids = {str(cognee_uuid(chunk_id)) for chunk_id in seed_chunk_ids}
+    seed_chunk_ids = set(seed_chunk_snapshot_ids)
+    seed_cognee_ids = {
+        str(cognee_snapshot_uuid(snapshot_id, chunk_id))
+        for chunk_id, snapshot_id in seed_chunk_snapshot_ids.items()
+    }
     grounded_node_ids = {
         node_id
         for node_id in semantic_node_ids

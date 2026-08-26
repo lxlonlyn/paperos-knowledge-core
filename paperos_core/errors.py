@@ -178,22 +178,22 @@ def _safe_api_value(value: Any, *, key: str | None = None) -> Any:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, dict):
-        safe_items: dict[str, Any] = {}
+        safe_items_dict: dict[str, Any] = {}
         for item_key, item_value in value.items():
             rendered_key = str(item_key)
             if _contains_local_reference(rendered_key):
                 continue
             safe = _safe_api_value(item_value, key=rendered_key)
             if safe is not _REDACTED:
-                safe_items[rendered_key] = safe
-        return safe_items
+                safe_items_dict[rendered_key] = safe
+        return safe_items_dict
     if isinstance(value, (list, tuple)):
-        safe_items = []
+        safe_items_list = []
         for item in value:
             safe = _safe_api_value(item, key=key)
             if safe is not _REDACTED:
-                safe_items.append(safe)
-        return safe_items
+                safe_items_list.append(safe)
+        return safe_items_list
     return _REDACTED
 
 

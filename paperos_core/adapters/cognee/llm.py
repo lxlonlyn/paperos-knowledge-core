@@ -642,43 +642,43 @@ def _normalize_section_extraction(
         for item in extraction.entities
     ]
     claims: list[_ClaimExtraction] = []
-    for item in extraction.claims:
+    for claim in extraction.claims:
         source_ids = _validate_chunk_ids(
-            item.source_chunk_ids,
+            claim.source_chunk_ids,
             valid_chunks,
-            object_key=item.key,
+            object_key=claim.key,
             snapshot_id=snapshot_id,
         )
         about = _normalize_about_items(
-            item.about,
+            claim.about,
             claim_source_ids=source_ids,
             valid_chunks=valid_chunks,
             valid_work_keys=valid_work_keys,
-            object_key=item.key,
+            object_key=claim.key,
             snapshot_id=snapshot_id,
             raise_on_invalid_work=True,
         )
-        claims.append(item.model_copy(update={"source_chunk_ids": source_ids, "about": about}))
+        claims.append(claim.model_copy(update={"source_chunk_ids": source_ids, "about": about}))
     entity_keys = {item.key for item in entities}
     relations: list[_RelationExtraction] = []
-    for item in extraction.relations:
-        unknown_keys = sorted({item.source_key, item.target_key} - entity_keys)
+    for relation in extraction.relations:
+        unknown_keys = sorted({relation.source_key, relation.target_key} - entity_keys)
         if unknown_keys:
             raise SemanticEnrichmentError(
                 "LLM relation references an unknown entity key.",
-                affected=f"{item.source_key}->{item.target_key}",
+                affected=f"{relation.source_key}->{relation.target_key}",
                 details={
                     "snapshot_id": snapshot_id,
                     "unknown_entity_keys": unknown_keys,
                 },
             )
         relations.append(
-            item.model_copy(
+            relation.model_copy(
                 update={
                     "source_chunk_ids": _validate_chunk_ids(
-                        item.source_chunk_ids,
+                        relation.source_chunk_ids,
                         valid_chunks,
-                        object_key=f"{item.source_key}->{item.target_key}",
+                        object_key=f"{relation.source_key}->{relation.target_key}",
                         snapshot_id=snapshot_id,
                     )
                 }
@@ -710,38 +710,38 @@ def _sanitize_section_extraction(
             return None
 
     entities: list[_EntityExtraction] = []
-    for item in extraction.entities:
-        source_ids = valid_ids(item.source_chunk_ids, object_key=item.key)
+    for entity in extraction.entities:
+        source_ids = valid_ids(entity.source_chunk_ids, object_key=entity.key)
         if source_ids:
-            entities.append(item.model_copy(update={"source_chunk_ids": source_ids}))
+            entities.append(entity.model_copy(update={"source_chunk_ids": source_ids}))
 
     claims: list[_ClaimExtraction] = []
-    for item in extraction.claims:
-        source_ids = valid_ids(item.source_chunk_ids, object_key=item.key)
+    for claim in extraction.claims:
+        source_ids = valid_ids(claim.source_chunk_ids, object_key=claim.key)
         if not source_ids:
             continue
         about = _normalize_about_items(
-            item.about,
+            claim.about,
             claim_source_ids=source_ids,
             valid_chunks=valid_chunks,
             valid_work_keys=valid_work_keys,
-            object_key=item.key,
+            object_key=claim.key,
             snapshot_id=snapshot_id,
             raise_on_invalid_work=False,
         )
-        claims.append(item.model_copy(update={"source_chunk_ids": source_ids, "about": about}))
+        claims.append(claim.model_copy(update={"source_chunk_ids": source_ids, "about": about}))
 
-    entity_keys = {item.key for item in entities}
+    entity_keys = {entity.key for entity in entities}
     relations: list[_RelationExtraction] = []
-    for item in extraction.relations:
-        if item.source_key not in entity_keys or item.target_key not in entity_keys:
+    for relation in extraction.relations:
+        if relation.source_key not in entity_keys or relation.target_key not in entity_keys:
             continue
         source_ids = valid_ids(
-            item.source_chunk_ids,
-            object_key=f"{item.source_key}->{item.target_key}",
+            relation.source_chunk_ids,
+            object_key=f"{relation.source_key}->{relation.target_key}",
         )
         if source_ids:
-            relations.append(item.model_copy(update={"source_chunk_ids": source_ids}))
+            relations.append(relation.model_copy(update={"source_chunk_ids": source_ids}))
 
     dropped_entity_count = len(extraction.entities) - len(entities)
     dropped_claim_count = len(extraction.claims) - len(claims)

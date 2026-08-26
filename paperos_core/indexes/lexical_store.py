@@ -42,8 +42,8 @@ class LexicalStore:
         try:
             with self._connect() as connection:
                 connection.execute(
-                    "DELETE FROM lexical_records WHERE document_id = ?",
-                    (bundle.document.id,),
+                    "DELETE FROM lexical_records WHERE canonical_snapshot_id = ?",
+                    (bundle.snapshot.id,),
                 )
                 connection.executemany(
                     """
@@ -76,22 +76,32 @@ class LexicalStore:
             ) from exc
         return [item.object_id for item in records]
 
-    def object_ids(self, document_id: str) -> list[str]:
+    def object_ids(self, snapshot_id: str) -> list[str]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT object_id FROM lexical_records WHERE document_id = ? ORDER BY object_id",
-                (document_id,),
+                "SELECT object_id FROM lexical_records "
+                "WHERE canonical_snapshot_id = ? ORDER BY object_id",
+                (snapshot_id,),
             ).fetchall()
         return [str(row["object_id"]) for row in rows]
 
     def search(
-        self, query: str, *, limit: int = 20, document_id: str | None = None
+        self,
+        query: str,
+        *,
+        active_snapshot_ids: set[str],
+        limit: int = 20,
+        document_id: str | None = None,
     ) -> list[dict[str, object]]:
-        if not query.strip():
+        if not query.strip() or not active_snapshot_ids:
             return []
+        selected_snapshots = sorted(active_snapshot_ids)
+        placeholders = ", ".join("?" for _ in selected_snapshots)
         where_document = "AND r.document_id = ?" if document_id else ""
-        parameters: tuple[object, ...] = (
-            (query, document_id, limit) if document_id else (query, limit)
+        parameters: tuple[object, ...] = tuple(
+            [query, *selected_snapshots]
+            + ([document_id] if document_id else [])
+            + [limit]
         )
         try:
             with self._connect() as connection:
@@ -100,7 +110,9 @@ class LexicalStore:
                     SELECT r.*, bm25(lexical_fts) AS score
                     FROM lexical_fts
                     JOIN lexical_records r ON r.rowid = lexical_fts.rowid
-                    WHERE lexical_fts MATCH ? {where_document}
+                    WHERE lexical_fts MATCH ?
+                      AND r.canonical_snapshot_id IN ({placeholders})
+                      {where_document}
                     ORDER BY score
                     LIMIT ?
                     """,
@@ -112,9 +124,12 @@ class LexicalStore:
             ) from exc
         return [dict(row) for row in rows]
 
-    def delete_document(self, document_id: str) -> None:
+    def delete_snapshot(self, snapshot_id: str) -> None:
         with self._connect() as connection:
-            connection.execute("DELETE FROM lexical_records WHERE document_id = ?", (document_id,))
+            connection.execute(
+                "DELETE FROM lexical_records WHERE canonical_snapshot_id = ?",
+                (snapshot_id,),
+            )
 
     def status(self) -> dict[str, object]:
         with self._connect() as connection:

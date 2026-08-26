@@ -10,7 +10,7 @@ from paperos_core.retrieval.corpus import CorpusView
 if TYPE_CHECKING:
     from paperos_core.adapters.cognee.search import CogneeSearchAdapter
 
-_CHUNK_TYPE = "ChunkDataPoint"
+_CHUNK_TYPE = "PaperOSChunkDataPoint"
 _CHUNK_SEARCH_TYPE = "PAPEROS_CHUNKS"
 
 
@@ -29,6 +29,7 @@ async def semantic_retrieve(
         dataset=dataset_name,
         top_k=limit * 2,
         search_type=_CHUNK_SEARCH_TYPE,
+        active_snapshot_ids=corpus.active_snapshot_ids,
     )
     candidates: dict[str, Candidate] = {}
     for hit in hits:

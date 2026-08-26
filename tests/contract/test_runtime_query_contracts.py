@@ -374,6 +374,7 @@ class _CogneeProbe:
         document_id: str,
         *,
         dataset_name: str | None = None,
+        snapshot_id: str | None = None,
     ) -> object:
         if self.fail:
             raise RuntimeError(_PRIVATE_DIAGNOSTIC)
@@ -424,7 +425,7 @@ def _health_service(*, fail: bool) -> HealthService:
     return HealthService(
         paths=SimpleNamespace(),
         registry=SimpleNamespace(status=lambda: {"ingestion_job_count": 0}),
-        canonical_repository=SimpleNamespace(list_bundles=lambda: [bundle]),
+        canonical_repository=SimpleNamespace(list_active_bundles=lambda: [bundle]),
         mineru=SimpleNamespace(provider=_Probe(mineru_result, fail=fail)),
         llm=SimpleNamespace(
             health_check=_Probe(llm_result, fail=fail).health_check,

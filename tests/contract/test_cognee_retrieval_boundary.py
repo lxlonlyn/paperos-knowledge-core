@@ -34,7 +34,7 @@ FORBIDDEN_RETRIEVAL_NAMES = {
 FORBIDDEN_RETRIEVAL_TEXT = {
     "lancedb",
     "_DataPoint_text",
-    "ChunkDataPoint_text",
+    "PaperOSChunkDataPoint_text",
 }
 
 
@@ -62,7 +62,7 @@ def static_contract() -> dict[str, object]:
     compat_source = compat.read_text(encoding="utf-8")
     _require(
         "public" in compat_source
-        and "ChunkDataPoint" in compat_source
+        and "PaperOSChunkDataPoint" in compat_source
         and "search_datapoint_vectors" in compat_source,
         "The private vector fallback lacks its required public-API limitation note.",
     )

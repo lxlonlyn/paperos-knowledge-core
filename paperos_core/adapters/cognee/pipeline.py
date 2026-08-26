@@ -78,7 +78,22 @@ class CogneePipelineAdapter:
         self, canonical_result: CanonicalIngestionResult, *, rebuilt: bool = False
     ) -> KnowledgeIngestionResult:
         bundle = canonical_result.canonical
-        report, enrichment_path = await self.ingest_bundle(bundle, rebuilt=rebuilt)
+        snapshot_id = bundle.snapshot.id
+        try:
+            report, enrichment_path = await self.ingest_bundle(bundle, rebuilt=rebuilt)
+            previous_snapshot_id = self.canonical_repository.activate_snapshot(snapshot_id)
+        except Exception:
+            await self._cleanup_after_failure(snapshot_id, phase="candidate")
+            raise
+        if previous_snapshot_id is not None and previous_snapshot_id != snapshot_id:
+            try:
+                await self.cleanup_snapshot_derived(previous_snapshot_id)
+            except Exception as exc:  # noqa: BLE001 - activation must not roll back.
+                self._record_cleanup_retry(
+                    previous_snapshot_id,
+                    phase="retired_revision",
+                    exc=exc,
+                )
         fresh_bundle = self.canonical_repository.get_bundle(bundle.snapshot.id)
         projection = self.canonical_repository.get_chunk_projection(bundle.snapshot.id)
         return KnowledgeIngestionResult(
@@ -110,6 +125,12 @@ class CogneePipelineAdapter:
             snapshot_id=bundle.snapshot.id,
             document_id=bundle.document.id,
             title=bundle.document.title,
+        )
+        self._persist_candidate_manifest(
+            bundle=bundle,
+            source=source,
+            dataset=dataset,
+            data_id=data_id,
         )
         graph_results: list[DataPointGraph] = []
         tasks = configure_pipeline_tasks(
@@ -208,6 +229,110 @@ class CogneePipelineAdapter:
         )
         return report, self.paths.cognee / "enrichment" / f"{bundle.snapshot.id}.json"
 
+    async def cleanup_snapshot_derived(
+        self,
+        snapshot_id: str,
+        *,
+        preserve_enrichment: bool = False,
+    ) -> list[Path]:
+        """Idempotently remove only one snapshot's derived projections."""
+
+        deleted: list[Path] = []
+        failures: list[Exception] = []
+        cognee_manifest = self.paths.cognee / "manifests" / f"{snapshot_id}.json"
+        if cognee_manifest.is_file():
+            try:
+                await self.compat.delete_document_data(snapshot_id)
+            except Exception as exc:  # noqa: BLE001 - finish safe local cleanup.
+                failures.append(exc)
+            else:
+                cognee_manifest.unlink(missing_ok=True)
+                deleted.append(cognee_manifest)
+        try:
+            self.index_manager.lexical.delete_snapshot(snapshot_id)
+        except Exception as exc:  # noqa: BLE001 - collect retryable cleanup failures.
+            failures.append(exc)
+        targets = [
+            self.paths.indexes / "manifests" / f"{snapshot_id}.json",
+            self.paths.cognee / "graphs" / f"{snapshot_id}.json",
+            self.paths.cognee / "chunks" / f"{snapshot_id}.jsonl",
+            self.paths.cognee / "citation_mentions" / f"{snapshot_id}.jsonl",
+        ]
+        if not preserve_enrichment:
+            targets.append(self.paths.cognee / "enrichment" / f"{snapshot_id}.json")
+        for target in targets:
+            resolved = target.resolve(strict=False)
+            self.paths.assert_within_root(resolved)
+            if resolved.is_file():
+                resolved.unlink()
+                deleted.append(resolved)
+        if failures:
+            raise CogneeStorageError(
+                "Snapshot-derived cleanup is incomplete and must be retried.",
+                affected=snapshot_id,
+                details={"failure_count": len(failures), "retryable": True},
+            ) from failures[0]
+        self._cleanup_retry_path(snapshot_id).unlink(missing_ok=True)
+        return deleted
+
+    async def _cleanup_after_failure(self, snapshot_id: str, *, phase: str) -> None:
+        try:
+            await self.cleanup_snapshot_derived(snapshot_id)
+        except Exception as exc:  # noqa: BLE001 - preserve the original pipeline failure.
+            self._record_cleanup_retry(snapshot_id, phase=phase, exc=exc)
+
+    def _cleanup_retry_path(self, snapshot_id: str) -> Path:
+        return self.paths.jobs / "cleanup" / f"{snapshot_id}.json"
+
+    def _record_cleanup_retry(
+        self,
+        snapshot_id: str,
+        *,
+        phase: str,
+        exc: Exception,
+    ) -> None:
+        _atomic_json(
+            self._cleanup_retry_path(snapshot_id),
+            {
+                "snapshot_id": snapshot_id,
+                "phase": phase,
+                "status": "pending",
+                "retryable": True,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+
+    def _persist_candidate_manifest(
+        self,
+        *,
+        bundle: CanonicalBundle,
+        source: Any,
+        dataset: Any,
+        data_id: UUID,
+    ) -> Path:
+        path = self.paths.cognee / "manifests" / f"{bundle.snapshot.id}.json"
+        _atomic_json(
+            path,
+            {
+                "mapping_version": "4",
+                "status": "candidate",
+                "canonical_snapshot_id": bundle.snapshot.id,
+                "document_id": bundle.document.id,
+                "dataset": {
+                    "id": str(dataset.id),
+                    "name": str(dataset.name),
+                    "owner_id": str(dataset.owner_id),
+                },
+                "data_item": {
+                    "id": str(data_id),
+                    "name": source.original_filename,
+                    "source_file_id": source.id,
+                    "source_sha256": source.sha256,
+                },
+            },
+        )
+        return path
+
     async def _run_pipeline(
         self,
         *,
@@ -252,7 +377,8 @@ class CogneePipelineAdapter:
     ) -> Path:
         manifest_path = self.paths.cognee / "manifests" / f"{snapshot_id}.json"
         manifest = {
-            "mapping_version": "3",
+            "mapping_version": "4",
+            "status": "complete",
             "canonical_snapshot_id": snapshot_id,
             "document_id": document_id,
             "dataset": {

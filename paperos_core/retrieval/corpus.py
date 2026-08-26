@@ -17,6 +17,7 @@ from paperos_core.retrieval.candidates import Candidate
 @dataclass(slots=True)
 class CorpusView:
     paths: DataPaths
+    active_snapshot_ids: set[str]
     bundles: dict[str, CanonicalBundle]
     chunks: dict[str, Chunk]
     chunk_bundles: dict[str, CanonicalBundle]
@@ -34,7 +35,10 @@ class CorpusView:
         registry: SourceRegistry,
         scholarly_registry: ScholarlyRegistry | None = None,
     ) -> CorpusView:
-        retained_bundles = canonical_repository.list_bundles()
+        retained_bundles = canonical_repository.list_active_bundles()
+        active_snapshot_ids = {
+            bundle.snapshot.id for bundle in retained_bundles
+        }
         bundles = {bundle.document.id: bundle for bundle in retained_bundles}
         with sqlite3.connect(paths.registry_db) as connection:
             exists = connection.execute(
@@ -81,18 +85,19 @@ class CorpusView:
                 work_titles[work.id] = work.title
             for chunk in chunks.values():
                 for reference_id in chunk.citation_reference_entry_ids:
-                    work = scholarly_registry.work_for_reference(reference_id)
-                    if work is not None:
-                        cited_work_ids_by_chunk.setdefault(chunk.id, set()).add(work.id)
+                    reference_work = scholarly_registry.work_for_reference(reference_id)
+                    if reference_work is not None:
+                        cited_work_ids_by_chunk.setdefault(chunk.id, set()).add(reference_work.id)
             for document_id in bundles:
-                work = scholarly_registry.work_for_document(document_id)
-                if work is None:
+                document_work = scholarly_registry.work_for_document(document_id)
+                if document_work is None:
                     continue
-                work_id_by_document[document_id] = work.id
-                document_ids_by_work.setdefault(work.id, set()).add(document_id)
-                work_titles[work.id] = work.title
+                work_id_by_document[document_id] = document_work.id
+                document_ids_by_work.setdefault(document_work.id, set()).add(document_id)
+                work_titles[document_work.id] = document_work.title
         return cls(
             paths=paths,
+            active_snapshot_ids=active_snapshot_ids,
             bundles=bundles,
             chunks=chunks,
             chunk_bundles=chunk_bundles,
