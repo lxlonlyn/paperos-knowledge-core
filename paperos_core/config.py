@@ -10,8 +10,17 @@ import os
 import tomllib
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from paperos_core.errors import ConfigurationError
 from paperos_core.locations import CONFIG_ROOT, PROJECT_ROOT
@@ -127,7 +136,7 @@ class IngestionSettings(StrictSettings):
 
 
 class LocalInferenceSettings(StrictSettings):
-    enabled: bool = False
+    enabled: bool = True
     host: Literal["127.0.0.1", "localhost"] = "127.0.0.1"
     port: int = Field(default=8081, ge=1, le=65535)
     embedding_model_path: Path = Path("../data/models/embedding/embeddinggemma-300M-Q8_0.gguf")
@@ -163,6 +172,24 @@ class RuntimeSettings(StrictSettings):
     api: APISettings = Field(default_factory=APISettings)
     config_path: Path | None = Field(default=None, exclude=True)
 
+    @model_validator(mode="after")
+    def local_inference_dependencies_must_be_enabled(self) -> RuntimeSettings:
+        local = self.local_inference
+        embedding = self.cognee.embedding
+        if _endpoint_targets_local_inference(embedding.endpoint, local.host, local.port) and not (
+            local.enabled
+        ):
+            raise ValueError(
+                "cognee.embedding.endpoint targets [local_inference] host/port, so "
+                "local_inference.enabled must be true"
+            )
+        if self.retrieval.rerank_enabled and not local.enabled:
+            raise ValueError(
+                "retrieval.rerank_enabled=true requires local_inference.enabled=true; "
+                "no remote reranker is configured"
+            )
+        return self
+
     @property
     def data_dir(self) -> Path:
         return self.data.directory
@@ -170,6 +197,24 @@ class RuntimeSettings(StrictSettings):
     @property
     def dataset(self) -> str:
         return self.data.dataset
+
+
+def _endpoint_targets_local_inference(endpoint: str, host: str, port: int) -> bool:
+    """Match the configured endpoint using the runtime's loopback alias rules."""
+
+    try:
+        parsed = urlparse(endpoint)
+        endpoint_port = parsed.port
+    except ValueError:
+        return False
+    endpoint_host = (parsed.hostname or "").casefold()
+    configured_host = host.casefold()
+    loopback_aliases = {"127.0.0.1", "localhost"}
+    same_host = endpoint_host == configured_host or {
+        endpoint_host,
+        configured_host,
+    } <= loopback_aliases
+    return same_host and endpoint_port == port
 
 
 def _resolve_path(value: str | Path, *, base_dir: Path) -> Path:

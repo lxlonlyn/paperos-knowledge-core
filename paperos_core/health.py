@@ -12,7 +12,10 @@ from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.registry import SourceRegistry
 from paperos_core.jobs.queue import JobQueue
 from paperos_core.paths import DataPaths
-from paperos_core.runtime.local_inference.runtime import LocalInferenceRuntime
+from paperos_core.runtime.local_inference.runtime import (
+    LocalInferenceRuntime,
+    local_runtime_usage,
+)
 
 
 class HealthService:
@@ -62,19 +65,33 @@ class HealthService:
                 "status": "unavailable",
                 "error": f"{type(exc).__name__}: {exc}",
             }
-        if self.local_inference.required:
+        local_usage = local_runtime_usage(
+            self.local_inference.settings,
+            self.local_inference.cognee_config,
+        )
+        model_enablement = {
+            "embedding_enabled": local_usage.embedding,
+            "reranker_enabled": local_usage.reranker,
+        }
+        if local_usage.required:
             try:
                 local = await self.local_inference.client.health()
-                components["local_models"] = {"status": "healthy", **local}
+                components["local_models"] = {
+                    "status": "healthy",
+                    **model_enablement,
+                    **local,
+                }
             except Exception as exc:  # noqa: BLE001 - health reports component failures.
                 components["local_models"] = {
                     "status": "unavailable",
+                    **model_enablement,
                     "error": f"{type(exc).__name__}: {exc}",
                 }
         else:
             components["local_models"] = {
                 "status": "disabled",
-                "reason": "remote embedding provider selected",
+                **model_enablement,
+                "reason": "local embedding and reranker are disabled",
             }
         components["lexical"] = {
             "status": "healthy",

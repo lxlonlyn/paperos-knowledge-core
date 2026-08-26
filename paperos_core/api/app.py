@@ -42,13 +42,7 @@ def create_app(settings: RuntimeSettings) -> FastAPI:
     async def paperos_error(_request: Request, error: PaperOSError) -> JSONResponse:
         return JSONResponse(
             status_code=503 if error.retryable else 400,
-            content={
-                "error": {
-                    "code": error.code,
-                    "message": error.message,
-                    "retryable": error.retryable,
-                }
-            },
+            content=error.as_api_dict(),
         )
 
     for router in (

@@ -471,7 +471,13 @@ def test_new_expanded_chunk_enters_second_rerank_input(
     assert response.trace.second_rerank_candidate_ids == ["chunk_seed", "chunk_new"]
     assert "second_rerank" in response.stages
     assert response.replay.original_query == "test"
-    assert response.replay.replay_text == synthesis_prompts[0]
+    assert synthesis_prompts == []
+    assert response.answer == "未检索到可用于回答的论文证据"
+    assert response.evidence == []
+    assert response.candidates == []
+    assert response.provenance_complete is False
+    assert "no_evidence" in response.stages
+    assert "synthesis" not in response.stages
 
 
 def test_duplicate_only_expansion_skips_second_rerank(

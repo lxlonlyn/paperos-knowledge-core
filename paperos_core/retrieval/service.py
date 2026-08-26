@@ -41,6 +41,8 @@ from paperos_core.retrieval.synthesis import (
 )
 from paperos_core.runtime.local_inference.client import LocalInferenceClient
 
+NO_EVIDENCE_ANSWER = "未检索到可用于回答的论文证据"
+
 
 class RetrievalService:
     """Retrieve and synthesize exclusively from canonical source Chunks."""
@@ -96,7 +98,7 @@ class RetrievalService:
             document_ids.intersection_update(corpus.document_ids_for_works(explicit_work_ids))
 
         top_k = request.top_k or self.config.retrieval.top_k
-        pool_size = self.config.retrieval.candidate_pool_size
+        pool_size = max(self.config.retrieval.candidate_pool_size, top_k)
         stages = ["explicit_filters", "lexical_chunk_retrieval"]
         channels: dict[str, list[Candidate]] = {
             "lexical": lexical_retrieve(
@@ -107,23 +109,28 @@ class RetrievalService:
                 document_ids=document_ids,
             )
         }
-        channels["vector"] = await semantic_retrieve(
-            self.search,
-            corpus,
-            request.query,
-            dataset_name=dataset_name,
-            limit=pool_size,
-            document_ids=document_ids,
-        )
-        stages.append("vector_chunk_retrieval")
+        if document_ids:
+            channels["vector"] = await semantic_retrieve(
+                self.search,
+                corpus,
+                request.query,
+                dataset_name=dataset_name,
+                limit=pool_size,
+                document_ids=document_ids,
+            )
+            stages.append("vector_chunk_retrieval")
+        else:
+            channels["vector"] = []
 
         fused = weighted_rrf(channels, {"lexical": 1.0, "vector": 1.0})
         fused = deduplicate_candidates_by_chunk(fused)[:pool_size]
         stages.extend(["rrf", "chunk_id_dedup"])
         first_stage_chunk_ids = [item.chunk_id for item in fused]
 
-        first_reranked = await self._rerank(request.query, fused, limit=pool_size)
-        if self.config.retrieval.rerank_enabled:
+        first_reranked = (
+            await self._rerank(request.query, fused, limit=pool_size) if fused else []
+        )
+        if self.config.retrieval.rerank_enabled and fused:
             stages.append("first_rerank")
         seeds = first_reranked[:top_k]
         first_stage_ids = {item.chunk_id for item in first_reranked}
@@ -165,10 +172,14 @@ class RetrievalService:
         selected = deduplicate_candidates_by_chunk(reranked)[:top_k]
         stages.extend(["final_selection", "source_grounded_evidence"])
         ranked_evidence = format_evidence(selected, corpus)
-        evidence = select_synthesis_evidence(
-            original_query=request.query,
-            ranked_evidence=ranked_evidence,
-            max_input_tokens=self.config.retrieval.synthesis_max_input_tokens,
+        evidence = (
+            select_synthesis_evidence(
+                original_query=request.query,
+                ranked_evidence=ranked_evidence,
+                max_input_tokens=self.config.retrieval.synthesis_max_input_tokens,
+            )
+            if ranked_evidence
+            else []
         )
         selected = selected[: len(evidence)]
         synthesis_context = FinalSynthesisContext(
@@ -176,12 +187,17 @@ class RetrievalService:
             evidence=evidence,
         )
         synthesis_prompt = render_synthesis_prompt(synthesis_context)
-        answer = await synthesize_answer(
-            self.llm,
-            prompt=synthesis_prompt,
-            evidence=evidence,
-        )
-        stages.append("synthesis")
+        if evidence:
+            answer = await synthesize_answer(
+                self.llm,
+                prompt=synthesis_prompt,
+                evidence=evidence,
+            )
+            stages.append("synthesis")
+        else:
+            selected = []
+            answer = NO_EVIDENCE_ANSWER
+            stages.append("no_evidence")
 
         trace = RetrievalTrace(
             applied_document_ids=sorted(document_ids),
@@ -231,7 +247,8 @@ class RetrievalService:
             ),
             candidates=selected,
             distinct_documents=len({item.document_id for item in evidence}),
-            provenance_complete=all(
+            provenance_complete=bool(evidence)
+            and all(
                 item.chunk_id in corpus.chunks
                 and item.document_id == corpus.chunks[item.chunk_id].document_id
                 and item.text == corpus.chunks[item.chunk_id].text

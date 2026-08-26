@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 
@@ -37,6 +37,53 @@ class PaperOSError(Exception):
         if self.details:
             error["details"] = self.details
         return {"error": error}
+
+    def as_api_dict(self) -> dict[str, Any]:
+        """Serialize client-safe fields without machine-local path disclosure."""
+
+        error: dict[str, Any] = {
+            "code": self.code,
+            "message": self.message,
+            "retryable": self.retryable,
+        }
+        details = _safe_api_value(self.details)
+        if details:
+            error["details"] = details
+        return {"error": error}
+
+
+_PATH_DETAIL_KEYS = {"affected", "directory", "file", "filename", "path", "root"}
+
+
+def _is_path_detail_key(key: str) -> bool:
+    normalized = key.casefold()
+    return normalized in _PATH_DETAIL_KEYS or any(
+        normalized.endswith(f"_{suffix}") for suffix in _PATH_DETAIL_KEYS
+    )
+
+
+def _safe_api_value(value: Any, *, key: str | None = None) -> Any:
+    if key is not None and _is_path_detail_key(key):
+        return None
+    if isinstance(value, Path):
+        return None
+    if isinstance(value, str):
+        if value.startswith("file://") or Path(value).is_absolute() or PureWindowsPath(
+            value
+        ).is_absolute():
+            return None
+        return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(item_key): safe
+            for item_key, item_value in value.items()
+            if (safe := _safe_api_value(item_value, key=str(item_key))) is not None
+        }
+    if isinstance(value, (list, tuple)):
+        return [safe for item in value if (safe := _safe_api_value(item)) is not None]
+    return None
 
 
 class ConfigurationError(PaperOSError):

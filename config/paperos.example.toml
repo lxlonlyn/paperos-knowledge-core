@@ -37,7 +37,7 @@ vector_subprocess_enabled = true
 graph_subprocess_enabled = true
 
 [local_inference]
-enabled = false
+enabled = true
 host = "127.0.0.1"
 port = 8081
 embedding_model_path = "../data/models/embedding/embeddinggemma-300M-Q8_0.gguf"
