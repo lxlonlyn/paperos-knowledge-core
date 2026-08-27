@@ -82,14 +82,20 @@ class CogneePipelineAdapter:
         snapshot_id = bundle.snapshot.id
         try:
             report, enrichment_path = await self.ingest_bundle(bundle, rebuilt=rebuilt)
-            previous_snapshot_id = self.scholarly_registry.publish_candidate(
-                snapshot_id,
-                self.canonical_repository,
-            )
+            previous_by_snapshot = await self._publish_candidate_family(bundle)
         except Exception:
             await self._cleanup_after_failure(snapshot_id, phase="candidate")
             raise
-        if previous_snapshot_id is not None and previous_snapshot_id != snapshot_id:
+
+        published_snapshot_ids = set(previous_by_snapshot)
+        retired_snapshot_ids = list(
+            dict.fromkeys(
+                previous
+                for previous in previous_by_snapshot.values()
+                if previous is not None and previous not in published_snapshot_ids
+            )
+        )
+        for previous_snapshot_id in retired_snapshot_ids:
             try:
                 await self.cleanup_snapshot_revision(previous_snapshot_id)
             except Exception as exc:  # noqa: BLE001 - activation must not roll back.
@@ -110,6 +116,86 @@ class CogneePipelineAdapter:
             enrichment_path=enrichment_path,
         )
 
+    async def _publish_candidate_family(
+        self,
+        primary_bundle: CanonicalBundle,
+    ) -> dict[str, str | None]:
+        """Build and atomically publish every active projection affected by Work changes."""
+
+        owner_snapshot_id = primary_bundle.snapshot.id
+        dependent_candidates = await self._prepare_affected_active_reprojections(
+            owner_snapshot_id,
+            exclude_document_ids={primary_bundle.document.id},
+        )
+        snapshot_ids = [owner_snapshot_id, *dependent_candidates]
+        try:
+            return self.scholarly_registry.publish_candidate_set(
+                owner_snapshot_id,
+                self.canonical_repository,
+                snapshot_ids=snapshot_ids,
+                expected_previous_snapshot_ids={
+                    candidate_id: active_snapshot_id
+                    for candidate_id, active_snapshot_id in dependent_candidates.items()
+                },
+            )
+        except Exception:
+            await self._cleanup_candidate_set(
+                list(dependent_candidates),
+                phase="reconciliation_publication",
+            )
+            raise
+
+    async def _prepare_affected_active_reprojections(
+        self,
+        owner_snapshot_id: str,
+        *,
+        exclude_document_ids: set[str],
+    ) -> dict[str, str]:
+        """Fully index isolated replacements for active documents changed in staging."""
+
+        affected = self.scholarly_registry.affected_active_snapshot_ids(
+            owner_snapshot_id,
+            self.canonical_repository,
+            exclude_document_ids=exclude_document_ids,
+        )
+        prepared: dict[str, str] = {}
+        current_candidate_id: str | None = None
+        try:
+            for active_snapshot_id in affected:
+                candidate = self.canonical_repository.create_rebuild_candidate(
+                    active_snapshot_id
+                )
+                current_candidate_id = candidate.snapshot.id
+                self.reproject_enrichment(active_snapshot_id, current_candidate_id)
+                await self.ingest_bundle(
+                    candidate,
+                    rebuilt=True,
+                    reuse_existing_enrichment=True,
+                    generate_enrichment_if_missing=False,
+                    scholarly_candidate_snapshot_id=owner_snapshot_id,
+                )
+                prepared[current_candidate_id] = active_snapshot_id
+                current_candidate_id = None
+        except Exception:
+            cleanup_ids = list(prepared)
+            if current_candidate_id is not None:
+                cleanup_ids.append(current_candidate_id)
+            await self._cleanup_candidate_set(
+                cleanup_ids,
+                phase="scholarly_reconciliation",
+            )
+            raise
+        return prepared
+
+    async def _cleanup_candidate_set(
+        self,
+        snapshot_ids: list[str],
+        *,
+        phase: str,
+    ) -> None:
+        for snapshot_id in reversed(snapshot_ids):
+            await self._cleanup_after_failure(snapshot_id, phase=phase)
+
     async def ingest_bundle(
         self,
         bundle: CanonicalBundle,
@@ -117,6 +203,7 @@ class CogneePipelineAdapter:
         rebuilt: bool = False,
         reuse_existing_enrichment: bool = False,
         generate_enrichment_if_missing: bool = True,
+        scholarly_candidate_snapshot_id: str | None = None,
     ) -> tuple[IndexingReport, Path]:
         """Run one canonical/enrichment pair through the Cognee custom pipeline."""
         self.canonical_repository.verify_snapshot(bundle.snapshot.id)
@@ -148,6 +235,7 @@ class CogneePipelineAdapter:
             chunk_hard_max_tokens=self.ingestion.chunk_hard_max_tokens,
             chunk_overlap_tokens=self.ingestion.chunk_overlap_tokens,
             graph_results=graph_results,
+            scholarly_candidate_snapshot_id=scholarly_candidate_snapshot_id,
             reuse_existing_enrichment=reuse_existing_enrichment,
             generate_enrichment_if_missing=generate_enrichment_if_missing,
             claim_enrichment_enabled=self.ingestion.claim_enrichment_enabled,

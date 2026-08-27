@@ -1036,7 +1036,7 @@ async def _start_embedding_service() -> tuple[asyncio.subprocess.Process, str]:
     environment = dict(os.environ)
     environment.update(
         {
-            "CUDA_VISIBLE_DEVICES": "",
+            # "CUDA_VISIBLE_DEVICES": "",
             "PAPEROS_LOCAL_INFERENCE_HOST": "127.0.0.1",
             "PAPEROS_LOCAL_INFERENCE_PORT": str(_LOCAL_INFERENCE_PORT),
             "PAPEROS_EMBEDDING_ENABLED": "true",

@@ -135,16 +135,46 @@ class ScholarlyRegistry:
     ) -> str | None:
         """Atomically publish candidate scholarly state and its active pointer."""
 
-        database_path = self.candidate_database_path(snapshot_id)
-        manifest_path = self.candidate_manifest_path(snapshot_id)
+        previous = self.publish_candidate_set(
+            snapshot_id,
+            repository,
+            snapshot_ids=[snapshot_id],
+            expected_previous_snapshot_ids=(
+                {snapshot_id: expected_previous_snapshot_id}
+                if expected_previous_snapshot_id is not None
+                else None
+            ),
+        )
+        return previous[snapshot_id]
+
+    def publish_candidate_set(
+        self,
+        candidate_snapshot_id: str,
+        repository: CanonicalRepository,
+        *,
+        snapshot_ids: list[str],
+        expected_previous_snapshot_ids: dict[str, str] | None = None,
+    ) -> dict[str, str | None]:
+        """Publish one staged registry and all dependent revisions atomically."""
+
+        database_path = self.candidate_database_path(candidate_snapshot_id)
+        manifest_path = self.candidate_manifest_path(candidate_snapshot_id)
         try:
             metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             raise RuntimeError(
-                f"Scholarly candidate metadata is unavailable for {snapshot_id}"
+                "Scholarly candidate metadata is unavailable for "
+                f"{candidate_snapshot_id}"
             ) from exc
-        if metadata.get("snapshot_id") != snapshot_id or not database_path.is_file():
-            raise RuntimeError(f"Scholarly candidate is incomplete for {snapshot_id}")
+        if (
+            metadata.get("snapshot_id") != candidate_snapshot_id
+            or not database_path.is_file()
+        ):
+            raise RuntimeError(
+                f"Scholarly candidate is incomplete for {candidate_snapshot_id}"
+            )
+        if not snapshot_ids or len(snapshot_ids) != len(set(snapshot_ids)):
+            raise ValueError("Candidate publication requires unique snapshot IDs")
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -156,7 +186,12 @@ class ScholarlyRegistry:
                 raise RuntimeError(
                     "Scholarly registry changed while candidate was building"
                 )
-            if expected_previous_snapshot_id is not None:
+            expected = expected_previous_snapshot_ids or {}
+            for snapshot_id, expected_previous_snapshot_id in expected.items():
+                if snapshot_id not in snapshot_ids:
+                    raise ValueError(
+                        "Expected active revision was supplied for an unpublished snapshot"
+                    )
                 current = connection.execute(
                     "SELECT active.snapshot_id "
                     "FROM canonical_snapshots AS candidate "
@@ -185,12 +220,178 @@ class ScholarlyRegistry:
                 connection.execute(
                     f"INSERT INTO {table} SELECT * FROM scholarly_candidate.{table}"
                 )
-            previous = repository.activate_snapshot(
-                snapshot_id,
-                connection=connection,
-            )
-        self.discard_candidate(snapshot_id)
+            previous = {
+                snapshot_id: repository.activate_snapshot(
+                    snapshot_id,
+                    connection=connection,
+                )
+                for snapshot_id in snapshot_ids
+            }
+        self.discard_candidate(candidate_snapshot_id)
         return previous
+
+    def affected_active_snapshot_ids(
+        self,
+        candidate_snapshot_id: str,
+        repository: CanonicalRepository,
+        *,
+        exclude_document_ids: set[str] | None = None,
+    ) -> list[str]:
+        """Return active revisions whose published Work projection would change."""
+
+        database_path = self.candidate_database_path(candidate_snapshot_id)
+        if not database_path.is_file():
+            raise RuntimeError(
+                f"Scholarly candidate is incomplete for {candidate_snapshot_id}"
+            )
+        staged = ScholarlyRegistry(self.paths, database_path=database_path)
+        excluded = exclude_document_ids or set()
+        affected: list[str] = []
+        for bundle in repository.list_active_bundles():
+            if bundle.document.id in excluded:
+                continue
+            if self._bundle_identity_signature(
+                bundle
+            ) != staged._bundle_identity_signature(bundle):
+                affected.append(bundle.snapshot.id)
+        return affected
+
+    def candidate_context_for_bundle(
+        self,
+        candidate_snapshot_id: str,
+        bundle: CanonicalBundle,
+        chunks: list[Chunk],
+    ) -> ScholarlyContext:
+        """Read one bundle's final Work context from shared candidate state."""
+
+        database_path = self.candidate_database_path(candidate_snapshot_id)
+        if not database_path.is_file():
+            raise RuntimeError(
+                f"Scholarly candidate is incomplete for {candidate_snapshot_id}"
+            )
+        staged = ScholarlyRegistry(self.paths, database_path=database_path)
+        return staged.context_for_bundle(bundle, chunks)
+
+    def context_for_bundle(
+        self,
+        bundle: CanonicalBundle,
+        chunks: list[Chunk],
+    ) -> ScholarlyContext:
+        """Project existing registry links without mutating scholarly state."""
+
+        citing_chunks_by_reference: dict[str, list[str]] = {}
+        for chunk in chunks:
+            for reference_id in chunk.citation_reference_entry_ids:
+                citing_chunks_by_reference.setdefault(reference_id, []).append(chunk.id)
+
+        with self._connect() as connection:
+            document_row = connection.execute(
+                "SELECT work_id FROM document_work_links WHERE document_id = ?",
+                (bundle.document.id,),
+            ).fetchone()
+            if document_row is None:
+                raise RuntimeError(
+                    f"Scholarly document link is missing for {bundle.document.id}"
+                )
+            document_work_id = self.canonicalize_work_id(
+                str(document_row["work_id"]), connection
+            )
+            document_work = self._get_work(connection, document_work_id)
+            works_by_id = {document_work.id: document_work}
+            resolutions: list[ReferenceWorkResolution] = []
+            for reference in bundle.references:
+                row = connection.execute(
+                    "SELECT work_id, resolution_status, confidence "
+                    "FROM reference_work_links WHERE reference_id = ?",
+                    (reference.id,),
+                ).fetchone()
+                work_id = None
+                status = "unresolved"
+                confidence = 0.0
+                if row is not None:
+                    status = str(row["resolution_status"])
+                    confidence = float(row["confidence"])
+                    if row["work_id"] is not None:
+                        work_id = self.canonicalize_work_id(
+                            str(row["work_id"]), connection
+                        )
+                        works_by_id[work_id] = self._get_work(connection, work_id)
+                resolutions.append(
+                    ReferenceWorkResolution(
+                        reference_id=reference.id,
+                        source_document_id=reference.document_id,
+                        work_id=work_id,
+                        resolution_status=status,
+                        confidence=confidence,
+                        source_chunk_ids=citing_chunks_by_reference.get(
+                            reference.id, []
+                        ),
+                    )
+                )
+        return ScholarlyContext(
+            document_work=document_work,
+            works=sorted(works_by_id.values(), key=lambda work: work.id),
+            reference_resolutions=resolutions,
+        )
+
+    def _bundle_identity_signature(self, bundle: CanonicalBundle) -> str:
+        with self._connect() as connection:
+            linked_work_ids: set[str] = set()
+            document_row = connection.execute(
+                "SELECT work_id FROM document_work_links WHERE document_id = ?",
+                (bundle.document.id,),
+            ).fetchone()
+            document_work_id = None
+            if document_row is not None:
+                document_work_id = self.canonicalize_work_id(
+                    str(document_row["work_id"]), connection
+                )
+                linked_work_ids.add(document_work_id)
+
+            references: list[dict[str, object]] = []
+            for reference in sorted(bundle.references, key=lambda item: item.id):
+                row = connection.execute(
+                    "SELECT work_id, resolution_status, confidence "
+                    "FROM reference_work_links WHERE reference_id = ?",
+                    (reference.id,),
+                ).fetchone()
+                work_id = None
+                if row is not None and row["work_id"] is not None:
+                    work_id = self.canonicalize_work_id(
+                        str(row["work_id"]), connection
+                    )
+                    linked_work_ids.add(work_id)
+                references.append(
+                    {
+                        "reference_id": reference.id,
+                        "work_id": work_id,
+                        "resolution_status": (
+                            str(row["resolution_status"])
+                            if row is not None
+                            else "unresolved"
+                        ),
+                        "confidence": (
+                            float(row["confidence"]) if row is not None else 0.0
+                        ),
+                    }
+                )
+            works = {
+                work_id: self._get_work(connection, work_id).model_dump(
+                    mode="json",
+                    exclude={"created_at", "updated_at"},
+                )
+                for work_id in sorted(linked_work_ids)
+            }
+        return json.dumps(
+            {
+                "document_work_id": document_work_id,
+                "references": references,
+                "works": works,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
     def discard_candidate(self, snapshot_id: str) -> None:
         database_path = self.candidate_database_path(snapshot_id)
@@ -304,55 +505,38 @@ class ScholarlyRegistry:
     def _infer_comma_separated_reference(
         cls, raw_text: str
     ) -> tuple[str, list[str]] | None:
-        """Parse author lists without mistaking initials for sentence boundaries."""
+        """Accept only unambiguous initial-and-surname comma author lists."""
 
+        parts = [item.strip() for item in raw_text.split(",") if item.strip()]
         authors: list[str] = []
-        for part in (item.strip() for item in raw_text.split(",")):
-            if not part:
-                continue
-            split = cls._split_author_and_title(part)
-            if split is not None:
-                author, title = split
-                authors.append(author)
-                return title, authors
-            if cls._looks_like_author_name(part):
-                authors.append(re.sub(r"^(?:and|&)\s+", "", part).strip())
-                continue
-            title = part.strip().rstrip(".")
-            if authors and len(title.split()) >= 2:
-                return title, authors
+        for part in parts:
+            if not cls._looks_like_initial_author_name(part):
+                break
+            authors.append(re.sub(r"^(?:and|&)\s+", "", part).strip())
+        if not authors or len(authors) >= len(parts):
             return None
-        return None
-
-    @classmethod
-    def _split_author_and_title(cls, value: str) -> tuple[str, str] | None:
-        if any(character.isdigit() for character in value):
+        title = parts[len(authors)].strip().rstrip(".")
+        if len(title.split()) < 2 or any(character.isdigit() for character in title):
             return None
-        boundaries = [match.start() for match in re.finditer(r"\.\s+", value)]
-        for boundary in reversed(boundaries):
-            author = value[: boundary + 1].strip().rstrip(".")
-            title_body = value[boundary + 1 :].strip()
-            title = title_body.split(". ", 1)[0].strip().rstrip(".")
-            if cls._looks_like_author_name(author) and len(title.split()) >= 2:
-                return re.sub(r"^(?:and|&)\s+", "", author).strip(), title
-        return None
+        return title, authors
 
     @staticmethod
-    def _looks_like_author_name(value: str) -> bool:
+    def _looks_like_initial_author_name(value: str) -> bool:
         candidate = re.sub(r"^(?:and|&)\s+", "", value.strip()).strip()
-        if not candidate or any(character.isdigit() for character in candidate):
-            return False
         tokens = candidate.split()
         if not 2 <= len(tokens) <= 4:
             return False
-        surname = tokens[-1].strip(".,;:()[]{}")
-        first = tokens[0].strip(".,;:()[]{}")
+        initials = tokens[:-1]
+        surname = tokens[-1].strip(",;:()[]{}")
         return bool(
             surname
-            and first
             and surname[0].isupper()
-            and first[0].isupper()
-            and ":" not in candidate
+            and surname[0].isalpha()
+            and "." not in surname
+            and all(
+                re.fullmatch(r"(?:[A-Z]\.(?:-[A-Z]\.)?){1,4}", token)
+                for token in initials
+            )
         )
 
     @classmethod
@@ -622,6 +806,24 @@ class ScholarlyRegistry:
                 status=WorkIdentityStatus.INGESTED,
                 confidence=1.0,
             )
+            for candidate in self._find_title_candidates(
+                connection,
+                normalized_title,
+                document.year,
+                first_author,
+                incoming_doi=doi,
+                incoming_arxiv=arxiv,
+            ):
+                candidate = self.canonicalize_work_id(candidate, connection)
+                work_id = self.canonicalize_work_id(work_id, connection)
+                if candidate == work_id:
+                    continue
+                if self._can_merge_ingested_duplicate(
+                    self._get_work(connection, work_id),
+                    self._get_work(connection, candidate),
+                ):
+                    work_id = self._merge(connection, work_id, candidate)
+
             work_id = self._attach_identifiers(
                 connection,
                 work_id,

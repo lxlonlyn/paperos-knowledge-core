@@ -65,9 +65,44 @@ def build_retrieval_text(
         )
     if resolved_lines:
         lines.append("Referenced works:\n" + "\n".join(resolved_lines))
-    retrieval_content = chunk.metadata.get("retrieval_content_text") or chunk.text
-    lines.append(str(retrieval_content))
+    retrieval_content = str(
+        chunk.metadata.get("retrieval_content_text") or chunk.text
+    )
+    if section_header:
+        retrieval_content = _without_redundant_leading_heading(
+            retrieval_content,
+            str(section_header),
+        )
+    lines.append(retrieval_content)
     return "\n\n".join(line for line in lines if line.strip())
+
+
+
+def _without_redundant_leading_heading(content: str, breadcrumb: str) -> str:
+    """Remove one prose heading duplicated by the retained Section metadata."""
+
+    lines = content.splitlines()
+    first_index = next(
+        (index for index, line in enumerate(lines) if line.strip()),
+        None,
+    )
+    if first_index is None:
+        return content
+    first = _heading_key(lines[first_index])
+    breadcrumb_parts = [
+        part for part in re.split(r"\s*(?:/|>)\s*", breadcrumb) if part.strip()
+    ]
+    candidates = {_heading_key(breadcrumb)}
+    candidates.update(_heading_key(part) for part in breadcrumb_parts)
+    if first not in candidates:
+        return content
+    return "\n".join(lines[:first_index] + lines[first_index + 1 :]).lstrip("\n")
+
+
+def _heading_key(value: str) -> str:
+    visible = plain_text(value)
+    visible = re.sub(r"^\s{0,3}#{1,6}\s*", "", visible)
+    return " ".join(visible.casefold().rstrip(":").split())
 
 
 def effective_index_text(chunk: Chunk) -> str:

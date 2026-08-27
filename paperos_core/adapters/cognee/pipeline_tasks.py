@@ -107,13 +107,22 @@ async def scholarly_identity_task(
     *,
     scholarly_registry: ScholarlyRegistry,
     repository: CanonicalRepository,
+    scholarly_candidate_snapshot_id: str | None = None,
 ) -> list[IdentityBoundBundle]:
     """Resolve Work identities in snapshot staging before graph construction."""
 
     results: list[IdentityBoundBundle] = []
     for item in data:
-        scholarly = scholarly_registry.resolve_candidate_bundle(
-            item.bundle, item.projection.chunks
+        scholarly = (
+            scholarly_registry.resolve_candidate_bundle(
+                item.bundle, item.projection.chunks
+            )
+            if scholarly_candidate_snapshot_id is None
+            else scholarly_registry.candidate_context_for_bundle(
+                scholarly_candidate_snapshot_id,
+                item.bundle,
+                item.projection.chunks,
+            )
         )
         chunks, mentions = bind_scholarly_citations(
             document=item.bundle.document,
@@ -244,6 +253,7 @@ def configure_pipeline_tasks(
     chunk_hard_max_tokens: int,
     chunk_overlap_tokens: int,
     graph_results: list[DataPointGraph],
+    scholarly_candidate_snapshot_id: str | None = None,
     reuse_existing_enrichment: bool,
     generate_enrichment_if_missing: bool,
     claim_enrichment_enabled: bool,
@@ -263,6 +273,7 @@ def configure_pipeline_tasks(
             batch_size=1,
             scholarly_registry=scholarly_registry,
             repository=repository,
+            scholarly_candidate_snapshot_id=scholarly_candidate_snapshot_id,
         ).task,
         task(
             semantic_enrichment_task,
