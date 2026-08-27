@@ -30,6 +30,7 @@ from paperos_core.adapters.cognee.models import (
 from paperos_core.adapters.cognee.pipeline_tasks import configure_pipeline_tasks
 from paperos_core.config import IngestionSettings
 from paperos_core.domain.canonical import CanonicalBundle, CanonicalIngestionResult
+from paperos_core.domain.ids import semantic_object_id
 from paperos_core.domain.knowledge import SemanticEnrichment
 from paperos_core.errors import CogneeStorageError
 from paperos_core.indexes.manager import IndexManager
@@ -81,13 +82,16 @@ class CogneePipelineAdapter:
         snapshot_id = bundle.snapshot.id
         try:
             report, enrichment_path = await self.ingest_bundle(bundle, rebuilt=rebuilt)
-            previous_snapshot_id = self.canonical_repository.activate_snapshot(snapshot_id)
+            previous_snapshot_id = self.scholarly_registry.publish_candidate(
+                snapshot_id,
+                self.canonical_repository,
+            )
         except Exception:
             await self._cleanup_after_failure(snapshot_id, phase="candidate")
             raise
         if previous_snapshot_id is not None and previous_snapshot_id != snapshot_id:
             try:
-                await self.cleanup_snapshot_derived(previous_snapshot_id)
+                await self.cleanup_snapshot_revision(previous_snapshot_id)
             except Exception as exc:  # noqa: BLE001 - activation must not roll back.
                 self._record_cleanup_retry(
                     previous_snapshot_id,
@@ -275,11 +279,111 @@ class CogneePipelineAdapter:
         self._cleanup_retry_path(snapshot_id).unlink(missing_ok=True)
         return deleted
 
+    async def cleanup_snapshot_revision(self, snapshot_id: str) -> list[Path]:
+        """Remove one inactive derived projection and immutable canonical revision."""
+
+        if self.canonical_repository.is_active_snapshot(snapshot_id):
+            raise CogneeStorageError(
+                "The active canonical snapshot cannot be cleaned up.",
+                affected=snapshot_id,
+            )
+        deleted = await self.cleanup_snapshot_derived(snapshot_id)
+        self.scholarly_registry.discard_candidate(snapshot_id)
+        self.canonical_repository.cleanup_snapshot(snapshot_id)
+        return deleted
+
+    def reproject_enrichment(
+        self,
+        source_snapshot_id: str,
+        target_snapshot_id: str,
+    ) -> Path:
+        """Copy immutable semantic facts under a new canonical revision identity."""
+
+        source = self._load_enrichment(source_snapshot_id)
+        entity_ids: dict[str, str] = {}
+        entities = []
+        for entity in source.entities:
+            entity_id = semantic_object_id(
+                "entity",
+                target_snapshot_id,
+                f"{entity.entity_type}:{entity.name}",
+                entity.source_chunk_ids,
+            )
+            entity_ids[entity.id] = entity_id
+            entities.append(
+                entity.model_copy(
+                    update={
+                        "id": entity_id,
+                        "canonical_snapshot_id": target_snapshot_id,
+                    }
+                )
+            )
+        claims = [
+            claim.model_copy(
+                update={
+                    "id": semantic_object_id(
+                        "claim",
+                        target_snapshot_id,
+                        claim.text,
+                        claim.source_chunk_ids,
+                    ),
+                    "canonical_snapshot_id": target_snapshot_id,
+                }
+            )
+            for claim in source.claims
+        ]
+        relations = []
+        for relation in source.relations:
+            source_object_id = entity_ids.get(
+                relation.source_object_id,
+                relation.source_object_id,
+            )
+            target_object_id = entity_ids.get(
+                relation.target_object_id,
+                relation.target_object_id,
+            )
+            relations.append(
+                relation.model_copy(
+                    update={
+                        "id": semantic_object_id(
+                            "relation",
+                            target_snapshot_id,
+                            f"{source_object_id}:{relation.relation_type}:"
+                            f"{target_object_id}",
+                            relation.source_chunk_ids,
+                        ),
+                        "canonical_snapshot_id": target_snapshot_id,
+                        "source_object_id": source_object_id,
+                        "target_object_id": target_object_id,
+                    }
+                )
+            )
+        target = self.paths.cognee / "enrichment" / f"{target_snapshot_id}.json"
+        _atomic_json(
+            target,
+            source.model_copy(
+                update={
+                    "entities": entities,
+                    "claims": claims,
+                    "relations": relations,
+                }
+            ).model_dump(mode="json"),
+        )
+        return target
+
     async def _cleanup_after_failure(self, snapshot_id: str, *, phase: str) -> None:
+        failures: list[Exception] = []
         try:
             await self.cleanup_snapshot_derived(snapshot_id)
-        except Exception as exc:  # noqa: BLE001 - preserve the original pipeline failure.
-            self._record_cleanup_retry(snapshot_id, phase=phase, exc=exc)
+        except Exception as exc:  # noqa: BLE001 - preserve original failure.
+            failures.append(exc)
+        self.scholarly_registry.discard_candidate(snapshot_id)
+        try:
+            self.canonical_repository.cleanup_snapshot(snapshot_id)
+        except Exception as exc:  # noqa: BLE001 - preserve original failure.
+            failures.append(exc)
+        if failures:
+            self._record_cleanup_retry(snapshot_id, phase=phase, exc=failures[0])
 
     def _cleanup_retry_path(self, snapshot_id: str) -> Path:
         return self.paths.jobs / "cleanup" / f"{snapshot_id}.json"

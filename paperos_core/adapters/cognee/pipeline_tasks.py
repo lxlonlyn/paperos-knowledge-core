@@ -106,12 +106,15 @@ async def scholarly_identity_task(
     *,
     scholarly_registry: ScholarlyRegistry,
 ) -> list[IdentityBoundBundle]:
-    """Resolve and persist Work identities before any semantic or graph task."""
+    """Resolve Work identities in snapshot staging before graph construction."""
+
     return [
         IdentityBoundBundle(
             bundle=item.bundle,
             projection=item.projection,
-            scholarly=scholarly_registry.resolve_bundle(item.bundle, item.projection.chunks),
+            scholarly=scholarly_registry.resolve_candidate_bundle(
+                item.bundle, item.projection.chunks
+            ),
         )
         for item in data
     ]

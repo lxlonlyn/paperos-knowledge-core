@@ -46,6 +46,7 @@ from paperos_core.domain.canonical import (
     Chunk,
     Document,
     Element,
+    ReferenceEntry,
     SourceSpan,
 )
 from paperos_core.domain.documents import utc_now
@@ -54,6 +55,7 @@ from paperos_core.domain.ids import canonical_snapshot_id, document_id
 from paperos_core.errors import CanonicalStorageError, CogneeStorageError
 from paperos_core.health import HealthService
 from paperos_core.indexes.manager import IndexManager
+from paperos_core.indexes.manifest import IndexingReport
 from paperos_core.indexes.rebuild import DerivedDataRebuilder
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.chunking import build_chunks
@@ -99,6 +101,9 @@ class _ForbiddenDependency:
 
 
 class _HealthProbe:
+    def __init__(self) -> None:
+        self.runtime_config = _LocalRuntimeReader()
+
     async def health_check(self) -> dict[str, object]:
         return {"provider": "contract", "model": "contract"}
 
@@ -128,6 +133,12 @@ class _CogneeHealthProbe:
 
     def read_manifest(self, snapshot_id: str) -> dict[str, object]:
         return {"dataset": {"name": _DATASET}}
+
+
+class _DeletionCognee:
+    async def delete_document_data(self, snapshot_id: str) -> int:
+        _require(bool(snapshot_id), "Delete received an empty snapshot ID")
+        return 1
 
 
 class _LocalRuntimeConfig:
@@ -258,6 +269,385 @@ async def _save_and_index(
     repository.save_snapshot(bundle)
     repository.save_chunks(bundle.snapshot.id, [chunk])
     await indexes.index_bundle(bundle, chunks=[chunk])
+
+
+def _with_scholarly_identity(
+    bundle: CanonicalBundle,
+    chunk: Chunk,
+    *,
+    document_doi: str,
+    reference_doi: str,
+    reference_title: str,
+) -> tuple[CanonicalBundle, Chunk]:
+    reference_id = "reference_shared_scholarly_revision"
+    reference = ReferenceEntry(
+        id=reference_id,
+        document_id=bundle.document.id,
+        canonical_snapshot_id=bundle.snapshot.id,
+        raw_text=f"Scholar, A. 2024. {reference_title}.",
+        order=0,
+        title=reference_title,
+        authors=["A. Scholar"],
+        year=2024,
+        doi=reference_doi,
+        source_element_id=bundle.elements[0].id,
+    )
+    return (
+        bundle.model_copy(
+            update={
+                "document": bundle.document.model_copy(
+                    update={"doi": document_doi}
+                ),
+                "references": [reference],
+            }
+        ),
+        chunk.model_copy(
+            update={"citation_reference_entry_ids": [reference_id]}
+        ),
+    )
+
+
+async def scholarly_isolation_contract(root: Path) -> dict[str, object]:
+    paths = build_data_paths(root / "scholarly-data")
+    StorageInitializer(paths).initialize()
+    repository = CanonicalRepository(paths)
+    registry = ScholarlyRegistry(paths)
+    parse_ids = ["parse_scholarly_revision_1", "parse_scholarly_revision_2"]
+    _insert_source_and_parse_runs(paths, parse_ids)
+
+    first, first_chunk = _revision(
+        repository,
+        parse_ids[0],
+        title="Old active scholarly title",
+        chunk_text="old scholarly evidence",
+    )
+    first, first_chunk = _with_scholarly_identity(
+        first,
+        first_chunk,
+        document_doi="10.1000/old-document",
+        reference_doi="10.1000/merge-target",
+        reference_title="Old cited work",
+    )
+    repository.save_snapshot(first)
+    repository.save_chunks(first.snapshot.id, [first_chunk])
+    registry.resolve_candidate_bundle(first, [first_chunk])
+    _require(registry.identity_snapshot()["works"] == [], "Candidate touched main registry")
+    registry.publish_candidate(first.snapshot.id, repository)
+    old_identity = registry.identity_snapshot()
+    old_document_work = registry.work_for_document(_DOCUMENT_ID)
+    old_reference_work = registry.work_for_reference(
+        "reference_shared_scholarly_revision"
+    )
+    _require(old_document_work is not None, "Active document Work is missing")
+    _require(old_reference_work is not None, "Active reference Work is missing")
+    _require(
+        old_document_work.id != old_reference_work.id,
+        "Contract setup did not create distinct merge inputs",
+    )
+
+    second, second_chunk = _revision(
+        repository,
+        parse_ids[1],
+        title="Candidate scholarly title",
+        chunk_text="candidate scholarly evidence",
+    )
+    second, second_chunk = _with_scholarly_identity(
+        second,
+        second_chunk,
+        document_doi="10.1000/merge-target",
+        reference_doi="10.1000/merge-target",
+        reference_title="Candidate cited work",
+    )
+    repository.save_snapshot(second)
+    repository.save_chunks(second.snapshot.id, [second_chunk])
+    with sqlite3.connect(paths.registry_db) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_staged_scholarly_update
+            BEFORE UPDATE ON scholarly_works
+            BEGIN
+                SELECT RAISE(ABORT, 'injected scholarly resolution failure');
+            END;
+            """
+        )
+    try:
+        registry.resolve_candidate_bundle(second, [second_chunk])
+    except sqlite3.IntegrityError:
+        pass
+    else:
+        raise RuntimeError("Injected scholarly resolution failure did not occur")
+    _require(
+        registry.identity_snapshot() == old_identity,
+        "Failed scholarly resolution polluted active-visible registry",
+    )
+    _require(
+        not registry.candidate_database_path(second.snapshot.id).exists(),
+        "Failed scholarly resolution retained staging state",
+    )
+    with sqlite3.connect(paths.registry_db) as connection:
+        connection.execute("DROP TRIGGER fail_staged_scholarly_update")
+
+    candidate_context = registry.resolve_candidate_bundle(second, [second_chunk])
+    staged = ScholarlyRegistry(
+        paths,
+        database_path=registry.candidate_database_path(second.snapshot.id),
+    )
+    _require(staged.list_redirects(), "Candidate did not exercise Work redirect staging")
+    _require(
+        registry.identity_snapshot() == old_identity,
+        "Candidate scholarly resolution polluted active-visible registry",
+    )
+    _require(
+        candidate_context.document_work.title == "Candidate scholarly title",
+        "Candidate staging did not contain new document Work state",
+    )
+    registry.discard_candidate(second.snapshot.id)
+    _require(
+        registry.identity_snapshot() == old_identity,
+        "Failed candidate left active-visible scholarly state",
+    )
+
+    registry.resolve_candidate_bundle(second, [second_chunk])
+    previous = registry.publish_candidate(second.snapshot.id, repository)
+    _require(previous == first.snapshot.id, "Scholarly publish replaced wrong revision")
+    _require(
+        registry.work_for_document(_DOCUMENT_ID).title == "Candidate scholarly title",  # type: ignore[union-attr]
+        "Successful activation did not publish candidate scholarly mapping",
+    )
+    redirects_after_publish = registry.list_redirects()
+    repository.cleanup_snapshot(first.snapshot.id)
+    repository.cleanup_snapshot(first.snapshot.id)
+    _require(
+        registry.list_redirects() == redirects_after_publish,
+        "Old canonical cleanup damaged new active scholarly mapping",
+    )
+    return {
+        "status": "passed",
+        "candidate_merge_isolated": True,
+        "failed_candidate_clean": True,
+        "published_redirect_count": len(redirects_after_publish),
+    }
+
+
+class _LocalRebuildPipeline:
+    def __init__(
+        self,
+        paths: DataPaths,
+        repository: CanonicalRepository,
+        registry: SourceRegistry,
+        indexes: IndexManager,
+        *,
+        fail_build: bool,
+    ) -> None:
+        self.paths = paths
+        self.repository = repository
+        self.indexes = indexes
+        self.fail_build = fail_build
+        self.scholarly_registry = ScholarlyRegistry(paths)
+        self.cleanup_adapter = CogneePipelineAdapter(
+            paths,
+            repository,
+            registry,
+            self.scholarly_registry,
+            SimpleNamespace(),  # type: ignore[arg-type]
+            indexes,
+            SimpleNamespace(),  # type: ignore[arg-type]
+            RuntimeSettings().ingestion,
+        )
+
+    def reproject_enrichment(
+        self,
+        source_snapshot_id: str,
+        target_snapshot_id: str,
+    ) -> Path:
+        source = self.paths.cognee / "enrichment" / f"{source_snapshot_id}.json"
+        target = self.paths.cognee / "enrichment" / f"{target_snapshot_id}.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+        return target
+
+    async def ingest_bundle(
+        self,
+        bundle: CanonicalBundle,
+        *,
+        rebuilt: bool,
+        reuse_existing_enrichment: bool,
+        generate_enrichment_if_missing: bool,
+    ) -> tuple[IndexingReport, Path]:
+        _require(rebuilt, "Rebuild pipeline did not mark candidate as rebuilt")
+        _require(reuse_existing_enrichment, "Rebuild did not reuse current enrichment")
+        _require(
+            not generate_enrichment_if_missing,
+            "Safe rebuild unexpectedly enabled enrichment generation",
+        )
+        if self.fail_build:
+            raise RuntimeError("injected isolated rebuild build failure")
+        active_snapshot_id = self.repository.active_snapshot_id(bundle.document.id)
+        _require(active_snapshot_id is not None, "Rebuild lost old active pointer")
+        source_projection = self.repository.get_chunk_projection(active_snapshot_id)
+        chunks = [
+            chunk.model_copy(
+                update={"canonical_snapshot_id": bundle.snapshot.id}
+            )
+            for chunk in source_projection.chunks
+        ]
+        self.repository.save_chunks(bundle.snapshot.id, chunks)
+        self.scholarly_registry.resolve_candidate_bundle(bundle, chunks)
+        manifest, manifest_path = await self.indexes.index_bundle(
+            bundle,
+            chunks=chunks,
+        )
+        enrichment_path = (
+            self.paths.cognee / "enrichment" / f"{bundle.snapshot.id}.json"
+        )
+        return (
+            IndexingReport(
+                canonical_snapshot_id=bundle.snapshot.id,
+                document_id=bundle.document.id,
+                dataset_name=bundle.snapshot.dataset_id,
+                cognee_dataset_id="contract",
+                cognee_data_id="contract",
+                cognee_pipeline_run_id="contract",
+                cognee_provenance_backend="contract",
+                manifest_path=manifest_path,
+                cognee_manifest_path=(
+                    self.paths.cognee / "manifests" / f"{bundle.snapshot.id}.json"
+                ),
+                lexical_database=manifest.lexical_database,
+                vector_database="contract",
+                cognee_object_count=0,
+                relation_count=0,
+                lexical_object_count=len(manifest.lexical_object_ids),
+                vector_object_count=0,
+                embedding_dimensions=1,
+                semantic_entity_count=0,
+                semantic_claim_count=0,
+                semantic_relation_count=0,
+                consistency_valid=True,
+                rebuilt=True,
+            ),
+            enrichment_path,
+        )
+
+    async def _cleanup_after_failure(self, snapshot_id: str, *, phase: str) -> None:
+        _require(phase == "rebuild_candidate", "Unexpected rebuild cleanup phase")
+        self.indexes.lexical.delete_snapshot(snapshot_id)
+        for path in (
+            self.repository.chunk_store_path(snapshot_id),
+            self.repository.citation_mention_store_path(snapshot_id),
+            self.paths.cognee / "enrichment" / f"{snapshot_id}.json",
+            self.paths.indexes / "manifests" / f"{snapshot_id}.json",
+        ):
+            path.unlink(missing_ok=True)
+        self.scholarly_registry.discard_candidate(snapshot_id)
+        self.repository.cleanup_snapshot(snapshot_id)
+
+    async def cleanup_snapshot_revision(self, snapshot_id: str) -> list[Path]:
+        return await self.cleanup_adapter.cleanup_snapshot_revision(snapshot_id)
+
+    def _record_cleanup_retry(
+        self,
+        snapshot_id: str,
+        *,
+        phase: str,
+        exc: Exception,
+    ) -> None:
+        raise RuntimeError(
+            f"Unexpected cleanup retry for {snapshot_id} in {phase}: {exc}"
+        )
+
+
+async def safe_rebuild_contract(root: Path) -> dict[str, object]:
+    paths = build_data_paths(root / "rebuild-data")
+    StorageInitializer(paths).initialize()
+    repository = CanonicalRepository(paths)
+    registry = SourceRegistry(paths)
+    indexes = IndexManager(paths)
+    parse_id = "parse_safe_rebuild"
+    _insert_source_and_parse_runs(paths, [parse_id])
+    active, active_chunk = _revision(
+        repository,
+        parse_id,
+        title="Safe rebuild active",
+        chunk_text="saferebuildtoken active evidence",
+    )
+    await _save_and_index(repository, indexes, active, active_chunk)
+    scholarly = ScholarlyRegistry(paths)
+    scholarly.resolve_candidate_bundle(active, [active_chunk])
+    scholarly.publish_candidate(active.snapshot.id, repository)
+    enrichment = paths.cognee / "enrichment" / f"{active.snapshot.id}.json"
+    enrichment.parent.mkdir(parents=True, exist_ok=True)
+    enrichment.write_text('{"contract": true}', encoding="utf-8")
+
+    failing_pipeline = _LocalRebuildPipeline(
+        paths,
+        repository,
+        registry,
+        indexes,
+        fail_build=True,
+    )
+    failing_rebuilder = DerivedDataRebuilder(
+        paths,
+        repository,
+        failing_pipeline,  # type: ignore[arg-type]
+        StorageInitializer(paths),
+    )
+    try:
+        await failing_rebuilder.rebuild()
+    except RuntimeError as exc:
+        _require("injected isolated rebuild" in str(exc), "Wrong rebuild failure")
+    else:
+        raise RuntimeError("Injected rebuild failure unexpectedly succeeded")
+    _require(
+        repository.active_snapshot_id(_DOCUMENT_ID) == active.snapshot.id,
+        "Failed rebuild changed active pointer",
+    )
+    old_hits = indexes.lexical.search(
+        '"saferebuildtoken"',
+        active_snapshot_ids={active.snapshot.id},
+        limit=10,
+    )
+    _require(old_hits, "Failed rebuild deleted active FTS")
+    _require(
+        repository.list_all_snapshot_ids() == [active.snapshot.id],
+        "Failed rebuild retained canonical candidate",
+    )
+
+    successful_pipeline = _LocalRebuildPipeline(
+        paths,
+        repository,
+        registry,
+        indexes,
+        fail_build=False,
+    )
+    report = await DerivedDataRebuilder(
+        paths,
+        repository,
+        successful_pipeline,  # type: ignore[arg-type]
+        StorageInitializer(paths),
+    ).rebuild()
+    _require(len(report.rebuilt_snapshot_ids) == 1, "Rebuild did not publish one revision")
+    rebuilt_snapshot_id = report.rebuilt_snapshot_ids[0]
+    _require(
+        repository.active_snapshot_id(_DOCUMENT_ID) == rebuilt_snapshot_id,
+        "Successful rebuild did not switch active pointer",
+    )
+    _require(
+        repository.list_all_snapshot_ids() == [rebuilt_snapshot_id],
+        "Successful rebuild retained old canonical revision",
+    )
+    rebuilt_hits = indexes.lexical.search(
+        '"saferebuildtoken"',
+        active_snapshot_ids={rebuilt_snapshot_id},
+        limit=10,
+    )
+    _require(rebuilt_hits, "Successful rebuild did not publish candidate FTS")
+    return {
+        "status": "passed",
+        "failure_preserved_snapshot_id": active.snapshot.id,
+        "published_snapshot_id": rebuilt_snapshot_id,
+        "old_canonical_removed": True,
+    }
 
 
 async def _no_active_query(
@@ -553,10 +943,14 @@ async def local_revision_contract(root: Path) -> dict[str, object]:
         SimpleNamespace(),  # type: ignore[arg-type]
         RuntimeSettings().ingestion,
     )
-    first_cleanup = await cleanup_pipeline.cleanup_snapshot_derived(first.snapshot.id)
-    second_cleanup = await cleanup_pipeline.cleanup_snapshot_derived(first.snapshot.id)
+    first_cleanup = await cleanup_pipeline.cleanup_snapshot_revision(first.snapshot.id)
+    second_cleanup = await cleanup_pipeline.cleanup_snapshot_revision(first.snapshot.id)
     _require(first_cleanup, "First old-revision cleanup removed nothing")
     _require(second_cleanup == [], "Cleanup is not idempotent")
+    _require(
+        first.snapshot.id not in repository.list_all_snapshot_ids(),
+        "Old canonical revision survived successful cleanup",
+    )
     _require(
         repository.active_snapshot_id(_DOCUMENT_ID) == second.snapshot.id,
         "Old cleanup changed the new active pointer",
@@ -569,6 +963,57 @@ async def local_revision_contract(root: Path) -> dict[str, object]:
         repository.chunk_store_path(second.snapshot.id).is_file(),
         "Old cleanup deleted new active ChunkProjection",
     )
+    try:
+        repository.cleanup_snapshot(second.snapshot.id)
+    except CanonicalStorageError:
+        pass
+    else:
+        raise RuntimeError("Canonical cleanup accepted the active snapshot")
+
+    delete_service = DocumentService(
+        paths,
+        repository,
+        SimpleNamespace(get_source=registry.get_source),  # type: ignore[arg-type]
+        rebuilder,
+        indexes,
+        _DeletionCognee(),  # type: ignore[arg-type]
+    )
+    deletion = await delete_service.delete(_DOCUMENT_ID)
+    _require(deletion.removed_vector_objects == 1, "Delete vector count changed")
+    _require(
+        repository.active_snapshot_id(_DOCUMENT_ID) is None,
+        "Delete left a public active pointer",
+    )
+    with sqlite3.connect(paths.registry_db) as connection:
+        raw_pointer_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM active_canonical_snapshots WHERE document_id = ?",
+                (_DOCUMENT_ID,),
+            ).fetchone()[0]
+        )
+    _require(raw_pointer_count == 0, "Delete retained the raw active pointer")
+    _require(delete_service.list_documents() == [], "Delete remained in document list")
+    _require(
+        CorpusView.load(paths, repository, registry).bundles == {},
+        "Delete remained query-visible",
+    )
+    _require(
+        await _health_document_count(paths, repository, registry, indexes) == 0,
+        "Deleted document remained in health active count",
+    )
+    visual_deleted = await visualize_dataset(
+        application=SimpleNamespace(
+            settings=SimpleNamespace(dataset=_DATASET),
+            canonical_repository=repository,
+            paths=paths,
+        ),
+        dataset=None,
+    )
+    _require(
+        visual_deleted["snapshot_ids"] == [],
+        "Deleted document remained visualization-visible",
+    )
+    deleted_query = await _no_active_query(paths, repository, registry, indexes)
 
     return {
         "status": "passed",
@@ -580,6 +1025,9 @@ async def local_revision_contract(root: Path) -> dict[str, object]:
         "cleanup_first_count": len(first_cleanup),
         "cleanup_second_count": len(second_cleanup),
         "document_history_hidden": "snapshot_ids" not in detail_payload,
+        "old_canonical_removed": True,
+        "delete_active_pointer_count": raw_pointer_count,
+        "delete_no_active_query": deleted_query,
     }
 
 
@@ -714,6 +1162,86 @@ def _current_chunks(bundle: CanonicalBundle) -> list[Chunk]:
     return chunks[:8]
 
 
+def _register_live_rebuild_source(
+    paths: DataPaths,
+    repository: CanonicalRepository,
+    bundle: CanonicalBundle,
+    chunks: list[Chunk],
+    source: Any,
+) -> None:
+    codec = DataPathCodec(paths.root)
+    created_at = utc_now().isoformat()
+    with sqlite3.connect(paths.registry_db) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO source_files (
+                id, sha256, original_filename, stored_filename, media_type,
+                size_bytes, storage_path, created_at, schema_version, id_version,
+                source_url, user_metadata, dataset_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source.id,
+                source.sha256,
+                source.original_filename,
+                source.stored_filename,
+                source.media_type,
+                source.size_bytes,
+                codec.encode(paths.raw / source.id / source.stored_filename),
+                created_at,
+                source.schema_version,
+                source.id_version,
+                source.source_url,
+                json.dumps(source.user_metadata) if source.user_metadata else None,
+                bundle.snapshot.dataset_id,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO parse_runs (
+                id, source_file_id, provider, backend, status,
+                request_options, created_at, completed_at,
+                artifact_manifest_path, schema_version, pipeline_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                bundle.snapshot.parse_run_id,
+                source.id,
+                "contract",
+                "contract",
+                "completed",
+                "{}",
+                created_at,
+                created_at,
+                codec.encode(
+                    paths.parsed / bundle.snapshot.parse_run_id / "manifest.json"
+                ),
+                "1.0",
+                "contract",
+            ),
+        )
+    local_bundle = bundle.model_copy(
+        update={
+            "snapshot": bundle.snapshot.model_copy(
+                update={
+                    "manifest_path": repository.snapshot_manifest_path(
+                        bundle.snapshot.source_file_id,
+                        bundle.snapshot.parse_run_id,
+                        snapshot_id=bundle.snapshot.id,
+                    )
+                }
+            ),
+            "elements": [
+                element.model_copy(update={"asset_path": None})
+                for element in bundle.elements
+            ],
+        }
+    )
+    repository.save_snapshot(local_bundle)
+    repository.save_chunks(bundle.snapshot.id, chunks)
+
+
 async def _store_real_vector_revision(
     pipeline: CogneePipelineAdapter,
     compat: CogneeCompatibilityAdapter,
@@ -836,13 +1364,15 @@ async def live_vector_contract(root: Path) -> dict[str, object]:
         compat = CogneeCompatibilityAdapter(paths)
         search = CogneeSearchAdapter(paths, compat)
         temp_repository = CanonicalRepository(paths)
+        temp_registry = SourceRegistry(paths)
+        temp_indexes = IndexManager(paths)
         pipeline = CogneePipelineAdapter(
             paths,
             temp_repository,
-            SourceRegistry(paths),
+            temp_registry,
             ScholarlyRegistry(paths),
             compat,
-            IndexManager(paths),
+            temp_indexes,
             _ForbiddenDependency(),  # type: ignore[arg-type]
             RuntimeSettings().ingestion,
         )
@@ -850,6 +1380,14 @@ async def live_vector_contract(root: Path) -> dict[str, object]:
         for bundle in bundles:
             chunks = _current_chunks(bundle)
             source = retained_registry.get_source(bundle.snapshot.source_file_id)
+            _register_live_rebuild_source(
+                paths,
+                temp_repository,
+                bundle,
+                chunks,
+                source,
+            )
+            await temp_indexes.index_bundle(bundle, chunks=chunks)
             _, data_id = await _store_real_vector_revision(
                 pipeline,
                 compat,
@@ -929,6 +1467,57 @@ async def live_vector_contract(root: Path) -> dict[str, object]:
             all(hit.canonical_id in active_canonical_ids for hit in filtered),
             "Candidate vector crossed the final active filter",
         )
+        temp_repository.activate_snapshot(active_snapshot_id)
+        active_enrichment = (
+            paths.cognee / "enrichment" / f"{active_snapshot_id}.json"
+        )
+        active_enrichment.parent.mkdir(parents=True, exist_ok=True)
+        active_enrichment.write_text('{"contract": true}', encoding="utf-8")
+        canonical_before_failure = set(temp_repository.list_all_snapshot_ids())
+        failing_pipeline = _LocalRebuildPipeline(
+            paths,
+            temp_repository,
+            temp_registry,
+            temp_indexes,
+            fail_build=True,
+        )
+        try:
+            await DerivedDataRebuilder(
+                paths,
+                temp_repository,
+                failing_pipeline,  # type: ignore[arg-type]
+                StorageInitializer(paths),
+            ).rebuild(active_snapshot_id)
+        except RuntimeError as exc:
+            _require(
+                "injected isolated rebuild" in str(exc),
+                "Real-boundary rebuild failed for an unexpected reason",
+            )
+        else:
+            raise RuntimeError("Real-boundary injected rebuild unexpectedly succeeded")
+        _require(
+            temp_repository.active_snapshot_id(bundles[0].document.id)
+            == active_snapshot_id,
+            "Real-boundary rebuild failure changed active pointer",
+        )
+        _require(
+            set(temp_repository.list_all_snapshot_ids()) == canonical_before_failure,
+            "Real-boundary rebuild failure retained a canonical candidate",
+        )
+        filtered_after_rebuild_failure = await search.graph_search(
+            _VECTOR_QUERY,
+            dataset=dataset_name,
+            top_k=1,
+            active_snapshot_ids={active_snapshot_id},
+        )
+        _require(
+            filtered_after_rebuild_failure
+            and all(
+                hit.canonical_id in active_canonical_ids
+                for hit in filtered_after_rebuild_failure
+            ),
+            "Failed rebuild deleted or replaced active real vector data",
+        )
         retired_snapshot_id = next(iter(snapshot_ids - {active_snapshot_id}))
         await compat.delete_document_data(retired_snapshot_id)
         filtered_after_cleanup = await search.graph_search(
@@ -954,6 +1543,7 @@ async def live_vector_contract(root: Path) -> dict[str, object]:
             "pool_size": 1,
             "filtered_chunk_ids": [hit.canonical_id for hit in filtered],
             "retired_cleanup_preserved_active": True,
+            "rebuild_failure_preserved_active_vector": True,
             "data_ids_distinct": True,
         }
     except Exception as exc:
@@ -969,9 +1559,17 @@ async def live_vector_contract(root: Path) -> dict[str, object]:
 async def run_contract() -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="paperos-task2a-") as directory:
         root = Path(directory)
+        scholarly = await scholarly_isolation_contract(root)
+        rebuild = await safe_rebuild_contract(root)
         local = await local_revision_contract(root)
         vector = await live_vector_contract(root)
-    return {"status": "passed", "local": local, "vector": vector}
+    return {
+        "status": "passed",
+        "scholarly": scholarly,
+        "rebuild": rebuild,
+        "local": local,
+        "vector": vector,
+    }
 
 
 def main() -> None:

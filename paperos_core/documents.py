@@ -8,7 +8,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
-from paperos_core.errors import DocumentNotFoundError
+from paperos_core.errors import CogneeStorageError, DocumentNotFoundError
 from paperos_core.indexes.manager import IndexManager
 from paperos_core.indexes.rebuild import DerivedDataRebuilder
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
@@ -151,13 +151,26 @@ class DocumentService:
             )
         lexical_count = len(self.indexes.lexical.object_ids(snapshot_id))
         bundle = self.canonical_repository.get_bundle(snapshot_id)
-        vector_count = await self.cognee.delete_document_data(bundle.snapshot.id)
-        with self._connect() as connection:
-            connection.execute(
-                "INSERT OR IGNORE INTO document_tombstones(document_id) VALUES (?)",
-                (document_id,),
-            )
-        self.indexes.lexical.delete_snapshot(snapshot_id)
+        self.canonical_repository.tombstone_active_document(
+            document_id,
+            expected_snapshot_id=snapshot_id,
+        )
+        failures: list[Exception] = []
+        vector_count = 0
+        try:
+            vector_count = await self.cognee.delete_document_data(bundle.snapshot.id)
+        except Exception as exc:  # noqa: BLE001 - finish hidden local cleanup.
+            failures.append(exc)
+        try:
+            self.indexes.lexical.delete_snapshot(snapshot_id)
+        except Exception as exc:  # noqa: BLE001 - finish hidden local cleanup.
+            failures.append(exc)
+        if failures:
+            raise CogneeStorageError(
+                "Tombstoned document cleanup is incomplete and must be retried.",
+                affected=document_id,
+                details={"failure_count": len(failures), "retryable": True},
+            ) from failures[0]
         return DocumentDeletionReport(
             document_id=document_id,
             removed_lexical_objects=lexical_count,

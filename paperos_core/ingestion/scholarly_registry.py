@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import sqlite3
+import tempfile
 import unicodedata
 from datetime import datetime
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from paperos_core.domain.canonical import (
@@ -61,14 +65,172 @@ _STATUS_PRIORITY = {
 class ScholarlyRegistry:
     """Own Work identities in registry.db; Cognee only receives projections."""
 
-    def __init__(self, paths: DataPaths) -> None:
+    _STATE_TABLES = (
+        "scholarly_works",
+        "work_identifiers",
+        "document_work_links",
+        "reference_work_links",
+        "work_redirects",
+    )
+
+    def __init__(self, paths: DataPaths, *, database_path: Path | None = None) -> None:
         self.paths = paths
+        self.database_path = database_path or paths.registry_db
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.paths.registry_db, timeout=30)
+        connection = sqlite3.connect(self.database_path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    def candidate_database_path(self, snapshot_id: str) -> Path:
+        path = (
+            self.paths.cognee / "scholarly_staging" / f"{snapshot_id}.sqlite3"
+        ).resolve(strict=False)
+        self.paths.assert_within_root(path)
+        return path
+
+    def candidate_manifest_path(self, snapshot_id: str) -> Path:
+        return self.candidate_database_path(snapshot_id).with_suffix(".json")
+
+    def resolve_candidate_bundle(
+        self,
+        bundle: CanonicalBundle,
+        chunks: list[Chunk],
+    ) -> ScholarlyContext:
+        """Resolve a candidate against an isolated copy of active registry state."""
+
+        snapshot_id = bundle.snapshot.id
+        database_path = self.candidate_database_path(snapshot_id)
+        manifest_path = self.candidate_manifest_path(snapshot_id)
+        self.discard_candidate(snapshot_id)
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with self._connect() as source:
+                source.execute("BEGIN")
+                active_pointers = self._active_pointers(source)
+                base_digest = self._state_digest(source)
+                with sqlite3.connect(database_path, timeout=30) as candidate:
+                    source.backup(candidate)
+            _write_json(
+                manifest_path,
+                {
+                    "snapshot_id": snapshot_id,
+                    "active_pointers": active_pointers,
+                    "base_state_digest": base_digest,
+                },
+            )
+            staged = ScholarlyRegistry(self.paths, database_path=database_path)
+            return staged.resolve_bundle(bundle, chunks)
+        except Exception:
+            self.discard_candidate(snapshot_id)
+            raise
+
+    def publish_candidate(
+        self,
+        snapshot_id: str,
+        repository: CanonicalRepository,
+        *,
+        expected_previous_snapshot_id: str | None = None,
+    ) -> str | None:
+        """Atomically publish candidate scholarly state and its active pointer."""
+
+        database_path = self.candidate_database_path(snapshot_id)
+        manifest_path = self.candidate_manifest_path(snapshot_id)
+        try:
+            metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Scholarly candidate metadata is unavailable for {snapshot_id}"
+            ) from exc
+        if metadata.get("snapshot_id") != snapshot_id or not database_path.is_file():
+            raise RuntimeError(f"Scholarly candidate is incomplete for {snapshot_id}")
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._active_pointers(connection) != metadata.get("active_pointers"):
+                raise RuntimeError(
+                    "Active canonical state changed while scholarly candidate was building"
+                )
+            if self._state_digest(connection) != metadata.get("base_state_digest"):
+                raise RuntimeError(
+                    "Scholarly registry changed while candidate was building"
+                )
+            if expected_previous_snapshot_id is not None:
+                current = connection.execute(
+                    "SELECT active.snapshot_id "
+                    "FROM canonical_snapshots AS candidate "
+                    "LEFT JOIN active_canonical_snapshots AS active "
+                    "ON active.document_id = candidate.document_id "
+                    "WHERE candidate.id = ?",
+                    (snapshot_id,),
+                ).fetchone()
+                current_snapshot_id = (
+                    str(current["snapshot_id"])
+                    if current is not None and current["snapshot_id"] is not None
+                    else None
+                )
+                if current_snapshot_id != expected_previous_snapshot_id:
+                    raise RuntimeError(
+                        "Active canonical revision changed before candidate publication"
+                    )
+            connection.execute(
+                "ATTACH DATABASE ? AS scholarly_candidate",
+                (str(database_path),),
+            )
+            connection.execute("PRAGMA defer_foreign_keys = ON")
+            for table in reversed(self._STATE_TABLES):
+                connection.execute(f"DELETE FROM {table}")
+            for table in self._STATE_TABLES:
+                connection.execute(
+                    f"INSERT INTO {table} SELECT * FROM scholarly_candidate.{table}"
+                )
+            previous = repository.activate_snapshot(
+                snapshot_id,
+                connection=connection,
+            )
+        self.discard_candidate(snapshot_id)
+        return previous
+
+    def discard_candidate(self, snapshot_id: str) -> None:
+        database_path = self.candidate_database_path(snapshot_id)
+        for path in (
+            database_path,
+            Path(f"{database_path}-wal"),
+            Path(f"{database_path}-shm"),
+            self.candidate_manifest_path(snapshot_id),
+        ):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                # Published state is atomic; staging cleanup remains retryable.
+                continue
+
+    @staticmethod
+    def _active_pointers(connection: sqlite3.Connection) -> dict[str, str]:
+        return {
+            str(row[0]): str(row[1])
+            for row in connection.execute(
+                "SELECT document_id, snapshot_id FROM active_canonical_snapshots "
+                "ORDER BY document_id"
+            ).fetchall()
+        }
+
+    @classmethod
+    def _state_digest(cls, connection: sqlite3.Connection) -> str:
+        digest = hashlib.sha256()
+        for table in cls._STATE_TABLES:
+            digest.update(table.encode("utf-8"))
+            rows = connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+            for row in rows:
+                digest.update(
+                    json.dumps(
+                        list(row),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                )
+        return digest.hexdigest()
 
     @staticmethod
     def normalize_doi(value: str | None) -> str | None:
@@ -1091,3 +1253,16 @@ class ScholarlyRegistry:
                     "updated_at = ? WHERE reference_id = ?",
                     (work_id, confidence, now, row["reference_id"]),
                 )
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, sort_keys=True, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)

@@ -148,11 +148,12 @@ CREATE TABLE IF NOT EXISTS canonical_snapshots (
     schema_version TEXT NOT NULL, id_version TEXT NOT NULL, pipeline_version TEXT NOT NULL,
     cleaning_version TEXT NOT NULL, classification_version TEXT NOT NULL,
     reference_processing_version TEXT NOT NULL,
-    UNIQUE(parse_run_id, schema_version, pipeline_version),
     FOREIGN KEY (source_file_id) REFERENCES source_files(id),
     FOREIGN KEY (parse_run_id) REFERENCES parse_runs(id)
 );
 CREATE INDEX IF NOT EXISTS canonical_snapshot_source_idx ON canonical_snapshots(source_file_id);
+CREATE INDEX IF NOT EXISTS canonical_snapshot_parse_idx
+    ON canonical_snapshots(parse_run_id, schema_version, pipeline_version);
 CREATE TABLE IF NOT EXISTS active_canonical_snapshots (
     document_id TEXT PRIMARY KEY,
     snapshot_id TEXT NOT NULL UNIQUE,

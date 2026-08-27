@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, TypeVar
+from uuid import uuid4
 
 from pydantic import BaseModel
 
@@ -112,8 +114,14 @@ class CanonicalRepository:
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
-    def snapshot_manifest_path(self, source_file_id: str, parse_run_id: str) -> Path:
-        snapshot_id = canonical_snapshot_id(parse_run_id)
+    def snapshot_manifest_path(
+        self,
+        source_file_id: str,
+        parse_run_id: str,
+        *,
+        snapshot_id: str | None = None,
+    ) -> Path:
+        snapshot_id = snapshot_id or canonical_snapshot_id(parse_run_id)
         root = (self.paths.canonical / source_file_id / snapshot_id).resolve(strict=False)
         self.paths.assert_within_root(root)
         return root / "manifest.json"
@@ -121,7 +129,9 @@ class CanonicalRepository:
     def save_snapshot(self, bundle: CanonicalBundle) -> CanonicalBundle:
         snapshot = bundle.snapshot
         expected_manifest = self.snapshot_manifest_path(
-            snapshot.source_file_id, snapshot.parse_run_id
+            snapshot.source_file_id,
+            snapshot.parse_run_id,
+            snapshot_id=snapshot.id,
         )
         if snapshot.manifest_path.resolve(strict=False) != expected_manifest:
             raise CanonicalValidationError(
@@ -261,40 +271,20 @@ class CanonicalRepository:
             citation_mentions=citation_mentions,
         )
 
-    def activate_snapshot(self, snapshot_id: str) -> str | None:
+    def activate_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> str | None:
         """Atomically replace one Document's active canonical revision pointer."""
 
+        if connection is not None:
+            return self._activate_snapshot(connection, snapshot_id)
         try:
-            with self._connect() as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                snapshot = connection.execute(
-                    "SELECT document_id FROM canonical_snapshots WHERE id = ?",
-                    (snapshot_id,),
-                ).fetchone()
-                if snapshot is None:
-                    raise CanonicalStorageError(
-                        f"CanonicalSnapshot '{snapshot_id}' does not exist.",
-                        affected=snapshot_id,
-                    )
-                document_id = str(snapshot["document_id"])
-                current = connection.execute(
-                    "SELECT snapshot_id FROM active_canonical_snapshots "
-                    "WHERE document_id = ?",
-                    (document_id,),
-                ).fetchone()
-                previous = str(current["snapshot_id"]) if current is not None else None
-                connection.execute(
-                    """
-                    INSERT INTO active_canonical_snapshots (
-                        document_id, snapshot_id, activated_at
-                    ) VALUES (?, ?, ?)
-                    ON CONFLICT(document_id) DO UPDATE SET
-                        snapshot_id = excluded.snapshot_id,
-                        activated_at = excluded.activated_at
-                    """,
-                    (document_id, snapshot_id, utc_now().isoformat()),
-                )
-                return previous
+            with self._connect() as database:
+                database.execute("BEGIN IMMEDIATE")
+                return self._activate_snapshot(database, snapshot_id)
         except CanonicalStorageError:
             raise
         except sqlite3.Error as exc:
@@ -303,10 +293,47 @@ class CanonicalRepository:
                 affected=snapshot_id,
             ) from exc
 
+    @staticmethod
+    def _activate_snapshot(
+        connection: sqlite3.Connection,
+        snapshot_id: str,
+    ) -> str | None:
+        snapshot = connection.execute(
+            "SELECT document_id FROM canonical_snapshots WHERE id = ?",
+            (snapshot_id,),
+        ).fetchone()
+        if snapshot is None:
+            raise CanonicalStorageError(
+                f"CanonicalSnapshot '{snapshot_id}' does not exist.",
+                affected=snapshot_id,
+            )
+        document_id = str(snapshot["document_id"])
+        current = connection.execute(
+            "SELECT snapshot_id FROM active_canonical_snapshots "
+            "WHERE document_id = ?",
+            (document_id,),
+        ).fetchone()
+        previous = str(current["snapshot_id"]) if current is not None else None
+        connection.execute(
+            """
+            INSERT INTO active_canonical_snapshots (
+                document_id, snapshot_id, activated_at
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(document_id) DO UPDATE SET
+                snapshot_id = excluded.snapshot_id,
+                activated_at = excluded.activated_at
+            """,
+            (document_id, snapshot_id, utc_now().isoformat()),
+        )
+        return previous
+
     def active_snapshot_id(self, document_id: str) -> str | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT snapshot_id FROM active_canonical_snapshots WHERE document_id = ?",
+                "SELECT active.snapshot_id FROM active_canonical_snapshots AS active "
+                "WHERE active.document_id = ? AND NOT EXISTS ("
+                "SELECT 1 FROM document_tombstones AS tombstone "
+                "WHERE tombstone.document_id = active.document_id)",
                 (document_id,),
             ).fetchone()
         return str(row["snapshot_id"]) if row is not None else None
@@ -314,10 +341,51 @@ class CanonicalRepository:
     def list_active_snapshot_ids(self) -> list[str]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT snapshot_id FROM active_canonical_snapshots "
-                "ORDER BY activated_at, snapshot_id"
+                "SELECT active.snapshot_id FROM active_canonical_snapshots AS active "
+                "WHERE NOT EXISTS (SELECT 1 FROM document_tombstones AS tombstone "
+                "WHERE tombstone.document_id = active.document_id) "
+                "ORDER BY active.activated_at, active.snapshot_id"
             ).fetchall()
         return [str(row["snapshot_id"]) for row in rows]
+
+    def is_active_snapshot(self, snapshot_id: str) -> bool:
+        with self._connect() as connection:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM active_canonical_snapshots WHERE snapshot_id = ?",
+                    (snapshot_id,),
+                ).fetchone()
+                is not None
+            )
+
+    def tombstone_active_document(
+        self,
+        document_id: str,
+        *,
+        expected_snapshot_id: str,
+    ) -> None:
+        """Atomically remove public visibility before derived cleanup starts."""
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT snapshot_id FROM active_canonical_snapshots "
+                "WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()
+            if current is None or str(current["snapshot_id"]) != expected_snapshot_id:
+                raise CanonicalStorageError(
+                    "Active canonical snapshot changed during document deletion.",
+                    affected=document_id,
+                )
+            connection.execute(
+                "INSERT OR IGNORE INTO document_tombstones(document_id) VALUES (?)",
+                (document_id,),
+            )
+            connection.execute(
+                "DELETE FROM active_canonical_snapshots WHERE document_id = ?",
+                (document_id,),
+            )
 
     def list_active_bundles(self) -> list[CanonicalBundle]:
         return [
@@ -333,6 +401,107 @@ class CanonicalRepository:
                 "SELECT id FROM canonical_snapshots ORDER BY created_at, id"
             ).fetchall()
         return [str(row["id"]) for row in rows]
+
+    def create_rebuild_candidate(self, snapshot_id: str) -> CanonicalBundle:
+        """Clone one active canonical fact revision under a fresh candidate identity."""
+
+        if not self.is_active_snapshot(snapshot_id):
+            raise CanonicalStorageError(
+                "Only an active canonical snapshot can produce a rebuild candidate.",
+                affected=snapshot_id,
+            )
+        source = self.get_bundle(snapshot_id)
+        revision_id = canonical_snapshot_id(
+            f"{snapshot_id}:rebuild:{uuid4().hex}",
+            schema_version=source.snapshot.schema_version,
+            pipeline_version=source.snapshot.pipeline_version,
+            id_version=source.snapshot.id_version,
+        )
+        snapshot = source.snapshot.model_copy(
+            update={
+                "id": revision_id,
+                "manifest_path": self.snapshot_manifest_path(
+                    source.snapshot.source_file_id,
+                    source.snapshot.parse_run_id,
+                    snapshot_id=revision_id,
+                ),
+                "created_at": utc_now(),
+            }
+        )
+        candidate = CanonicalBundle(
+            snapshot=snapshot,
+            document=source.document.model_copy(
+                update={"canonical_snapshot_id": revision_id}
+            ),
+            sections=[
+                section.model_copy(update={"canonical_snapshot_id": revision_id})
+                for section in source.sections
+            ],
+            elements=[
+                element.model_copy(update={"canonical_snapshot_id": revision_id})
+                for element in source.elements
+            ],
+            references=[
+                reference.model_copy(update={"canonical_snapshot_id": revision_id})
+                for reference in source.references
+            ],
+            warnings=list(source.warnings),
+        )
+        return self.save_snapshot(candidate)
+
+    def cleanup_snapshot(self, snapshot_id: str) -> bool:
+        """Idempotently remove one inactive immutable canonical revision."""
+
+        retirement = (
+            self.paths.canonical / ".retired" / snapshot_id
+        ).resolve(strict=False)
+        self.paths.assert_within_root(retirement)
+        original_root: Path | None = None
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if connection.execute(
+                    "SELECT 1 FROM active_canonical_snapshots WHERE snapshot_id = ?",
+                    (snapshot_id,),
+                ).fetchone():
+                    raise CanonicalStorageError(
+                        "The active canonical snapshot cannot be cleaned up.",
+                        affected=snapshot_id,
+                    )
+                row = connection.execute(
+                    "SELECT manifest_path FROM canonical_snapshots WHERE id = ?",
+                    (snapshot_id,),
+                ).fetchone()
+                if row is None:
+                    if retirement.is_dir():
+                        shutil.rmtree(retirement)
+                    return False
+                original_root = self.path_codec.decode(str(row["manifest_path"])).parent
+                self.paths.assert_within_root(original_root)
+                retirement.parent.mkdir(parents=True, exist_ok=True)
+                if original_root.is_dir():
+                    if retirement.exists():
+                        raise CanonicalStorageError(
+                            "Canonical retirement target already exists.",
+                            affected=snapshot_id,
+                        )
+                    os.replace(original_root, retirement)
+                connection.execute(
+                    "DELETE FROM canonical_snapshots WHERE id = ?",
+                    (snapshot_id,),
+                )
+        except Exception:
+            if (
+                original_root is not None
+                and retirement.is_dir()
+                and not original_root.exists()
+            ):
+                original_root.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(retirement, original_root)
+            raise
+        if retirement.is_dir():
+            shutil.rmtree(retirement)
+        return True
 
     def verify_snapshot(self, snapshot_id: str) -> None:
         snapshot = self.get_snapshot(snapshot_id)

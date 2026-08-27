@@ -120,22 +120,49 @@ class DerivedDataRebuilder:
                 details={"missing_snapshot_ids": missing},
             )
 
-        # Work identity is authoritative, persistent registry state; populate it
-        # before deleting and recreating any Cognee/FTS projections.
-        self.pipeline.scholarly_registry.backfill(self.canonical_repository)
-        deleted = await self._delete_derived_data(selected)
+        deleted: list[Path] = []
         reports: list[IndexingReport] = []
+        rebuilt_snapshot_ids: list[str] = []
         for selected_id in selected:
-            bundle = self.canonical_repository.get_bundle(selected_id)
-            report, _ = await self.pipeline.ingest_bundle(
-                bundle,
-                rebuilt=True,
-                reuse_existing_enrichment=True,
-                generate_enrichment_if_missing=refresh_enrichment,
-            )
+            candidate = self.canonical_repository.create_rebuild_candidate(selected_id)
+            candidate_id = candidate.snapshot.id
+            reused_enrichment = selected_id in existing_set
+            try:
+                if reused_enrichment:
+                    self.pipeline.reproject_enrichment(selected_id, candidate_id)
+                report, _ = await self.pipeline.ingest_bundle(
+                    candidate,
+                    rebuilt=True,
+                    reuse_existing_enrichment=reused_enrichment,
+                    generate_enrichment_if_missing=refresh_enrichment,
+                )
+                previous = self.pipeline.scholarly_registry.publish_candidate(
+                    candidate_id,
+                    self.canonical_repository,
+                    expected_previous_snapshot_id=selected_id,
+                )
+            except Exception:
+                await self.pipeline._cleanup_after_failure(
+                    candidate_id,
+                    phase="rebuild_candidate",
+                )
+                raise
+            if previous != selected_id:  # Defensive: publication enforces this atomically.
+                raise AssertionError("Rebuild publication returned an unexpected revision")
+            try:
+                deleted.extend(
+                    await self.pipeline.cleanup_snapshot_revision(selected_id)
+                )
+            except Exception as exc:  # noqa: BLE001 - new active remains authoritative.
+                self.pipeline._record_cleanup_retry(
+                    selected_id,
+                    phase="retired_rebuild_revision",
+                    exc=exc,
+                )
             reports.append(report)
+            rebuilt_snapshot_ids.append(candidate_id)
         return RebuildReport(
-            rebuilt_snapshot_ids=selected,
+            rebuilt_snapshot_ids=rebuilt_snapshot_ids,
             deleted_paths=deleted,
             reports=reports,
             all_snapshot_count=len(all_snapshot_ids),
@@ -147,14 +174,3 @@ class DerivedDataRebuilder:
             refresh_enrichment=refresh_enrichment,
             llm_enrichment_call_count=len(missing),
         )
-
-    async def _delete_derived_data(self, snapshot_ids: list[str]) -> list[Path]:
-        deleted: list[Path] = []
-        for snapshot_id in snapshot_ids:
-            deleted.extend(
-                await self.pipeline.cleanup_snapshot_derived(
-                    snapshot_id,
-                    preserve_enrichment=True,
-                )
-            )
-        return deleted

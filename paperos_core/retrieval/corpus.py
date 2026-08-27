@@ -36,9 +36,6 @@ class CorpusView:
         scholarly_registry: ScholarlyRegistry | None = None,
     ) -> CorpusView:
         retained_bundles = canonical_repository.list_active_bundles()
-        active_snapshot_ids = {
-            bundle.snapshot.id for bundle in retained_bundles
-        }
         bundles = {bundle.document.id: bundle for bundle in retained_bundles}
         with sqlite3.connect(paths.registry_db) as connection:
             exists = connection.execute(
@@ -60,6 +57,9 @@ class CorpusView:
             if document_id not in deleted
         }
         retained_bundles = [bundle for bundle in retained_bundles if bundle.document.id in bundles]
+        active_snapshot_ids = {
+            bundle.snapshot.id for bundle in retained_bundles
+        }
         chunks = {
             chunk.id: chunk
             for bundle in retained_bundles
