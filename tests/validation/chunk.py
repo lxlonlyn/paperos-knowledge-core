@@ -7,12 +7,14 @@ import hashlib
 import html
 import json
 import re
+import sys
 import unicodedata
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
 gold_builder__ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(gold_builder__ROOT))
 gold_builder___YEAR_ONLY = re.compile("^\\[(?:19|20)\\d{2}[a-d]?\\]$", re.IGNORECASE)
 gold_builder___LEFT_AUTHOR = re.compile(
     "(?P<author>[A-ZÀ-ÖØ-Þ][\\w'’\\-]+(?:\\s+et\\s+al\\.?)?(?:\\s+(?:and|&)\\s+[A-ZÀ-ÖØ-Þ][\\w'’\\-]+)?)\\s*$"
@@ -934,7 +936,6 @@ from paperos_core.ingestion.document_regions import build_document_regions
 from paperos_core.ingestion.sentence_units import (
     element_text,
     figure_caption_element_ids,
-    figure_description,
     resolve_major_section_id,
 )
 
@@ -1085,6 +1086,74 @@ def review___validate_chunks(
     return {"pass": not errors, "errors": errors, "chunk_count": len(chunks)}
 
 
+def review___element_source_field(element: Element) -> str:
+    if element.element_type == ElementType.TABLE:
+        if element.markdown is not None:
+            return "markdown"
+        if element.text is not None:
+            return "text"
+        return "html"
+    if element.element_type == ElementType.FORMULA:
+        if element.latex is not None:
+            return "latex"
+        if element.text is not None:
+            return "text"
+        return "markdown"
+    return "text" if element.text is not None else "markdown"
+
+
+def review___source_text(element: Element, source_field: str | None) -> str:
+    if source_field is None:
+        raise ValueError("source span has no source_field")
+    if source_field.startswith("metadata."):
+        value = element.metadata.get(source_field.removeprefix("metadata."))
+    else:
+        value = getattr(element, source_field, None)
+    if not isinstance(value, str):
+        raise TypeError(
+            f"source field {source_field!r} is not text on {element.id}"
+        )
+    return value
+
+
+def review___figure_text_sources(
+    figure: Element, *, elements_by_id: dict[str, Element]
+) -> list[tuple[str, str, int, int, str]]:
+    captions: list[tuple[str, str, int, int, str]] = []
+    for caption_id in figure.caption_element_ids:
+        caption = elements_by_id.get(caption_id)
+        if caption is None or caption.element_type != ElementType.CAPTION:
+            continue
+        value = element_text(caption)
+        if value.strip():
+            captions.append(
+                (
+                    caption.id,
+                    review___element_source_field(caption),
+                    0,
+                    len(value),
+                    value,
+                )
+            )
+    if captions:
+        return captions
+    for key in ("alt", "alt_text", "description"):
+        value = figure.metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            stripped = value.strip()
+            start = value.index(stripped)
+            return [
+                (
+                    figure.id,
+                    f"metadata.{key}",
+                    start,
+                    start + len(stripped),
+                    stripped,
+                )
+            ]
+    return []
+
+
 def review___projection_metrics(
     *, bundle: CanonicalBundle, chunks: list[Any], mentions: list[Any]
 ) -> dict[str, Any]:
@@ -1108,11 +1177,15 @@ def review___projection_metrics(
     unique_spans: dict[str, Any] = {}
     bound_caption_spans = 0
     bound_caption_duplications = 0
+    source_provenance_errors = 0
     section_crossings: set[tuple[str, str]] = set()
     for chunk in chunks:
         for span in chunk.spans:
             unique_spans.setdefault(span.id, span)
-            if span.element_id in bound_captions:
+            if (
+                span.provenance_kind == "source"
+                and span.element_id in bound_captions
+            ):
                 bound_caption_spans += 1
                 caption = elements_by_id.get(span.element_id)
                 if (
@@ -1122,7 +1195,18 @@ def review___projection_metrics(
                     bound_caption_duplications += 1
             element = elements_by_id.get(span.element_id)
             if element is None:
+                source_provenance_errors += 1
                 continue
+            if span.provenance_kind == "source":
+                try:
+                    source = review___source_text(element, span.source_field)
+                except (TypeError, ValueError):
+                    source_provenance_errors += 1
+                else:
+                    start = span.character_start_in_element
+                    end = span.character_end_in_element
+                    if source[start:end] != span.text:
+                        source_provenance_errors += 1
             expected_major = resolve_major_section_id(
                 element.section_id, section_by_id
             )
@@ -1143,60 +1227,102 @@ def review___projection_metrics(
         if element.element_type == ElementType.FIGURE
     ]
     for element in eligible:
-        source = (
-            figure_description(element, elements_by_id=elements_by_id)
-            if element.element_type == ElementType.FIGURE
-            else element_text(element)
-        )
+        source = element_text(element)
         spans = sorted(
             (
                 span
                 for span in unique_spans.values()
                 if span.element_id == element.id
+                and span.provenance_kind == "source"
+                and span.source_field == review___element_source_field(element)
             ),
             key=lambda span: (
                 span.character_start_in_element,
                 span.character_end_in_element,
             ),
         )
-        cursor = 0
-        reconstructed: list[str] = []
-        for span in spans:
-            start = span.character_start_in_element
-            end = span.character_end_in_element
-            if start > cursor:
-                text_loss += 1
-            if start < cursor:
-                text_duplication += 1
-            reconstructed.append(source[start:end])
-            cursor = max(cursor, end)
-        if cursor < len(source):
-            text_loss += 1
-        if "".join(reconstructed) != source:
-            if element.element_type == ElementType.FIGURE:
-                figure_description_loss += 1
-            else:
-                text_loss += 1
         if element.element_type != ElementType.FIGURE:
+            cursor = 0
+            reconstructed: list[str] = []
+            for span in spans:
+                start = span.character_start_in_element
+                end = span.character_end_in_element
+                if start > cursor:
+                    text_loss += 1
+                if start < cursor:
+                    text_duplication += 1
+                reconstructed.append(source[start:end])
+                cursor = max(cursor, end)
+            if cursor < len(source):
+                text_loss += 1
+            if "".join(reconstructed) != source:
+                text_loss += 1
             continue
-        markers = [span for span in spans if span.text.startswith("[FIGURE ")]
+        markers = [
+            span
+            for span in unique_spans.values()
+            if span.element_id == element.id
+            and span.text.startswith("[FIGURE ")
+        ]
         figure_placeholder_count += len(markers)
         if not markers:
             figure_lost += 1
             continue
         for span in markers:
-            if f"id={element.id}" not in span.text or not span.text.endswith(
-                "[/FIGURE]"
+            if (
+                span.provenance_kind != "projection"
+                or span.source_field is not None
+                or span.character_start_in_element != 0
+                or span.character_end_in_element != 0
+                or span.token_start != 0
+                or span.token_end != 0
+                or f"id={element.id}" not in span.text
+                or not span.text.endswith("[/FIGURE]")
             ):
                 figure_page_or_id_errors += 1
             if element.page is not None and f"page={element.page}" not in span.text:
                 figure_page_or_id_errors += 1
-        if len({span.id for span in spans}) != len(spans):
-            figure_description_duplication += 1
+        for (
+            source_element_id,
+            source_field,
+            expected_start,
+            expected_end,
+            expected_text,
+        ) in review___figure_text_sources(
+            element, elements_by_id=elements_by_id
+        ):
+            textual_spans = sorted(
+                (
+                    span
+                    for span in unique_spans.values()
+                    if span.provenance_kind == "source"
+                    and span.element_id == source_element_id
+                    and span.source_field == source_field
+                    and span.character_end_in_element > expected_start
+                    and span.character_start_in_element < expected_end
+                ),
+                key=lambda span: span.character_start_in_element,
+            )
+            cursor = expected_start
+            reconstructed = []
+            for span in textual_spans:
+                if span.character_start_in_element > cursor:
+                    figure_description_loss += 1
+                if span.character_start_in_element < cursor:
+                    figure_description_duplication += 1
+                reconstructed.append(span.text)
+                cursor = max(cursor, span.character_end_in_element)
+            if cursor < expected_end or "".join(reconstructed) != expected_text:
+                figure_description_loss += 1
 
     fallback_reasons: Counter[str] = Counter()
     for chunk in chunks:
         fallback_reasons.update(chunk.metadata.get("fallback_split_reasons") or {})
+    caption_citation_missing = sum(
+        1
+        for mention in mentions
+        if mention.element_id in bound_captions and mention.chunk_id is None
+    )
     errors = []
     if figure_lost:
         errors.append(f"figure_lost:{figure_lost}")
@@ -1206,6 +1332,10 @@ def review___projection_metrics(
         )
     if figure_page_or_id_errors:
         errors.append(f"figure_provenance_errors:{figure_page_or_id_errors}")
+    if source_provenance_errors:
+        errors.append(f"source_provenance_errors:{source_provenance_errors}")
+    if caption_citation_missing:
+        errors.append(f"caption_citation_missing:{caption_citation_missing}")
     if figure_description_loss or figure_description_duplication:
         errors.append(
             "figure_description_coverage:"
@@ -1222,6 +1352,7 @@ def review___projection_metrics(
         "figure_caption_provenance_span_count": bound_caption_spans,
         "figure_caption_duplication_count": bound_caption_duplications,
         "figure_provenance_error_count": figure_page_or_id_errors,
+        "source_provenance_error_count": source_provenance_errors,
         "figure_description_loss_count": figure_description_loss,
         "figure_description_duplication_count": figure_description_duplication,
         "table_input_count": sum(
@@ -1231,6 +1362,7 @@ def review___projection_metrics(
             element.element_type == ElementType.FORMULA for element in eligible
         ),
         "citation_mention_count": len(mentions),
+        "caption_citation_missing_count": caption_citation_missing,
         "text_loss_count": text_loss,
         "text_duplication_count": text_duplication,
         "section_cross_boundary_count": len(section_crossings),
@@ -1574,9 +1706,14 @@ async def review__run(args: argparse.Namespace) -> dict[str, Any]:
         "figure_placeholder_count",
         "figure_lost_count",
         "figure_caption_duplication_count",
+        "figure_provenance_error_count",
+        "source_provenance_error_count",
+        "figure_description_loss_count",
+        "figure_description_duplication_count",
         "table_input_count",
         "equation_input_count",
         "citation_mention_count",
+        "caption_citation_missing_count",
         "text_loss_count",
         "text_duplication_count",
         "section_cross_boundary_count",
@@ -1978,7 +2115,6 @@ from paperos_core.ingestion.document_regions import build_document_regions
 from paperos_core.ingestion.sentence_units import (
     element_text,
     figure_caption_element_ids,
-    figure_description,
 )
 
 
@@ -2029,17 +2165,125 @@ def coverage__validate_paper(*, bundle, chunks_json: dict) -> dict:
     failures = []
     holes = 0
     overlaps = 0
+    unique_spans = {
+        span["id"]: span
+        for chunk in chunks
+        for span in chunk.get("spans", [])
+    }
+    for span in unique_spans.values():
+        if span.get("provenance_kind", "source") != "source":
+            continue
+        element = elements_by_id.get(span["element_id"])
+        try:
+            source = review___source_text(element, span.get("source_field"))
+        except (AttributeError, ValueError):
+            failures.append(
+                {
+                    "element_id": span["element_id"],
+                    "span_id": span["id"],
+                    "failure_type": "invalid_source_field",
+                }
+            )
+            continue
+        start = span["character_start_in_element"]
+        end = span["character_end_in_element"]
+        if source[start:end] != span["text"]:
+            failures.append(
+                {
+                    "element_id": span["element_id"],
+                    "span_id": span["id"],
+                    "failure_type": "source_coordinate_mismatch",
+                }
+            )
     for element in eligible:
-        source = (
-            figure_description(element, elements_by_id=elements_by_id)
-            if element.element_type == ElementType.FIGURE
-            else element_text(element)
-        )
-        spans = []
-        for chunk in chunks:
-            for span in chunk.get("spans", []):
-                if span["element_id"] == element.id:
-                    spans.append(span)
+        if element.element_type == ElementType.FIGURE:
+            markers = [
+                span
+                for span in unique_spans.values()
+                if span["element_id"] == element.id
+                and span["text"].startswith("[FIGURE ")
+            ]
+            if not markers:
+                failures.append(
+                    {
+                        "element_id": element.id,
+                        "failure_type": "figure_projection_missing",
+                    }
+                )
+            for span in markers:
+                if (
+                    span.get("provenance_kind") != "projection"
+                    or span.get("source_field") is not None
+                    or span["character_start_in_element"] != 0
+                    or span["character_end_in_element"] != 0
+                    or span["token_start"] != 0
+                    or span["token_end"] != 0
+                    or f"id={element.id}" not in span["text"]
+                    or not span["text"].endswith("[/FIGURE]")
+                    or (
+                        element.page is not None
+                        and f"page={element.page}" not in span["text"]
+                    )
+                ):
+                    failures.append(
+                        {
+                            "element_id": element.id,
+                            "span_id": span["id"],
+                            "failure_type": "invalid_figure_projection",
+                        }
+                    )
+            for (
+                source_element_id,
+                source_field,
+                expected_start,
+                expected_end,
+                expected_text,
+            ) in review___figure_text_sources(
+                element, elements_by_id=elements_by_id
+            ):
+                textual_spans = sorted(
+                    (
+                        span
+                        for span in unique_spans.values()
+                        if span.get("provenance_kind", "source") == "source"
+                        and span["element_id"] == source_element_id
+                        and span.get("source_field") == source_field
+                        and span["character_end_in_element"] > expected_start
+                        and span["character_start_in_element"] < expected_end
+                    ),
+                    key=lambda item: item["character_start_in_element"],
+                )
+                cursor = expected_start
+                reconstructed_parts = []
+                for span in textual_spans:
+                    start = span["character_start_in_element"]
+                    end = span["character_end_in_element"]
+                    if start != cursor:
+                        failures.append(
+                            {
+                                "element_id": source_element_id,
+                                "failure_type": "figure_text_gap_or_overlap",
+                            }
+                        )
+                    reconstructed_parts.append(span["text"])
+                    cursor = max(cursor, end)
+                if cursor != expected_end or "".join(reconstructed_parts) != expected_text:
+                    failures.append(
+                        {
+                            "element_id": source_element_id,
+                            "failure_type": "figure_text_source_mismatch",
+                        }
+                    )
+            continue
+        source = element_text(element)
+        source_field = review___element_source_field(element)
+        spans = [
+            span
+            for span in unique_spans.values()
+            if span["element_id"] == element.id
+            and span.get("provenance_kind", "source") == "source"
+            and span.get("source_field") == source_field
+        ]
         spans.sort(key=lambda item: item["character_start_in_element"])
         cursor = 0
         reconstructed_parts = []
@@ -2425,6 +2669,7 @@ from paperos_core.ingestion.document_regions import (
     build_document_regions,
     region_id_for_element,
 )
+from paperos_core.ingestion.inline_domains import scan_inline_domains
 from paperos_core.ingestion.sentence_units import (
     SentenceUnit,
     formula_cohesion_boundary,
@@ -2750,6 +2995,17 @@ def boundaries__synthetic_figure_hard_max_contract() -> dict[str, Any]:
         page=3,
         text="asset OCR is not a caption or alt description",
     )
+    alt_text = "  Diagram of the deterministic fallback path.  "
+    alt_figure = Element(
+        id="altfig",
+        document_id="d",
+        canonical_snapshot_id="snap",
+        element_type=ElementType.FIGURE,
+        order=8,
+        section_id=section.id,
+        page=4,
+        metadata={"alt": alt_text},
+    )
     punctuation = Element(
         id="punct",
         document_id="d",
@@ -2782,6 +3038,36 @@ def boundaries__synthetic_figure_hard_max_contract() -> dict[str, Any]:
         section_id=section.id,
         text="X" * 190,
     )
+    token_safe_citation_text = "X" * 72 + "[1-3]" + "Y" * 100
+    token_safe_citation = Element(
+        id="solid-citation",
+        document_id="d",
+        canonical_snapshot_id="snap",
+        element_type=ElementType.PARAGRAPH,
+        order=9,
+        section_id=section.id,
+        text=token_safe_citation_text,
+    )
+    token_safe_math_text = "A" * 70 + r"\(x+y\)" + "B" * 100
+    token_safe_math = Element(
+        id="solid-math",
+        document_id="d",
+        canonical_snapshot_id="snap",
+        element_type=ElementType.PARAGRAPH,
+        order=10,
+        section_id=section.id,
+        text=token_safe_math_text,
+    )
+    oversized_domain_text = r"\[" + "Z" * 120 + r"\]"
+    oversized_domain = Element(
+        id="oversized-domain",
+        document_id="d",
+        canonical_snapshot_id="snap",
+        element_type=ElementType.PARAGRAPH,
+        order=11,
+        section_id=section.id,
+        text=oversized_domain_text,
+    )
     formula = Element(
         id="formula",
         document_id="d",
@@ -2810,9 +3096,13 @@ def boundaries__synthetic_figure_hard_max_contract() -> dict[str, Any]:
         figure,
         caption,
         empty_figure,
+        alt_figure,
         punctuation,
         whitespace,
         token_safe,
+        token_safe_citation,
+        token_safe_math,
+        oversized_domain,
         formula,
         table,
     ]
@@ -2857,16 +3147,8 @@ def boundaries__synthetic_figure_hard_max_contract() -> dict[str, Any]:
             for span in unique_spans.values()
             if span.element_id == figure.id
         ),
-        key=lambda span: span.character_start_in_element,
+        key=lambda span: span.id,
     )
-    reconstructed_caption = "".join(
-        caption_text[
-            span.character_start_in_element : span.character_end_in_element
-        ]
-        for span in figure_spans
-    )
-    if reconstructed_caption != caption_text:
-        failures.append("figure_caption_loss_or_duplication")
     caption_spans = sorted(
         (
             span
@@ -2879,12 +3161,62 @@ def boundaries__synthetic_figure_hard_max_contract() -> dict[str, Any]:
         failures.append("caption_source_provenance")
     if not figure_spans or any(
         not (
-            span.text.startswith("[FIGURE id=fig page=2")
+            span.provenance_kind == "projection"
+            and span.source_field is None
+            and span.character_start_in_element == 0
+            and span.character_end_in_element == 0
+            and span.token_start == 0
+            and span.token_end == 0
+            and span.text.startswith("[FIGURE id=fig page=2")
             and span.text.endswith("[/FIGURE]")
         )
         for span in figure_spans
     ):
         failures.append("figure_placeholder_integrity")
+    if any(
+        span.provenance_kind == "source"
+        and span.element_id == figure.id
+        and span.source_field not in {"metadata.alt", "metadata.alt_text", "metadata.description"}
+        for span in unique_spans.values()
+    ):
+        failures.append("figure_false_source_coordinates")
+    alt_projection_spans = [
+        span
+        for span in unique_spans.values()
+        if span.element_id == alt_figure.id
+        and span.provenance_kind == "projection"
+    ]
+    alt_source_spans = sorted(
+        (
+            span
+            for span in unique_spans.values()
+            if span.element_id == alt_figure.id
+            and span.provenance_kind == "source"
+        ),
+        key=lambda span: span.character_start_in_element,
+    )
+    if not alt_projection_spans or any(
+        span.source_field is not None
+        or span.character_start_in_element != 0
+        or span.character_end_in_element != 0
+        for span in alt_projection_spans
+    ):
+        failures.append("figure_alt_projection_provenance")
+    if (
+        not alt_source_spans
+        or any(span.source_field != "metadata.alt" for span in alt_source_spans)
+        or "".join(span.text for span in alt_source_spans) != alt_text.strip()
+        or alt_source_spans[0].token_start != 2
+        or alt_source_spans[-1].token_end != len(alt_text) - 2
+        or any(
+            alt_text[
+                span.character_start_in_element : span.character_end_in_element
+            ]
+            != span.text
+            for span in alt_source_spans
+        )
+    ):
+        failures.append("figure_alt_source_provenance")
 
     by_element = {
         element.id: sorted(
@@ -2895,9 +3227,27 @@ def boundaries__synthetic_figure_hard_max_contract() -> dict[str, Any]:
             ),
             key=lambda span: span.character_start_in_element,
         )
-        for element in (punctuation, whitespace, token_safe, formula, table)
+        for element in (
+            punctuation,
+            whitespace,
+            token_safe,
+            token_safe_citation,
+            token_safe_math,
+            oversized_domain,
+            formula,
+            table,
+        )
     }
-    for element in (punctuation, whitespace, token_safe, formula, table):
+    for element in (
+        punctuation,
+        whitespace,
+        token_safe,
+        token_safe_citation,
+        token_safe_math,
+        oversized_domain,
+        formula,
+        table,
+    ):
         source = element_text(element)
         reconstructed = "".join(
             source[
@@ -2918,6 +3268,24 @@ def boundaries__synthetic_figure_hard_max_contract() -> dict[str, Any]:
         )
     ):
         failures.append("citation_placeholder_split")
+    for element, failure_name in (
+        (token_safe_citation, "token_safe_citation_domain_split"),
+        (token_safe_math, "token_safe_math_domain_split"),
+    ):
+        domains = scan_inline_domains(element_text(element))
+        if not domains:
+            failures.append(f"protected_domain_not_detected:{element.id}")
+            continue
+        if any(
+            domain.start < boundary < domain.end
+            for domain in domains
+            for span in by_element[element.id]
+            for boundary in (
+                span.character_start_in_element,
+                span.character_end_in_element,
+            )
+        ):
+            failures.append(failure_name)
 
     fallback_reasons: Counter[str] = Counter()
     for chunk in chunks:
@@ -2926,13 +3294,16 @@ def boundaries__synthetic_figure_hard_max_contract() -> dict[str, Any]:
         "EMERGENCY_PUNCTUATION",
         "EMERGENCY_WHITESPACE",
         "EMERGENCY_TOKEN_SAFE",
+        "EMERGENCY_PROTECTED_DOMAIN",
     ):
         if fallback_reasons.get(expected, 0) == 0:
             failures.append(f"fallback_reason_missing:{expected}")
     return {
         "figure_hard_max_contract_errors": len(failures),
-        "figure_input_count": 2,
-        "figure_placeholder_parts": len(figure_spans) + 1,
+        "figure_input_count": 3,
+        "figure_placeholder_parts": (
+            len(figure_spans) + len(alt_projection_spans) + 1
+        ),
         "synthetic_max_chunk_tokens": max(
             (chunk.token_count or 0 for chunk in chunks), default=0
         ),

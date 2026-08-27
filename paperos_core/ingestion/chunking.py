@@ -505,6 +505,8 @@ def _make_chunk(
                     character_end_in_element=unit.character_end_in_element,
                     token_start=unit.token_start,
                     token_end=unit.token_end,
+                    provenance_kind=unit.provenance_kind,
+                    source_field=unit.source_field,
                 ),
                 *(
                     ChunkSpan(
@@ -519,6 +521,8 @@ def _make_chunk(
                         ),
                         token_start=supplemental.token_start,
                         token_end=supplemental.token_end,
+                        provenance_kind="source",
+                        source_field=supplemental.source_field,
                     )
                     for supplemental in unit.supplemental_spans
                 ),

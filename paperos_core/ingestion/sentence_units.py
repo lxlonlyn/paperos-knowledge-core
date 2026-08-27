@@ -36,6 +36,7 @@ _REAL_EMERGENCY_SPLIT_TYPES = frozenset(
         "EMERGENCY_PUNCTUATION",
         "EMERGENCY_WHITESPACE",
         "EMERGENCY_TOKEN_SAFE",
+        "EMERGENCY_PROTECTED_DOMAIN",
         "EMERGENCY_FORCED",
     }
 )
@@ -45,6 +46,7 @@ SplitType = Literal[
     "EMERGENCY_PUNCTUATION",
     "EMERGENCY_WHITESPACE",
     "EMERGENCY_TOKEN_SAFE",
+    "EMERGENCY_PROTECTED_DOMAIN",
     "EMERGENCY_FORCED",
     "TABLE_PART",
     "FIGURE_PLACEHOLDER",
@@ -68,6 +70,7 @@ class SupplementalSpan:
     character_end_in_element: int
     token_start: int
     token_end: int
+    source_field: str
 
     @property
     def span_id(self) -> str:
@@ -90,6 +93,8 @@ class SentenceUnit:
     bounding_box: tuple[float, float, float, float] | None
     paragraph_end: bool
     subsection_end: bool
+    provenance_kind: Literal["source", "projection"] = "source"
+    source_field: str | None = None
     unit_kind: str = "sentence"
     split_type: SplitType = "NORMAL"
     fallback_reason: str | None = None
@@ -152,6 +157,38 @@ def element_text(element: Element) -> str:
     return element.text if element.text is not None else (element.markdown or "")
 
 
+def _element_text_source_field(element: Element) -> str:
+    if element.element_type == ElementType.TABLE:
+        if element.markdown is not None:
+            return "markdown"
+        if element.text is not None:
+            return "text"
+        return "html"
+    if element.element_type == ElementType.FORMULA:
+        if element.latex is not None:
+            return "latex"
+        if element.text is not None:
+            return "text"
+        return "markdown"
+    return "text" if element.text is not None else "markdown"
+
+
+@dataclass(frozen=True, slots=True)
+class _FigureTextSource:
+    element: Element
+    source_field: str
+    source_text: str
+    source_start: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class _FigureTextRange:
+    source: _FigureTextSource
+    description_start: int
+    description_end: int
+
+
 def figure_caption_element_ids(elements: list[Element]) -> set[str]:
     """Return captions consumed by Figure placeholders, never table captions."""
     figures = {
@@ -177,20 +214,50 @@ def figure_description(
     figure: Element, *, elements_by_id: Mapping[str, Element]
 ) -> str:
     """Use only canonical caption/alt text; never synthesize a description."""
-    captions = [
-        element_text(caption)
-        for caption_id in figure.caption_element_ids
-        if (caption := elements_by_id.get(caption_id)) is not None
-        and caption.element_type == ElementType.CAPTION
-        and element_text(caption).strip()
-    ]
+    return "\n".join(
+        source.text
+        for source in _figure_text_sources(
+            figure, elements_by_id=elements_by_id
+        )
+    )
+
+
+def _figure_text_sources(
+    figure: Element, *, elements_by_id: Mapping[str, Element]
+) -> list[_FigureTextSource]:
+    captions: list[_FigureTextSource] = []
+    for caption_id in figure.caption_element_ids:
+        caption = elements_by_id.get(caption_id)
+        if caption is None or caption.element_type != ElementType.CAPTION:
+            continue
+        value = element_text(caption)
+        if not value.strip():
+            continue
+        captions.append(
+            _FigureTextSource(
+                element=caption,
+                source_field=_element_text_source_field(caption),
+                source_text=value,
+                source_start=0,
+                text=value,
+            )
+        )
     if captions:
-        return "\n".join(captions)
+        return captions
     for key in _FIGURE_ALT_KEYS:
-        value = figure.metadata.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
+        alt_value = figure.metadata.get(key)
+        if isinstance(alt_value, str) and alt_value.strip():
+            stripped = alt_value.strip()
+            return [
+                _FigureTextSource(
+                    element=figure,
+                    source_field=f"metadata.{key}",
+                    source_text=alt_value,
+                    source_start=alt_value.index(stripped),
+                    text=stripped,
+                )
+            ]
+    return []
 
 
 def figure_placeholder(
@@ -376,6 +443,10 @@ def _fallback_ranges(
                 _count(count, render(source[current_cursor:candidate]))
                 <= hard_max_tokens
             ),
+            protected_domain_oversized=lambda domain: (
+                _count(count, source[domain.start : domain.end])
+                > hard_max_tokens
+            ),
         )
         if boundary <= cursor or boundary >= end:
             raise ValueError("Unable to make progress while enforcing chunk hard max")
@@ -407,6 +478,7 @@ def _preferred_fallback_boundary(
     end: int,
     domains: list[Any],
     fits: Any,
+    protected_domain_oversized: Any,
 ) -> tuple[int, SplitType]:
     def safe(position: int) -> bool:
         return not any(domain.start < position < domain.end for domain in domains)
@@ -430,22 +502,42 @@ def _preferred_fallback_boundary(
 
     low = start + 1
     high = end - 1
-    best = start
+    token_safe_limit = start
     while low <= high:
         middle = (low + high) // 2
         if fits(middle):
-            best = middle
+            token_safe_limit = middle
             low = middle + 1
         else:
             high = middle - 1
-    if best == start:
+    if token_safe_limit == start:
         for candidate in range(start + 1, end):
             if fits(candidate):
-                best = candidate
+                token_safe_limit = candidate
                 break
-    if best == start:
+    if token_safe_limit == start:
         raise ValueError("chunk_hard_max_tokens cannot hold a single text unit")
-    return best, "EMERGENCY_TOKEN_SAFE"
+    for candidate in range(token_safe_limit, start, -1):
+        if safe(candidate) and fits(candidate):
+            return candidate, "EMERGENCY_TOKEN_SAFE"
+
+    containing = next(
+        (
+            domain
+            for domain in domains
+            if domain.start <= token_safe_limit < domain.end
+            and domain.start <= start
+        ),
+        None,
+    )
+    if containing is None:
+        raise ValueError("No protected-domain-safe hard-max split boundary exists")
+    if not protected_domain_oversized(containing):
+        raise ValueError(
+            "A protected inline domain that fits chunk_hard_max_tokens "
+            "cannot be emitted intact with its structural wrapper"
+        )
+    return token_safe_limit, "EMERGENCY_PROTECTED_DOMAIN"
 
 
 def _figure_units(
@@ -459,7 +551,7 @@ def _figure_units(
     subsection_end: bool,
 ) -> list[SentenceUnit]:
     description = figure_description(element, elements_by_id=elements_by_id)
-    caption_ranges = _figure_caption_ranges(
+    text_ranges = _figure_text_ranges(
         element, elements_by_id=elements_by_id
     )
     whole = figure_placeholder(
@@ -479,7 +571,7 @@ def _figure_units(
                 subsection_end=subsection_end,
                 split_type="FIGURE_PLACEHOLDER",
                 part_index=None,
-                caption_ranges=caption_ranges,
+                text_ranges=text_ranges,
             )
         ]
     if not description:
@@ -532,7 +624,7 @@ def _figure_units(
                 subsection_end=subsection_end and index == total,
                 split_type=item.split_type,
                 part_index=index,
-                caption_ranges=caption_ranges,
+                text_ranges=text_ranges,
             )
         )
     return units
@@ -551,7 +643,7 @@ def _figure_unit(
     subsection_end: bool,
     split_type: SplitType,
     part_index: int | None,
-    caption_ranges: list[tuple[Element, int, int]],
+    text_ranges: list[_FigureTextRange],
 ) -> SentenceUnit:
     return SentenceUnit(
         text=text,
@@ -562,10 +654,12 @@ def _figure_unit(
             if part_index is None
             else f"figure-part-{part_index}:{start}:{end}"
         ),
-        character_start_in_element=start,
-        character_end_in_element=end,
-        token_start=_count(count, description[:start]),
-        token_end=_count(count, description[:end]),
+        character_start_in_element=0,
+        character_end_in_element=0,
+        token_start=0,
+        token_end=0,
+        provenance_kind="projection",
+        source_field=None,
         page=element.page,
         bounding_box=element.bounding_box,
         section_id=section_id,
@@ -579,42 +673,45 @@ def _figure_unit(
         ),
         paragraph_id=f"{element.id}:figure",
         supplemental_spans=tuple(
-            _caption_supplemental_span(
-                caption,
+            _figure_text_supplemental_span(
+                text_range.source,
                 description=description,
-                description_start=description_start,
+                description_start=text_range.description_start,
                 unit_start=start,
                 unit_end=end,
                 count=count,
             )
-            for caption, description_start, description_end in caption_ranges
-            if description_start < end and description_end > start
+            for text_range in text_ranges
+            if text_range.description_start < end
+            and text_range.description_end > start
         ),
     )
 
 
-def _figure_caption_ranges(
+def _figure_text_ranges(
     figure: Element, *, elements_by_id: Mapping[str, Element]
-) -> list[tuple[Element, int, int]]:
-    ranges: list[tuple[Element, int, int]] = []
+) -> list[_FigureTextRange]:
+    ranges: list[_FigureTextRange] = []
     cursor = 0
-    for caption_id in figure.caption_element_ids:
-        caption = elements_by_id.get(caption_id)
-        if caption is None or caption.element_type != ElementType.CAPTION:
-            continue
-        value = element_text(caption)
-        if not value.strip():
-            continue
+    for source in _figure_text_sources(
+        figure, elements_by_id=elements_by_id
+    ):
         if ranges:
             cursor += 1
         start = cursor
-        cursor += len(value)
-        ranges.append((caption, start, cursor))
+        cursor += len(source.text)
+        ranges.append(
+            _FigureTextRange(
+                source=source,
+                description_start=start,
+                description_end=cursor,
+            )
+        )
     return ranges
 
 
-def _caption_supplemental_span(
-    caption: Element,
+def _figure_text_supplemental_span(
+    source: _FigureTextSource,
     *,
     description: str,
     description_start: int,
@@ -623,18 +720,22 @@ def _caption_supplemental_span(
     count: Any,
 ) -> SupplementalSpan:
     overlap_start = max(description_start, unit_start)
-    overlap_end = min(description_start + len(element_text(caption)), unit_end)
-    caption_start = overlap_start - description_start
-    caption_end = overlap_end - description_start
-    caption_text = element_text(caption)
+    overlap_end = min(description_start + len(source.text), unit_end)
+    relative_start = overlap_start - description_start
+    relative_end = overlap_end - description_start
+    source_start = source.source_start + relative_start
+    source_end = source.source_start + relative_end
     return SupplementalSpan(
         text=description[overlap_start:overlap_end],
-        element_id=caption.id,
-        span_key=f"figure-caption:{caption_start}:{caption_end}",
-        character_start_in_element=caption_start,
-        character_end_in_element=caption_end,
-        token_start=_count(count, caption_text[:caption_start]),
-        token_end=_count(count, caption_text[:caption_end]),
+        element_id=source.element.id,
+        span_key=(
+            f"figure-text:{source.source_field}:{source_start}:{source_end}"
+        ),
+        character_start_in_element=source_start,
+        character_end_in_element=source_end,
+        token_start=_count(count, source.source_text[:source_start]),
+        token_end=_count(count, source.source_text[:source_end]),
+        source_field=source.source_field,
     )
 
 
@@ -804,6 +905,8 @@ def _unit_from_range(
         character_end_in_element=unit_range.end,
         token_start=_count(count, full_text[: unit_range.start]),
         token_end=_count(count, full_text[: unit_range.end]),
+        provenance_kind="source",
+        source_field=_element_text_source_field(element),
         page=element.page,
         bounding_box=element.bounding_box,
         section_id=section_id,

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from paperos_core.domain.documents import DomainModel, utc_now
 from paperos_core.domain.enums import ElementType, ReferenceResolutionStatus
@@ -118,7 +118,7 @@ class Element(DomainModel):
 
 
 class ChunkSpan(DomainModel):
-    """Exact coordinates of one chunk fragment in its canonical element."""
+    """Source coordinates or an explicit structural projection for a chunk."""
 
     id: str
     element_id: str
@@ -127,6 +127,27 @@ class ChunkSpan(DomainModel):
     character_end_in_element: int = Field(ge=0)
     token_start: int = Field(ge=0)
     token_end: int = Field(ge=0)
+    provenance_kind: Literal["source", "projection"]
+    source_field: str | None
+
+    @model_validator(mode="after")
+    def validate_provenance(self) -> ChunkSpan:
+        if self.provenance_kind == "source":
+            if self.source_field is None:
+                raise ValueError("source ChunkSpan requires source_field")
+            return self
+        if self.source_field is not None or any(
+            (
+                self.character_start_in_element,
+                self.character_end_in_element,
+                self.token_start,
+                self.token_end,
+            )
+        ):
+            raise ValueError(
+                "projection ChunkSpan cannot claim canonical source coordinates"
+            )
+        return self
 
 
 class Chunk(DomainModel):

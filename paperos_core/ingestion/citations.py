@@ -560,7 +560,10 @@ def _owning_chunk_for_mention(
     candidates: list[tuple[str, int]] = []
     for chunk in chunks:
         for span in chunk.spans:
-            if span.element_id != mention.element_id:
+            if (
+                span.provenance_kind != "source"
+                or span.element_id != mention.element_id
+            ):
                 continue
             if (
                 span.character_start_in_element <= mention.character_start
