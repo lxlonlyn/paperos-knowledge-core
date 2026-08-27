@@ -154,6 +154,7 @@ class Chunk(DomainModel):
     citation_namespace_id: str | None = None
     citation_mention_ids: list[str] = Field(default_factory=list)
     citation_reference_entry_ids: list[str] = Field(default_factory=list)
+    citation_work_ids: list[str] = Field(default_factory=list)
     previous_chunk_id: str | None = None
     next_chunk_id: str | None = None
     overlap_source_chunk_ids: list[str] = Field(default_factory=list)

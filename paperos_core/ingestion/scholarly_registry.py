@@ -282,6 +282,10 @@ class ScholarlyRegistry:
             return (title, authors) if authors and title else (None, [])
 
         unkeyed = _REFERENCE_PREFIX.sub("", raw)
+        comma_identity = cls._infer_comma_separated_reference(unkeyed)
+        if comma_identity is not None:
+            return comma_identity
+
         match = _YEAR_FIRST_REFERENCE.match(unkeyed)
         if match is None:
             match = _TITLE_AFTER_AUTHORS_REFERENCE.match(unkeyed)
@@ -295,6 +299,61 @@ class ScholarlyRegistry:
         if not authors or len(title.split()) < 2:
             return None, []
         return title, authors
+
+    @classmethod
+    def _infer_comma_separated_reference(
+        cls, raw_text: str
+    ) -> tuple[str, list[str]] | None:
+        """Parse author lists without mistaking initials for sentence boundaries."""
+
+        authors: list[str] = []
+        for part in (item.strip() for item in raw_text.split(",")):
+            if not part:
+                continue
+            split = cls._split_author_and_title(part)
+            if split is not None:
+                author, title = split
+                authors.append(author)
+                return title, authors
+            if cls._looks_like_author_name(part):
+                authors.append(re.sub(r"^(?:and|&)\s+", "", part).strip())
+                continue
+            title = part.strip().rstrip(".")
+            if authors and len(title.split()) >= 2:
+                return title, authors
+            return None
+        return None
+
+    @classmethod
+    def _split_author_and_title(cls, value: str) -> tuple[str, str] | None:
+        if any(character.isdigit() for character in value):
+            return None
+        boundaries = [match.start() for match in re.finditer(r"\.\s+", value)]
+        for boundary in reversed(boundaries):
+            author = value[: boundary + 1].strip().rstrip(".")
+            title_body = value[boundary + 1 :].strip()
+            title = title_body.split(". ", 1)[0].strip().rstrip(".")
+            if cls._looks_like_author_name(author) and len(title.split()) >= 2:
+                return re.sub(r"^(?:and|&)\s+", "", author).strip(), title
+        return None
+
+    @staticmethod
+    def _looks_like_author_name(value: str) -> bool:
+        candidate = re.sub(r"^(?:and|&)\s+", "", value.strip()).strip()
+        if not candidate or any(character.isdigit() for character in candidate):
+            return False
+        tokens = candidate.split()
+        if not 2 <= len(tokens) <= 4:
+            return False
+        surname = tokens[-1].strip(".,;:()[]{}")
+        first = tokens[0].strip(".,;:()[]{}")
+        return bool(
+            surname
+            and first
+            and surname[0].isupper()
+            and first[0].isupper()
+            and ":" not in candidate
+        )
 
     @classmethod
     def _authors_compatible(cls, first: str | None, second: str | None) -> bool:

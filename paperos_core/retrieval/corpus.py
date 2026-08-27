@@ -84,10 +84,13 @@ class CorpusView:
             for work in scholarly_registry.list_works():
                 work_titles[work.id] = work.title
             for chunk in chunks.values():
-                for reference_id in chunk.citation_reference_entry_ids:
-                    reference_work = scholarly_registry.work_for_reference(reference_id)
-                    if reference_work is not None:
-                        cited_work_ids_by_chunk.setdefault(chunk.id, set()).add(reference_work.id)
+                for work_id in chunk.citation_work_ids:
+                    canonical_work_id = scholarly_registry.canonicalize_work_id(
+                        work_id
+                    )
+                    cited_work_ids_by_chunk.setdefault(chunk.id, set()).add(
+                        canonical_work_id
+                    )
             for document_id in bundles:
                 document_work = scholarly_registry.work_for_document(document_id)
                 if document_work is None:

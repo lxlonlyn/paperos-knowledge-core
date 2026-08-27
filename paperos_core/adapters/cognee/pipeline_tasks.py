@@ -37,6 +37,7 @@ from paperos_core.domain.scholarly import ScholarlyContext
 from paperos_core.errors import CogneeStorageError
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.chunking import build_chunks
+from paperos_core.ingestion.retrieval_text import bind_scholarly_citations
 from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
 
 
@@ -105,19 +106,38 @@ async def scholarly_identity_task(
     ctx: Any = None,
     *,
     scholarly_registry: ScholarlyRegistry,
+    repository: CanonicalRepository,
 ) -> list[IdentityBoundBundle]:
     """Resolve Work identities in snapshot staging before graph construction."""
 
-    return [
-        IdentityBoundBundle(
-            bundle=item.bundle,
-            projection=item.projection,
-            scholarly=scholarly_registry.resolve_candidate_bundle(
-                item.bundle, item.projection.chunks
-            ),
+    results: list[IdentityBoundBundle] = []
+    for item in data:
+        scholarly = scholarly_registry.resolve_candidate_bundle(
+            item.bundle, item.projection.chunks
         )
-        for item in data
-    ]
+        chunks, mentions = bind_scholarly_citations(
+            document=item.bundle.document,
+            chunks=item.projection.chunks,
+            mentions=item.projection.citation_mentions,
+            references=item.bundle.references,
+            scholarly=scholarly,
+        )
+        projection = item.projection.model_copy(
+            update={"chunks": chunks, "citation_mentions": mentions}
+        )
+        repository.save_chunks(
+            item.bundle.snapshot.id,
+            projection.chunks,
+            projection.citation_mentions,
+        )
+        results.append(
+            IdentityBoundBundle(
+                bundle=item.bundle,
+                projection=projection,
+                scholarly=scholarly,
+            )
+        )
+    return results
 
 
 async def semantic_enrichment_task(
@@ -242,6 +262,7 @@ def configure_pipeline_tasks(
             scholarly_identity_task,
             batch_size=1,
             scholarly_registry=scholarly_registry,
+            repository=repository,
         ).task,
         task(
             semantic_enrichment_task,
