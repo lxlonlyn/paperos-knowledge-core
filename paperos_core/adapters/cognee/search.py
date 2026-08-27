@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
 from paperos_core.errors import CogneeStorageError
 from paperos_core.paths import DataPaths
+from paperos_core.retrieval.candidates import VectorSearchDiagnostics
 
 _CHUNK_SEARCH_TYPE = "PAPEROS_CHUNKS"
 _INITIAL_VECTOR_OVERFETCH = 32
@@ -70,9 +71,12 @@ class CogneeSearchAdapter:
         top_k: int,
         active_snapshot_ids: set[str],
         search_type: str = _CHUNK_SEARCH_TYPE,
+        diagnostics: VectorSearchDiagnostics | None = None,
     ) -> list[CogneeSearchHit]:
         """Search PaperOSChunkDataPoint vectors and preserve canonical chunk identity."""
         if top_k <= 0 or not active_snapshot_ids:
+            if diagnostics is not None:
+                diagnostics.backend_exhausted = True
             return []
         if search_type != _CHUNK_SEARCH_TYPE:
             raise CogneeStorageError(
@@ -81,6 +85,8 @@ class CogneeSearchAdapter:
             )
         canonical_ids = self._manifest_index(active_snapshot_ids)
         if not canonical_ids:
+            if diagnostics is not None:
+                diagnostics.backend_exhausted = True
             return []
         safety_limit = min(
             _MAX_VECTOR_OVERFETCH,
@@ -91,7 +97,9 @@ class CogneeSearchAdapter:
             max(top_k * 2, _INITIAL_VECTOR_OVERFETCH),
         )
         vector_hits = []
+        backend_exhausted = False
         while True:
+            boundary_diagnostics: dict[str, int | bool] = {}
             vector_hits = await self.compat.search_datapoint_vectors(
                 query,
                 dataset_name=dataset,
@@ -99,10 +107,29 @@ class CogneeSearchAdapter:
                 canonical_ids=canonical_ids,
                 active_snapshot_ids=active_snapshot_ids,
                 top_k=request_limit,
+                diagnostics=boundary_diagnostics,
             )
-            if len(vector_hits) >= top_k or request_limit >= safety_limit:
+            backend_exhausted = bool(
+                boundary_diagnostics.get("backend_exhausted", False)
+            )
+            if diagnostics is not None:
+                diagnostics.request_limits.append(request_limit)
+                diagnostics.raw_hit_counts.append(
+                    int(boundary_diagnostics.get("raw_hit_count", 0))
+                )
+                diagnostics.filtered_hit_counts.append(len(vector_hits))
+            if (
+                len(vector_hits) >= top_k
+                or backend_exhausted
+                or request_limit >= safety_limit
+            ):
                 break
             request_limit = min(safety_limit, request_limit * 2)
+        if diagnostics is not None:
+            diagnostics.backend_exhausted = backend_exhausted
+            diagnostics.safety_limit_reached = (
+                request_limit >= safety_limit and len(vector_hits) < top_k
+            )
         return [
             CogneeSearchHit(
                 node_id=hit.cognee_id,

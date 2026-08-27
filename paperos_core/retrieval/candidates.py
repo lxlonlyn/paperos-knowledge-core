@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+@dataclass(slots=True)
+class VectorSearchDiagnostics:
+    request_limits: list[int] = dataclass_field(default_factory=list)
+    raw_hit_counts: list[int] = dataclass_field(default_factory=list)
+    filtered_hit_counts: list[int] = dataclass_field(default_factory=list)
+    backend_exhausted: bool = False
+    safety_limit_reached: bool = False
 
 
 class QueryRequest(BaseModel):
@@ -97,7 +108,19 @@ class RetrievalTrace(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    requested_document_ids: list[str] = Field(default_factory=list)
+    requested_work_ids: list[str] = Field(default_factory=list)
+    resolved_work_document_ids: list[str] = Field(default_factory=list)
     applied_document_ids: list[str] = Field(default_factory=list)
+    applied_snapshot_ids: list[str] = Field(default_factory=list)
+    candidate_pool_sizes: list[int] = Field(default_factory=list)
+    lexical_request_limits: list[int] = Field(default_factory=list)
+    lexical_filtered_counts: list[int] = Field(default_factory=list)
+    vector_request_limits: list[int] = Field(default_factory=list)
+    vector_raw_hit_counts: list[int] = Field(default_factory=list)
+    vector_filtered_counts: list[int] = Field(default_factory=list)
+    vector_backend_exhausted: list[bool] = Field(default_factory=list)
+    vector_safety_limit_reached: list[bool] = Field(default_factory=list)
     first_stage_chunk_ids: list[str] = Field(default_factory=list)
     first_reranked_chunk_ids: list[str] = Field(default_factory=list)
     local_expanded_chunk_ids: list[str] = Field(default_factory=list)

@@ -95,6 +95,10 @@ class CorpusView:
                 work_id_by_document[document_id] = document_work.id
                 document_ids_by_work.setdefault(document_work.id, set()).add(document_id)
                 work_titles[document_work.id] = document_work.title
+            for redirected_id, canonical_id in scholarly_registry.list_redirects().items():
+                resolved_documents = document_ids_by_work.get(canonical_id)
+                if resolved_documents:
+                    document_ids_by_work[redirected_id] = set(resolved_documents)
         return cls(
             paths=paths,
             active_snapshot_ids=active_snapshot_ids,
@@ -165,6 +169,13 @@ class CorpusView:
         if requested_document_ids is None:
             return dataset_documents
         return dataset_documents.intersection(requested_document_ids)
+
+    def snapshot_ids_for_documents(self, document_ids: set[str]) -> set[str]:
+        return {
+            bundle.snapshot.id
+            for document_id, bundle in self.bundles.items()
+            if document_id in document_ids
+        }
 
     def document_ids_for_works(self, work_ids: list[str] | set[str]) -> set[str]:
         selected: set[str] = set()

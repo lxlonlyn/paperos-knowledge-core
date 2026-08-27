@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from paperos_core.retrieval.candidates import Candidate
+from paperos_core.retrieval.candidates import Candidate, VectorSearchDiagnostics
 from paperos_core.retrieval.corpus import CorpusView
 
 if TYPE_CHECKING:
@@ -22,14 +22,17 @@ async def semantic_retrieve(
     dataset_name: str,
     limit: int,
     document_ids: set[str],
+    active_snapshot_ids: set[str],
+    diagnostics: VectorSearchDiagnostics | None = None,
 ) -> list[Candidate]:
     """Return only canonical Chunk candidates; derived nodes are never seeds."""
     hits = await search.graph_search(
         query,
         dataset=dataset_name,
-        top_k=limit * 2,
+        top_k=limit,
         search_type=_CHUNK_SEARCH_TYPE,
-        active_snapshot_ids=corpus.active_snapshot_ids,
+        active_snapshot_ids=active_snapshot_ids,
+        diagnostics=diagnostics,
     )
     candidates: dict[str, Candidate] = {}
     for hit in hits:

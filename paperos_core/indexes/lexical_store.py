@@ -91,17 +91,28 @@ class LexicalStore:
         *,
         active_snapshot_ids: set[str],
         limit: int = 20,
-        document_id: str | None = None,
+        allowed_document_ids: set[str] | None = None,
     ) -> list[dict[str, object]]:
-        if not query.strip() or not active_snapshot_ids:
+        if (
+            not query.strip()
+            or not active_snapshot_ids
+            or (allowed_document_ids is not None and not allowed_document_ids)
+        ):
             return []
         selected_snapshots = sorted(active_snapshot_ids)
-        placeholders = ", ".join("?" for _ in selected_snapshots)
-        where_document = "AND r.document_id = ?" if document_id else ""
-        parameters: tuple[object, ...] = tuple(
-            [query, *selected_snapshots]
-            + ([document_id] if document_id else [])
-            + [limit]
+        snapshot_placeholders = ", ".join("?" for _ in selected_snapshots)
+        selected_documents = sorted(allowed_document_ids or set())
+        document_placeholders = ", ".join("?" for _ in selected_documents)
+        where_document = (
+            f"AND r.document_id IN ({document_placeholders})"
+            if allowed_document_ids is not None
+            else ""
+        )
+        parameters: tuple[object, ...] = (
+            query,
+            *selected_snapshots,
+            *selected_documents,
+            limit,
         )
         try:
             with self._connect() as connection:
@@ -111,7 +122,8 @@ class LexicalStore:
                     FROM lexical_fts
                     JOIN lexical_records r ON r.rowid = lexical_fts.rowid
                     WHERE lexical_fts MATCH ?
-                      AND r.canonical_snapshot_id IN ({placeholders})
+                      AND r.object_type = 'chunk'
+                      AND r.canonical_snapshot_id IN ({snapshot_placeholders})
                       {where_document}
                     ORDER BY score
                     LIMIT ?

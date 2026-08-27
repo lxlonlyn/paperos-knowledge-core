@@ -659,6 +659,7 @@ class CogneeCompatibilityAdapter:
         canonical_ids: dict[str, str],
         active_snapshot_ids: set[str],
         top_k: int,
+        diagnostics: dict[str, int | bool] | None = None,
     ) -> list[CogneeVectorHit]:
         """Search PaperOS DataPoint collections in one Cognee dataset.
 
@@ -708,12 +709,16 @@ class CogneeCompatibilityAdapter:
                 )
             dataset = datasets[0]
             best: dict[str, CogneeVectorHit] = {}
+            raw_hit_count = 0
+            searched_collection_count = 0
+            backend_exhausted = True
             allowed_canonical_ids = set(canonical_ids.values())
             async with set_database_global_context_variables(dataset.id, dataset.owner_id):
                 engine = await get_vector_engine_async()
                 for collection, text_field, object_type in collections:
                     if not await engine.has_collection(collection):
                         continue
+                    searched_collection_count += 1
                     results = await engine.search(
                         collection,
                         query_text=query,
@@ -721,6 +726,9 @@ class CogneeCompatibilityAdapter:
                         limit=top_k,
                         include_payload=True,
                     )
+                    raw_hit_count += len(results)
+                    if len(results) >= top_k:
+                        backend_exhausted = False
                     for result in results:
                         payload = result.payload
                         if not isinstance(payload, dict):
@@ -761,6 +769,14 @@ class CogneeCompatibilityAdapter:
                         previous = best.get(cognee_id)
                         if previous is None or hit.score > previous.score:
                             best[cognee_id] = hit
+            if diagnostics is not None:
+                diagnostics.update(
+                    {
+                        "raw_hit_count": raw_hit_count,
+                        "searched_collection_count": searched_collection_count,
+                        "backend_exhausted": backend_exhausted,
+                    }
+                )
             return sorted(best.values(), key=lambda item: (-item.score, item.canonical_id))[:top_k]
         except CogneeStorageError:
             raise

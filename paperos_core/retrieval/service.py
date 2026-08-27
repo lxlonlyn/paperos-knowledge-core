@@ -12,6 +12,7 @@ from paperos_core.retrieval.candidates import (
     QueryRequest,
     QueryResponse,
     RetrievalTrace,
+    VectorSearchDiagnostics,
 )
 from paperos_core.retrieval.corpus import CorpusView
 from paperos_core.retrieval.evidence import format_evidence
@@ -103,16 +104,44 @@ class RetrievalService:
             self.scholarly_registry,
         )
 
+        requested_document_ids = sorted(set(request.document_ids or []))
+        requested_work_ids = sorted(set(request.work_ids or []))
         document_ids = corpus.filtered_document_ids(request.document_ids, dataset_name)
-        explicit_work_ids = set(request.work_ids or [])
-        if explicit_work_ids:
-            document_ids.intersection_update(corpus.document_ids_for_works(explicit_work_ids))
+        resolved_work_document_ids: set[str] = set()
+        if request.work_ids is not None:
+            resolved_work_document_ids = corpus.document_ids_for_works(
+                set(request.work_ids)
+            )
+            document_ids.intersection_update(resolved_work_document_ids)
+        snapshot_resolver = getattr(corpus, "snapshot_ids_for_documents", None)
+        allowed_snapshot_ids = (
+            snapshot_resolver(document_ids)
+            if callable(snapshot_resolver)
+            else set(getattr(corpus, "active_snapshot_ids", set()))
+        )
 
         top_k = request.top_k or self.config.retrieval.top_k
         pool_size = effective_candidate_pool_size(
             self.config.retrieval.candidate_pool_size,
             top_k,
         )
+        filter_trace = RetrievalTrace(
+            requested_document_ids=requested_document_ids,
+            requested_work_ids=requested_work_ids,
+            resolved_work_document_ids=sorted(resolved_work_document_ids),
+            applied_document_ids=sorted(document_ids),
+            applied_snapshot_ids=sorted(allowed_snapshot_ids),
+        )
+        if not document_ids or not allowed_snapshot_ids:
+            return self._no_evidence_response(
+                request,
+                dataset_name=dataset_name,
+                stages=["explicit_filters", "no_evidence"],
+                trace=filter_trace,
+            )
+
+        lexical_diagnostics: dict[str, list[int]] = {}
+        vector_diagnostics = VectorSearchDiagnostics()
         stages = ["explicit_filters", "lexical_chunk_retrieval"]
         channels: dict[str, list[Candidate]] = {
             "lexical": lexical_retrieve(
@@ -121,20 +150,21 @@ class RetrievalService:
                 [request.query],
                 limit=pool_size,
                 document_ids=document_ids,
+                active_snapshot_ids=allowed_snapshot_ids,
+                diagnostics=lexical_diagnostics,
             )
         }
-        if document_ids:
-            channels["vector"] = await semantic_retrieve(
-                self.search,
-                corpus,
-                request.query,
-                dataset_name=dataset_name,
-                limit=pool_size,
-                document_ids=document_ids,
-            )
-            stages.append("vector_chunk_retrieval")
-        else:
-            channels["vector"] = []
+        channels["vector"] = await semantic_retrieve(
+            self.search,
+            corpus,
+            request.query,
+            dataset_name=dataset_name,
+            limit=pool_size,
+            document_ids=document_ids,
+            active_snapshot_ids=allowed_snapshot_ids,
+            diagnostics=vector_diagnostics,
+        )
+        stages.append("vector_chunk_retrieval")
 
         fused = weighted_rrf(channels, {"lexical": 1.0, "vector": 1.0})
         fused = deduplicate_candidates_by_chunk(fused)[:pool_size]
@@ -217,7 +247,21 @@ class RetrievalService:
             stages.append("no_evidence")
 
         trace = RetrievalTrace(
+            requested_document_ids=requested_document_ids,
+            requested_work_ids=requested_work_ids,
+            resolved_work_document_ids=sorted(resolved_work_document_ids),
             applied_document_ids=sorted(document_ids),
+            applied_snapshot_ids=sorted(allowed_snapshot_ids),
+            candidate_pool_sizes=[pool_size],
+            lexical_request_limits=lexical_diagnostics.get("request_limits", []),
+            lexical_filtered_counts=lexical_diagnostics.get("filtered_counts", []),
+            vector_request_limits=vector_diagnostics.request_limits,
+            vector_raw_hit_counts=vector_diagnostics.raw_hit_counts,
+            vector_filtered_counts=vector_diagnostics.filtered_hit_counts,
+            vector_backend_exhausted=[vector_diagnostics.backend_exhausted],
+            vector_safety_limit_reached=[
+                vector_diagnostics.safety_limit_reached
+            ],
             first_stage_chunk_ids=first_stage_chunk_ids,
             first_reranked_chunk_ids=[item.chunk_id for item in first_reranked],
             local_expanded_chunk_ids=[item.chunk_id for item in local_expanded],
@@ -274,6 +318,34 @@ class RetrievalService:
             trace=trace,
         )
         return response
+
+    def _no_evidence_response(
+        self,
+        request: QueryRequest,
+        *,
+        dataset_name: str,
+        stages: list[str],
+        trace: RetrievalTrace,
+    ) -> QueryResponse:
+        return QueryResponse(
+            id=stable_id(
+                "query_response",
+                request.model_dump_json(),
+                id_version=QUERY_RESPONSE_ID_VERSION,
+            ),
+            query=request.query,
+            dataset=dataset_name,
+            answer=NO_EVIDENCE_ANSWER,
+            answer_model=NO_EVIDENCE_MODEL,
+            stages=stages,
+            channels_used=[],
+            evidence=[],
+            replay=QueryReplay(original_query=request.query, replay_text=""),
+            candidates=[],
+            distinct_documents=0,
+            provenance_complete=False,
+            trace=trace,
+        )
 
     async def _rerank(
         self, query: str, candidates: list[Candidate], *, limit: int

@@ -19,18 +19,29 @@ def lexical_retrieve(
     *,
     limit: int,
     document_ids: set[str],
+    active_snapshot_ids: set[str],
+    diagnostics: dict[str, list[int]] | None = None,
 ) -> list[Candidate]:
+    if not document_ids or not active_snapshot_ids:
+        return []
     results: dict[str, Candidate] = {}
     for query in queries[:8]:
         for query_rank, fts_query in enumerate(_fts_queries(query)):
+            if diagnostics is not None:
+                diagnostics.setdefault("request_limits", []).append(limit)
             try:
                 rows = store.search(
                     fts_query,
-                    active_snapshot_ids=corpus.active_snapshot_ids,
-                    limit=limit * 2,
+                    active_snapshot_ids=active_snapshot_ids,
+                    allowed_document_ids=document_ids,
+                    limit=limit,
                 )
             except IndexStorageError:
+                if diagnostics is not None:
+                    diagnostics.setdefault("filtered_counts", []).append(0)
                 continue
+            if diagnostics is not None:
+                diagnostics.setdefault("filtered_counts", []).append(len(rows))
             for result_rank, row in enumerate(rows, 1):
                 object_id = str(row["object_id"])
                 if object_id not in corpus.chunks:
@@ -42,7 +53,7 @@ def lexical_retrieve(
                 # so applying abs() and then an inverse reverses relevance.
                 # Preserve the engine's real rank and keep the full combined
                 # query ahead of its individual-term fallback queries.
-                score = 1.0 / (1 + query_rank * limit * 2 + result_rank)
+                score = 1.0 / (1 + query_rank * limit + result_rank)
                 existing = results.get(object_id)
                 if existing is None or score > existing.channel_scores["lexical"]:
                     results[object_id] = corpus.candidate_for_chunk(
