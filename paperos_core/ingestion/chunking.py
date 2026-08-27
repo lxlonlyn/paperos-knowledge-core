@@ -45,6 +45,7 @@ from paperos_core.ingestion.sentence_units import (
     _PROSE_TYPES,
     SentenceUnit,
     element_text,
+    figure_caption_element_ids,
     resolve_major_section_id,
     units_for_element,
 )
@@ -69,6 +70,8 @@ def build_chunks(
     """Build section-local, span-identified chunks from canonical elements."""
     count = tokenizer.count_tokens
     elements = list(elements)
+    elements_by_id = {element.id: element for element in elements}
+    bound_figure_captions = figure_caption_element_ids(elements)
     section_by_id = {section.id: section for section in sections}
     _document_regions, element_regions = build_document_regions(
         elements=elements, sections=sections
@@ -87,6 +90,7 @@ def build_chunks(
             element,
             section_by_id=section_by_id,
             region_type=region_info.region_type if region_info else None,
+            bound_figure_caption_ids=bound_figure_captions,
         )
         if not eligibility.eligible:
             continue
@@ -122,19 +126,33 @@ def build_chunks(
                     section_id=element.section_id,
                     section_path=section.path if section else None,
                     subsection_end=subsection_end,
+                    elements_by_id=elements_by_id,
                 )
             )
-            prose = element_text(element)
-            if prose and (
+            citation_sources: list[tuple[Element, str]] = []
+            if element.element_type == ElementType.FIGURE:
+                citation_sources = [
+                    (caption, element_text(caption))
+                    for caption_id in element.caption_element_ids
+                    if (caption := elements_by_id.get(caption_id)) is not None
+                    and element_text(caption)
+                ]
+            elif (
                 element.element_type in _PROSE_TYPES
                 or element.element_type == ElementType.TABLE
             ):
-                region = region_for_element(element.id, element_regions)
-                region_info = element_regions.get(element.id)
+                citation_sources = [(element, element_text(element))]
+            for citation_element, prose in citation_sources:
+                if not prose:
+                    continue
+                region = region_for_element(citation_element.id, element_regions)
+                region_info = element_regions.get(citation_element.id)
                 if region_info and region_info.region_type == REGION_REFERENCES:
                     continue
                 element_region_id = region_info.region_id if region_info else None
-                scope_id = citation_namespace_for_element(element.id, element_regions)
+                scope_id = citation_namespace_for_element(
+                    citation_element.id, element_regions
+                )
                 scope_diag = (
                     None
                     if scope_id in reference_indexes.scope_indexes
@@ -143,7 +161,7 @@ def build_chunks(
                 extracted = extract_citation_mentions_from_text(
                     document_id=document.id,
                     snapshot_id=snapshot_id,
-                    element_id=element.id,
+                    element_id=citation_element.id,
                     text=prose,
                     reference_index=reference_indexes,
                     document_region=region,
@@ -169,6 +187,12 @@ def build_chunks(
             hard_max_tokens=hard_max_tokens,
             count=count,
         )
+        ranges = _hard_safe_unit_ranges(
+            ranges,
+            units=units,
+            count=count,
+            hard_max_tokens=hard_max_tokens,
+        )
         major_section = section_by_id.get(major_id)
         major_title = major_section.title if major_section else None
         section_chunks = _chunks_from_ranges(
@@ -180,6 +204,7 @@ def build_chunks(
             major_section_title=major_title,
             count=count,
             overlap_tokens=overlap_tokens,
+            hard_max_tokens=hard_max_tokens,
             start_order=order,
             section_by_id=section_by_id,
             element_regions=element_regions,
@@ -304,6 +329,7 @@ def _chunks_from_ranges(
     major_section_title: str | None,
     count: Any,
     overlap_tokens: int,
+    hard_max_tokens: int,
     start_order: int,
     section_by_id: dict[str, Section],
     element_regions: dict[str, ElementRegionInfo],
@@ -315,10 +341,7 @@ def _chunks_from_ranges(
         chunk_units = list(units[start:end])
         if overlap_tokens > 0 and overlap_tail:
             merged = [*overlap_tail, *chunk_units]
-            while (
-                len(overlap_tail) > 1
-                and _unit_tokens(merged, count) > sum(unit.tokens for unit in chunk_units)
-            ):
+            while overlap_tail and _unit_tokens(merged, count) > hard_max_tokens:
                 overlap_tail = overlap_tail[1:]
                 merged = [*overlap_tail, *chunk_units]
             if overlap_tail:
@@ -337,9 +360,43 @@ def _chunks_from_ranges(
             element_regions=element_regions,
             region_instance_id=region_instance_id,
         )
+        if (chunk.token_count or 0) > hard_max_tokens:
+            raise ValueError(
+                f"Chunk {chunk.id} exceeds chunk_hard_max_tokens: "
+                f"{chunk.token_count}>{hard_max_tokens}"
+            )
         built.append(chunk)
         overlap_tail = _overlap_tail_units(chunk_units, count, overlap_tokens)
     return built
+
+
+def _hard_safe_unit_ranges(
+    ranges: list[tuple[int, int]],
+    *,
+    units: list[SentenceUnit],
+    count: Any,
+    hard_max_tokens: int,
+) -> list[tuple[int, int]]:
+    """Preserve DP ranges unless exact joined tokenization exceeds hard max."""
+    safe: list[tuple[int, int]] = []
+    for start, end in ranges:
+        cursor = start
+        while cursor < end:
+            next_end = cursor + 1
+            if _unit_tokens(units[cursor:next_end], count) > hard_max_tokens:
+                raise ValueError(
+                    f"SentenceUnit {units[cursor].span_id} exceeds "
+                    "chunk_hard_max_tokens"
+                )
+            while (
+                next_end < end
+                and _unit_tokens(units[cursor : next_end + 1], count)
+                <= hard_max_tokens
+            ):
+                next_end += 1
+            safe.append((cursor, next_end))
+            cursor = next_end
+    return safe
 
 
 def _overlap_tail_units(
@@ -382,11 +439,36 @@ def _make_chunk(
     pages = [unit.page for unit in units if unit.page is not None]
     section_paths = [unit.section_path for unit in units if unit.section_path]
     section_ids = [unit.section_id for unit in units if unit.section_id]
-    element_ids = list(dict.fromkeys(unit.element_id for unit in units))
-    span_ids = [unit.span_id for unit in units]
+    element_ids = list(
+        dict.fromkeys(
+            element_id
+            for unit in units
+            for element_id in (
+                unit.element_id,
+                *(span.element_id for span in unit.supplemental_spans),
+            )
+        )
+    )
+    span_ids = [
+        span_id
+        for unit in units
+        for span_id in (
+            unit.span_id,
+            *(span.span_id for span in unit.supplemental_spans),
+        )
+    ]
     identifier = chunk_id(document_id, order, span_ids)
     emergency_splits = sum(1 for unit in units if unit.emergency_split)
     table_parts = sum(1 for unit in units if unit.split_type == "TABLE_PART")
+    figure_placeholders = sum(1 for unit in units if unit.unit_kind == "figure")
+    figure_parts = sum(1 for unit in units if unit.unit_kind == "figure_part")
+    fallback_reasons: dict[str, int] = {}
+    for unit in units:
+        reason = unit.fallback_reason or (
+            unit.split_type if unit.emergency_split else None
+        )
+        if reason:
+            fallback_reasons[reason] = fallback_reasons.get(reason, 0) + 1
     first_element_id = units[0].element_id if units else None
     document_region = (
         region_for_element(first_element_id, element_regions)
@@ -412,16 +494,35 @@ def _make_chunk(
         element_ids=element_ids,
         element_span_ids=span_ids,
         spans=[
-            ChunkSpan(
-                id=unit.span_id,
-                element_id=unit.element_id,
-                text=unit.text,
-                character_start_in_element=unit.character_start_in_element,
-                character_end_in_element=unit.character_end_in_element,
-                token_start=unit.token_start,
-                token_end=unit.token_end,
-            )
+            span
             for unit in units
+            for span in (
+                ChunkSpan(
+                    id=unit.span_id,
+                    element_id=unit.element_id,
+                    text=unit.text,
+                    character_start_in_element=unit.character_start_in_element,
+                    character_end_in_element=unit.character_end_in_element,
+                    token_start=unit.token_start,
+                    token_end=unit.token_end,
+                ),
+                *(
+                    ChunkSpan(
+                        id=supplemental.span_id,
+                        element_id=supplemental.element_id,
+                        text=supplemental.text,
+                        character_start_in_element=(
+                            supplemental.character_start_in_element
+                        ),
+                        character_end_in_element=(
+                            supplemental.character_end_in_element
+                        ),
+                        token_start=supplemental.token_start,
+                        token_end=supplemental.token_end,
+                    )
+                    for supplemental in unit.supplemental_spans
+                ),
+            )
         ],
         section_id=section_ids[0] if section_ids else None,
         section_path=section_paths[0] if section_paths else None,
@@ -446,6 +547,10 @@ def _make_chunk(
             "emergency_oversized_sentence_splits": emergency_splits,
             "real_emergency_splits": emergency_splits,
             "table_parts": table_parts,
+            "figure_placeholders": figure_placeholders,
+            "figure_parts": figure_parts,
+            "fallback_splits": sum(fallback_reasons.values()),
+            "fallback_split_reasons": fallback_reasons,
             "retrieval_content_text": (
                 retrieval_content_text if retrieval_content_text != text else None
             ),

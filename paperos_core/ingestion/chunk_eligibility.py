@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from paperos_core.domain.canonical import Element, Section
 from paperos_core.domain.enums import ElementType
-
 from paperos_core.ingestion.sentence_units import (
     _PROSE_TYPES,
     element_text,
@@ -18,6 +17,7 @@ CONTAINER_HEADING_MAX_LEN = 120
 ELIGIBLE_PROSE = "ELIGIBLE_PROSE"
 ELIGIBLE_TABLE = "ELIGIBLE_TABLE"
 ELIGIBLE_FORMULA = "ELIGIBLE_FORMULA"
+ELIGIBLE_FIGURE = "ELIGIBLE_FIGURE"
 EXCLUDE_REFERENCE = "EXCLUDE_REFERENCE"
 EXCLUDE_REFERENCE_REGION = "EXCLUDE_REFERENCE_REGION"
 EXCLUDE_HEADER = "EXCLUDE_HEADER"
@@ -28,6 +28,7 @@ EXCLUDE_CONTAINER_ONLY_HEADING = "EXCLUDE_CONTAINER_ONLY_HEADING"
 EXCLUDE_NO_MAJOR_SECTION = "EXCLUDE_NO_MAJOR_SECTION"
 EXCLUDE_EMPTY = "EXCLUDE_EMPTY"
 EXCLUDE_UNSUPPORTED_TYPE = "EXCLUDE_UNSUPPORTED_TYPE"
+EXCLUDE_BOUND_FIGURE_CAPTION = "EXCLUDE_BOUND_FIGURE_CAPTION"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +66,7 @@ def classify_chunk_eligibility(
     *,
     section_by_id: dict[str, Section],
     region_type: str | None = None,
+    bound_figure_caption_ids: set[str] | None = None,
 ) -> ChunkEligibility:
     """Single production/validation entry point for authoritative chunk coverage."""
     if element.element_type == ElementType.REFERENCE:
@@ -77,8 +79,17 @@ def classify_chunk_eligibility(
         return ChunkEligibility(False, EXCLUDE_FOOTER)
     if element.element_type == ElementType.PAGE_NUMBER:
         return ChunkEligibility(False, EXCLUDE_PAGE_NUMBER)
+    if (
+        element.element_type == ElementType.CAPTION
+        and element.id in (bound_figure_caption_ids or set())
+    ):
+        return ChunkEligibility(False, EXCLUDE_BOUND_FIGURE_CAPTION)
 
-    allowed = _PROSE_TYPES | {ElementType.TABLE, ElementType.FORMULA}
+    allowed = _PROSE_TYPES | {
+        ElementType.TABLE,
+        ElementType.FORMULA,
+        ElementType.FIGURE,
+    }
     if element.element_type not in allowed:
         return ChunkEligibility(False, EXCLUDE_UNSUPPORTED_TYPE)
 
@@ -91,11 +102,13 @@ def classify_chunk_eligibility(
     if resolve_major_section_id(element.section_id, section_by_id) is None:
         return ChunkEligibility(False, EXCLUDE_NO_MAJOR_SECTION)
 
-    if not _element_text(element):
+    if element.element_type != ElementType.FIGURE and not _element_text(element):
         return ChunkEligibility(False, EXCLUDE_EMPTY)
 
     if element.element_type == ElementType.TABLE:
         return ChunkEligibility(True, ELIGIBLE_TABLE)
     if element.element_type == ElementType.FORMULA:
         return ChunkEligibility(True, ELIGIBLE_FORMULA)
+    if element.element_type == ElementType.FIGURE:
+        return ChunkEligibility(True, ELIGIBLE_FIGURE)
     return ChunkEligibility(True, ELIGIBLE_PROSE)

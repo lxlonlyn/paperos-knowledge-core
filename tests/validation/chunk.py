@@ -929,6 +929,14 @@ from paperos_core.ingestion.chunk_markdown import render_chunk_review_markdown
 from paperos_core.ingestion.chunking import build_chunks
 from paperos_core.domain.ids import CHUNKING_VERSION
 from paperos_core.ingestion.chunk_dp import TINY_TOKEN_THRESHOLD
+from paperos_core.ingestion.chunk_eligibility import classify_chunk_eligibility
+from paperos_core.ingestion.document_regions import build_document_regions
+from paperos_core.ingestion.sentence_units import (
+    element_text,
+    figure_caption_element_ids,
+    figure_description,
+    resolve_major_section_id,
+)
 
 
 class review___WhitespaceTokenizer:
@@ -1077,6 +1085,161 @@ def review___validate_chunks(
     return {"pass": not errors, "errors": errors, "chunk_count": len(chunks)}
 
 
+def review___projection_metrics(
+    *, bundle: CanonicalBundle, chunks: list[Any], mentions: list[Any]
+) -> dict[str, Any]:
+    elements_by_id = {element.id: element for element in bundle.elements}
+    section_by_id = {section.id: section for section in bundle.sections}
+    bound_captions = figure_caption_element_ids(bundle.elements)
+    _, element_regions = build_document_regions(
+        elements=bundle.elements, sections=bundle.sections
+    )
+    eligible: list[Element] = []
+    for element in bundle.elements:
+        info = element_regions.get(element.id)
+        if classify_chunk_eligibility(
+            element,
+            section_by_id=section_by_id,
+            region_type=info.region_type if info else None,
+            bound_figure_caption_ids=bound_captions,
+        ).eligible:
+            eligible.append(element)
+
+    unique_spans: dict[str, Any] = {}
+    bound_caption_spans = 0
+    bound_caption_duplications = 0
+    section_crossings: set[tuple[str, str]] = set()
+    for chunk in chunks:
+        for span in chunk.spans:
+            unique_spans.setdefault(span.id, span)
+            if span.element_id in bound_captions:
+                bound_caption_spans += 1
+                caption = elements_by_id.get(span.element_id)
+                if (
+                    caption is None
+                    or caption.parent_element_id not in chunk.element_ids
+                ):
+                    bound_caption_duplications += 1
+            element = elements_by_id.get(span.element_id)
+            if element is None:
+                continue
+            expected_major = resolve_major_section_id(
+                element.section_id, section_by_id
+            )
+            actual_major = chunk.major_section_id or "__unsectioned__"
+            if expected_major != actual_major:
+                section_crossings.add((chunk.id, span.element_id))
+
+    text_loss = 0
+    text_duplication = 0
+    figure_lost = 0
+    figure_placeholder_count = 0
+    figure_page_or_id_errors = 0
+    figure_description_loss = 0
+    figure_description_duplication = 0
+    figures = [
+        element
+        for element in eligible
+        if element.element_type == ElementType.FIGURE
+    ]
+    for element in eligible:
+        source = (
+            figure_description(element, elements_by_id=elements_by_id)
+            if element.element_type == ElementType.FIGURE
+            else element_text(element)
+        )
+        spans = sorted(
+            (
+                span
+                for span in unique_spans.values()
+                if span.element_id == element.id
+            ),
+            key=lambda span: (
+                span.character_start_in_element,
+                span.character_end_in_element,
+            ),
+        )
+        cursor = 0
+        reconstructed: list[str] = []
+        for span in spans:
+            start = span.character_start_in_element
+            end = span.character_end_in_element
+            if start > cursor:
+                text_loss += 1
+            if start < cursor:
+                text_duplication += 1
+            reconstructed.append(source[start:end])
+            cursor = max(cursor, end)
+        if cursor < len(source):
+            text_loss += 1
+        if "".join(reconstructed) != source:
+            if element.element_type == ElementType.FIGURE:
+                figure_description_loss += 1
+            else:
+                text_loss += 1
+        if element.element_type != ElementType.FIGURE:
+            continue
+        markers = [span for span in spans if span.text.startswith("[FIGURE ")]
+        figure_placeholder_count += len(markers)
+        if not markers:
+            figure_lost += 1
+            continue
+        for span in markers:
+            if f"id={element.id}" not in span.text or not span.text.endswith(
+                "[/FIGURE]"
+            ):
+                figure_page_or_id_errors += 1
+            if element.page is not None and f"page={element.page}" not in span.text:
+                figure_page_or_id_errors += 1
+        if len({span.id for span in spans}) != len(spans):
+            figure_description_duplication += 1
+
+    fallback_reasons: Counter[str] = Counter()
+    for chunk in chunks:
+        fallback_reasons.update(chunk.metadata.get("fallback_split_reasons") or {})
+    errors = []
+    if figure_lost:
+        errors.append(f"figure_lost:{figure_lost}")
+    if bound_caption_duplications:
+        errors.append(
+            f"figure_caption_duplicated:{bound_caption_duplications}"
+        )
+    if figure_page_or_id_errors:
+        errors.append(f"figure_provenance_errors:{figure_page_or_id_errors}")
+    if figure_description_loss or figure_description_duplication:
+        errors.append(
+            "figure_description_coverage:"
+            f"{figure_description_loss}:{figure_description_duplication}"
+        )
+    if text_loss or text_duplication:
+        errors.append(f"text_coverage:{text_loss}:{text_duplication}")
+    if section_crossings:
+        errors.append(f"section_crossings:{len(section_crossings)}")
+    return {
+        "figure_input_count": len(figures),
+        "figure_placeholder_count": figure_placeholder_count,
+        "figure_lost_count": figure_lost,
+        "figure_caption_provenance_span_count": bound_caption_spans,
+        "figure_caption_duplication_count": bound_caption_duplications,
+        "figure_provenance_error_count": figure_page_or_id_errors,
+        "figure_description_loss_count": figure_description_loss,
+        "figure_description_duplication_count": figure_description_duplication,
+        "table_input_count": sum(
+            element.element_type == ElementType.TABLE for element in eligible
+        ),
+        "equation_input_count": sum(
+            element.element_type == ElementType.FORMULA for element in eligible
+        ),
+        "citation_mention_count": len(mentions),
+        "text_loss_count": text_loss,
+        "text_duplication_count": text_duplication,
+        "section_cross_boundary_count": len(section_crossings),
+        "fallback_split_count": sum(fallback_reasons.values()),
+        "fallback_split_reasons": dict(fallback_reasons),
+        "errors": errors,
+    }
+
+
 def review___load_bundle_from_snapshot_dir(snapshot_dir: Path) -> CanonicalBundle:
     warnings_payload = json.loads(
         (snapshot_dir / "warnings.json").read_text(encoding="utf-8")
@@ -1180,6 +1343,18 @@ def review___process_bundle(
         invariants = review___validate_chunks(
             chunks=chunks, hard_max_tokens=hard_max, section_by_id=section_by_id
         )
+        projection_metrics = review___projection_metrics(
+            bundle=bundle, chunks=chunks, mentions=mentions
+        )
+        invariants["errors"].extend(projection_metrics["errors"])
+        invariants["pass"] = not invariants["errors"]
+        invariants.update(
+            {
+                key: value
+                for key, value in projection_metrics.items()
+                if key != "errors"
+            }
+        )
         token_counts = [chunk.token_count or 0 for chunk in chunks]
         boundaries = Counter((chunk.metadata.get("end_boundary") for chunk in chunks))
         real_emergency_splits = sum(
@@ -1220,6 +1395,7 @@ def review___process_bundle(
                     "chunk_count": len(chunks),
                     "invariants": invariants,
                     "citation_stats": citation_stats,
+                    "task4_metrics": projection_metrics,
                     "chunks": [chunk.model_dump(mode="json") for chunk in chunks],
                     "citation_mentions": [
                         mention.model_dump(mode="json") for mention in mentions
@@ -1248,6 +1424,11 @@ def review___process_bundle(
                 "markdown_path": str(md_path),
                 "json_path": str(json_path),
                 "errors": invariants["errors"],
+                **{
+                    key: value
+                    for key, value in projection_metrics.items()
+                    if key != "errors"
+                },
                 **citation_stats,
             }
         )
@@ -1388,11 +1569,81 @@ async def review__run(args: argparse.Namespace) -> dict[str, Any]:
         ),
         "results": rows,
     }
+    metric_keys = (
+        "figure_input_count",
+        "figure_placeholder_count",
+        "figure_lost_count",
+        "figure_caption_duplication_count",
+        "table_input_count",
+        "equation_input_count",
+        "citation_mention_count",
+        "text_loss_count",
+        "text_duplication_count",
+        "section_cross_boundary_count",
+        "fallback_split_count",
+    )
+    summary.update(
+        {
+            key: sum(int(row.get(key, 0)) for row in rows)
+            for key in metric_keys
+        }
+    )
+    summary["max_chunk_tokens"] = max(
+        (int(row.get("max_tokens", 0)) for row in rows), default=0
+    )
+    summary["hard_max_violation_count"] = sum(
+        1
+        for row in rows
+        for error in row.get("errors", [])
+        if str(error).startswith("hard_max_violation:")
+    )
+    fallback_reasons: Counter[str] = Counter()
+    for row in rows:
+        fallback_reasons.update(row.get("fallback_split_reasons") or {})
+    summary["fallback_split_reasons"] = dict(fallback_reasons)
     report_path = run_dir / "chunk-corpus-review.json"
     report_path.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     summary["report_path"] = str(report_path)
+    markdown_path = run_dir / "chunk-corpus-review.md"
+    markdown_lines = [
+        "# Chunk Corpus Review",
+        "",
+        f"Overall status: {summary['overall_status']}",
+        f"Papers: {summary['pdf_count']}",
+        f"Maximum Chunk tokens: {summary['max_chunk_tokens']}",
+        f"Hard-max violations: {summary['hard_max_violation_count']}",
+        f"Figure inputs/placeholders/lost: {summary['figure_input_count']}/"
+        f"{summary['figure_placeholder_count']}/{summary['figure_lost_count']}",
+        f"Figure caption duplications: {summary['figure_caption_duplication_count']}",
+        f"Table/Equation/Citation counts: {summary['table_input_count']}/"
+        f"{summary['equation_input_count']}/{summary['citation_mention_count']}",
+        f"Text loss/duplication: {summary['text_loss_count']}/"
+        f"{summary['text_duplication_count']}",
+        f"Section cross-boundary count: {summary['section_cross_boundary_count']}",
+        f"Fallback splits: {summary['fallback_split_count']} "
+        f"{summary['fallback_split_reasons']}",
+        "",
+        "## Papers",
+        "",
+    ]
+    for row in rows:
+        markdown_lines.extend(
+            [
+                f"- {Path(str(row['pdf'])).name}: {row.get('status')}",
+                f"  - chunks/max tokens: {row.get('chunk_count', 0)}/"
+                f"{row.get('max_tokens', 0)}",
+                f"  - figures input/placeholders/lost: "
+                f"{row.get('figure_input_count', 0)}/"
+                f"{row.get('figure_placeholder_count', 0)}/"
+                f"{row.get('figure_lost_count', 0)}",
+                f"  - fallback splits: {row.get('fallback_split_count', 0)} "
+                f"{row.get('fallback_split_reasons', {})}",
+            ]
+        )
+    markdown_path.write_text("\n".join(markdown_lines) + "\n", encoding="utf-8")
+    summary["markdown_report_path"] = str(markdown_path)
     return summary
 
 
@@ -1724,7 +1975,11 @@ coverage__REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(coverage__REPOSITORY_ROOT))
 from paperos_core.ingestion.chunk_eligibility import classify_chunk_eligibility
 from paperos_core.ingestion.document_regions import build_document_regions
-from paperos_core.ingestion.sentence_units import element_text
+from paperos_core.ingestion.sentence_units import (
+    element_text,
+    figure_caption_element_ids,
+    figure_description,
+)
 
 
 def coverage___git_commit() -> str | None:
@@ -1747,6 +2002,8 @@ def coverage__validate_paper(*, bundle, chunks_json: dict) -> dict:
     _, element_regions = build_document_regions(
         elements=bundle.elements, sections=bundle.sections
     )
+    elements_by_id = {element.id: element for element in bundle.elements}
+    bound_figure_captions = figure_caption_element_ids(bundle.elements)
     eligible = []
     excluded = []
     exclusion_stats: Counter[str] = Counter()
@@ -1756,6 +2013,7 @@ def coverage__validate_paper(*, bundle, chunks_json: dict) -> dict:
             element,
             section_by_id=section_by_id,
             region_type=region_info.region_type if region_info else None,
+            bound_figure_caption_ids=bound_figure_captions,
         )
         if not eligibility.eligible:
             excluded.append(
@@ -1772,7 +2030,11 @@ def coverage__validate_paper(*, bundle, chunks_json: dict) -> dict:
     holes = 0
     overlaps = 0
     for element in eligible:
-        source = element_text(element)
+        source = (
+            figure_description(element, elements_by_id=elements_by_id)
+            if element.element_type == ElementType.FIGURE
+            else element_text(element)
+        )
         spans = []
         for chunk in chunks:
             for span in chunk.get("spans", []):
@@ -2192,6 +2454,8 @@ def boundaries___unit_groups(
     _, element_regions = build_document_regions(
         elements=bundle.elements, sections=bundle.sections
     )
+    elements_by_id = {element.id: element for element in bundle.elements}
+    bound_figure_captions = figure_caption_element_ids(bundle.elements)
     eligible = []
     for element in sorted(bundle.elements, key=lambda item: (item.order, item.id)):
         info = element_regions.get(element.id)
@@ -2199,6 +2463,7 @@ def boundaries___unit_groups(
             element,
             section_by_id=section_by_id,
             region_type=info.region_type if info else None,
+            bound_figure_caption_ids=bound_figure_captions,
         )
         if eligibility.eligible:
             eligible.append(element)
@@ -2227,6 +2492,7 @@ def boundaries___unit_groups(
                     subsection_end=_is_subsection_boundary(
                         elements, index, section_by_id
                     ),
+                    elements_by_id=elements_by_id,
                 )
             )
         groups.append(units)
@@ -2440,6 +2706,241 @@ def boundaries__synthetic_multi_part_table_contract() -> dict[str, Any]:
     }
 
 
+def boundaries__synthetic_figure_hard_max_contract() -> dict[str, Any]:
+    hard_max = 75
+    section = Section(
+        id="s",
+        document_id="d",
+        canonical_snapshot_id="snap",
+        title="Results",
+        level=1,
+        order=0,
+        path="Results",
+    )
+    caption_text = (
+        "Figure evidence uses a canonical caption. " * 4
+    ).strip()
+    figure = Element(
+        id="fig",
+        document_id="d",
+        canonical_snapshot_id="snap",
+        element_type=ElementType.FIGURE,
+        order=0,
+        section_id=section.id,
+        page=2,
+        caption_element_ids=["cap"],
+    )
+    caption = Element(
+        id="cap",
+        document_id="d",
+        canonical_snapshot_id="snap",
+        element_type=ElementType.CAPTION,
+        order=1,
+        section_id=section.id,
+        parent_element_id=figure.id,
+        text=caption_text,
+    )
+    empty_figure = Element(
+        id="emptyfig",
+        document_id="d",
+        canonical_snapshot_id="snap",
+        element_type=ElementType.FIGURE,
+        order=2,
+        section_id=section.id,
+        page=3,
+        text="asset OCR is not a caption or alt description",
+    )
+    punctuation = Element(
+        id="punct",
+        document_id="d",
+        canonical_snapshot_id="snap",
+        element_type=ElementType.PARAGRAPH,
+        order=3,
+        section_id=section.id,
+        text=("punctuation boundary, " * 12).strip(),
+    )
+    whitespace_text = (
+        ("word " * 18)
+        + "[1-3] "
+        + ("tail " * 18)
+    ).strip()
+    whitespace = Element(
+        id="space",
+        document_id="d",
+        canonical_snapshot_id="snap",
+        element_type=ElementType.PARAGRAPH,
+        order=4,
+        section_id=section.id,
+        text=whitespace_text,
+    )
+    token_safe = Element(
+        id="solid",
+        document_id="d",
+        canonical_snapshot_id="snap",
+        element_type=ElementType.PARAGRAPH,
+        order=5,
+        section_id=section.id,
+        text="X" * 190,
+    )
+    formula = Element(
+        id="formula",
+        document_id="d",
+        canonical_snapshot_id="snap",
+        element_type=ElementType.FORMULA,
+        order=6,
+        section_id=section.id,
+        latex="z" * 190,
+    )
+    table_source = (
+        "| A | B |\n| - | - |\n"
+        + "| long | "
+        + ("q" * 170)
+        + " |\n"
+    )
+    table = Element(
+        id="table",
+        document_id="d",
+        canonical_snapshot_id="snap",
+        element_type=ElementType.TABLE,
+        order=7,
+        section_id=section.id,
+        markdown=table_source,
+    )
+    elements = [
+        figure,
+        caption,
+        empty_figure,
+        punctuation,
+        whitespace,
+        token_safe,
+        formula,
+        table,
+    ]
+    document = Document(
+        id="d",
+        source_file_id="src",
+        parse_run_id="parse",
+        canonical_snapshot_id="snap",
+        language="en",
+        title="Figure and hard max contract",
+    )
+    tokenizer = boundaries___CharacterTokenizer()
+    chunks, _mentions = build_chunks(
+        document=document,
+        snapshot_id="snap",
+        sections=[section],
+        elements=elements,
+        references=[],
+        target_tokens=55,
+        hard_max_tokens=hard_max,
+        overlap_tokens=18,
+        tokenizer=tokenizer,
+    )
+    failures: list[str] = []
+    if any((chunk.token_count or 0) > hard_max for chunk in chunks):
+        failures.append("absolute_hard_max")
+    caption_chunks = [chunk for chunk in chunks if "cap" in chunk.element_ids]
+    if not caption_chunks or any("fig" not in chunk.element_ids for chunk in caption_chunks):
+        failures.append("caption_provenance_without_figure")
+    combined = "\n".join(chunk.text for chunk in chunks)
+    if "[FIGURE id=emptyfig page=3]\nDescription: \n[/FIGURE]" not in combined:
+        failures.append("empty_figure_placeholder")
+
+    unique_spans = {
+        span.id: span
+        for chunk in chunks
+        for span in chunk.spans
+    }
+    figure_spans = sorted(
+        (
+            span
+            for span in unique_spans.values()
+            if span.element_id == figure.id
+        ),
+        key=lambda span: span.character_start_in_element,
+    )
+    reconstructed_caption = "".join(
+        caption_text[
+            span.character_start_in_element : span.character_end_in_element
+        ]
+        for span in figure_spans
+    )
+    if reconstructed_caption != caption_text:
+        failures.append("figure_caption_loss_or_duplication")
+    caption_spans = sorted(
+        (
+            span
+            for span in unique_spans.values()
+            if span.element_id == caption.id
+        ),
+        key=lambda span: span.character_start_in_element,
+    )
+    if "".join(span.text for span in caption_spans) != caption_text:
+        failures.append("caption_source_provenance")
+    if not figure_spans or any(
+        not (
+            span.text.startswith("[FIGURE id=fig page=2")
+            and span.text.endswith("[/FIGURE]")
+        )
+        for span in figure_spans
+    ):
+        failures.append("figure_placeholder_integrity")
+
+    by_element = {
+        element.id: sorted(
+            (
+                span
+                for span in unique_spans.values()
+                if span.element_id == element.id
+            ),
+            key=lambda span: span.character_start_in_element,
+        )
+        for element in (punctuation, whitespace, token_safe, formula, table)
+    }
+    for element in (punctuation, whitespace, token_safe, formula, table):
+        source = element_text(element)
+        reconstructed = "".join(
+            source[
+                span.character_start_in_element : span.character_end_in_element
+            ]
+            for span in by_element[element.id]
+        )
+        if reconstructed != source:
+            failures.append(f"source_coverage:{element.id}")
+    citation_start = whitespace_text.index("[1-3]")
+    citation_end = citation_start + len("[1-3]")
+    if any(
+        citation_start < boundary < citation_end
+        for span in by_element[whitespace.id]
+        for boundary in (
+            span.character_start_in_element,
+            span.character_end_in_element,
+        )
+    ):
+        failures.append("citation_placeholder_split")
+
+    fallback_reasons: Counter[str] = Counter()
+    for chunk in chunks:
+        fallback_reasons.update(chunk.metadata.get("fallback_split_reasons") or {})
+    for expected in (
+        "EMERGENCY_PUNCTUATION",
+        "EMERGENCY_WHITESPACE",
+        "EMERGENCY_TOKEN_SAFE",
+    ):
+        if fallback_reasons.get(expected, 0) == 0:
+            failures.append(f"fallback_reason_missing:{expected}")
+    return {
+        "figure_hard_max_contract_errors": len(failures),
+        "figure_input_count": 2,
+        "figure_placeholder_parts": len(figure_spans) + 1,
+        "synthetic_max_chunk_tokens": max(
+            (chunk.token_count or 0 for chunk in chunks), default=0
+        ),
+        "synthetic_fallback_reasons": dict(fallback_reasons),
+        "figure_hard_max_failures": failures,
+    }
+
+
 def boundaries__main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2470,6 +2971,7 @@ def boundaries__main() -> int:
             }
         )
     synthetic = boundaries__synthetic_multi_part_table_contract()
+    figure_hard_max = boundaries__synthetic_figure_hard_max_contract()
     report = {
         "git_commit": boundaries___git_commit(),
         "paper_count": len(paper_results),
@@ -2490,6 +2992,7 @@ def boundaries__main() -> int:
             (item["table_part_emergency_misclassification"] for item in paper_results)
         ),
         **synthetic,
+        **figure_hard_max,
         "papers": paper_results,
     }
     report["pass"] = all(
@@ -2500,6 +3003,7 @@ def boundaries__main() -> int:
                 "avoidable_formula_cohesion_breaks",
                 "table_part_emergency_misclassification",
                 "multi_part_table_provenance_errors",
+                "figure_hard_max_contract_errors",
             )
         )
     )
@@ -3271,6 +3775,9 @@ def runner__main() -> int:
         ),
         "multi_part_table_provenance_errors": int(
             boundary_report.get("multi_part_table_provenance_errors", 0)
+        ),
+        "figure_hard_max_contract_errors": int(
+            boundary_report.get("figure_hard_max_contract_errors", 0)
         ),
     }
     citation_metrics = {

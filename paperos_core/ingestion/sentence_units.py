@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from typing import Any, Literal, Protocol
 
 from paperos_core.domain.canonical import Element, Section
 from paperos_core.domain.enums import ElementType
-
 from paperos_core.ingestion.inline_domains import (
     scan_inline_domains,
     sentence_boundary_allowed,
@@ -31,20 +32,46 @@ _FORMULA_CONTINUATION = re.compile(
     re.IGNORECASE,
 )
 _REAL_EMERGENCY_SPLIT_TYPES = frozenset(
-    {"EMERGENCY_WHITESPACE", "EMERGENCY_TOKEN_SAFE", "EMERGENCY_FORCED"}
+    {
+        "EMERGENCY_PUNCTUATION",
+        "EMERGENCY_WHITESPACE",
+        "EMERGENCY_TOKEN_SAFE",
+        "EMERGENCY_FORCED",
+    }
 )
 
 SplitType = Literal[
     "NORMAL",
+    "EMERGENCY_PUNCTUATION",
     "EMERGENCY_WHITESPACE",
     "EMERGENCY_TOKEN_SAFE",
     "EMERGENCY_FORCED",
     "TABLE_PART",
+    "FIGURE_PLACEHOLDER",
+    "FIGURE_PART",
 ]
+
+_FALLBACK_PUNCTUATION = frozenset(".!?;:。！？；：,，、")
+_FIGURE_ALT_KEYS = ("alt", "alt_text", "description")
 
 
 class Tokenizer(Protocol):
     def count_tokens(self, text: str) -> int: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SupplementalSpan:
+    text: str
+    element_id: str
+    span_key: str
+    character_start_in_element: int
+    character_end_in_element: int
+    token_start: int
+    token_end: int
+
+    @property
+    def span_id(self) -> str:
+        return f"{self.element_id}:{self.span_key}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,8 +92,10 @@ class SentenceUnit:
     subsection_end: bool
     unit_kind: str = "sentence"
     split_type: SplitType = "NORMAL"
+    fallback_reason: str | None = None
     display_text: str | None = None
     paragraph_id: str | None = None
+    supplemental_spans: tuple[SupplementalSpan, ...] = ()
 
     @property
     def span_id(self) -> str:
@@ -74,7 +103,10 @@ class SentenceUnit:
 
     @property
     def emergency_split(self) -> bool:
-        return self.split_type in _REAL_EMERGENCY_SPLIT_TYPES
+        return (
+            self.split_type in _REAL_EMERGENCY_SPLIT_TYPES
+            or self.fallback_reason in _REAL_EMERGENCY_SPLIT_TYPES
+        )
 
 
 def formula_cohesion_boundary(left: SentenceUnit, right: SentenceUnit) -> bool:
@@ -99,6 +131,7 @@ class _TextRange:
     start: int
     end: int
     split_type: SplitType = "NORMAL"
+    fallback_reason: str | None = None
 
 
 _PROSE_TYPES = {
@@ -119,6 +152,68 @@ def element_text(element: Element) -> str:
     return element.text if element.text is not None else (element.markdown or "")
 
 
+def figure_caption_element_ids(elements: list[Element]) -> set[str]:
+    """Return captions consumed by Figure placeholders, never table captions."""
+    figures = {
+        element.id: element
+        for element in elements
+        if element.element_type == ElementType.FIGURE
+    }
+    bound = {
+        caption_id
+        for figure in figures.values()
+        for caption_id in figure.caption_element_ids
+    }
+    bound.update(
+        element.id
+        for element in elements
+        if element.element_type == ElementType.CAPTION
+        and element.parent_element_id in figures
+    )
+    return bound
+
+
+def figure_description(
+    figure: Element, *, elements_by_id: Mapping[str, Element]
+) -> str:
+    """Use only canonical caption/alt text; never synthesize a description."""
+    captions = [
+        element_text(caption)
+        for caption_id in figure.caption_element_ids
+        if (caption := elements_by_id.get(caption_id)) is not None
+        and caption.element_type == ElementType.CAPTION
+        and element_text(caption).strip()
+    ]
+    if captions:
+        return "\n".join(captions)
+    for key in _FIGURE_ALT_KEYS:
+        value = figure.metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def figure_placeholder(
+    figure: Element,
+    *,
+    elements_by_id: Mapping[str, Element],
+    description: str | None = None,
+    part: tuple[int, int] | None = None,
+) -> str:
+    """Render stable, path-free semantic Figure evidence."""
+    attributes = [f"id={figure.id}"]
+    if figure.page is not None:
+        attributes.append(f"page={figure.page}")
+    if part is not None:
+        attributes.append(f"part={part[0]}/{part[1]}")
+    value = (
+        figure_description(figure, elements_by_id=elements_by_id)
+        if description is None
+        else description
+    )
+    return f"[FIGURE {' '.join(attributes)}]\nDescription: {value}\n[/FIGURE]"
+
+
 def units_for_element(
     element: Element,
     *,
@@ -127,7 +222,18 @@ def units_for_element(
     section_id: str | None,
     section_path: str | None,
     subsection_end: bool,
+    elements_by_id: Mapping[str, Element] | None = None,
 ) -> list[SentenceUnit]:
+    if element.element_type == ElementType.FIGURE:
+        return _figure_units(
+            element,
+            elements_by_id=elements_by_id or {element.id: element},
+            count=count,
+            hard_max_tokens=hard_max_tokens,
+            section_id=section_id,
+            section_path=section_path,
+            subsection_end=subsection_end,
+        )
     text = element_text(element)
     if not text.strip():
         return []
@@ -142,19 +248,24 @@ def units_for_element(
             subsection_end=subsection_end,
         )
     if element.element_type == ElementType.FORMULA:
-        tokens = _count(count, text)
+        ranges = (
+            _emergency_split(text, 0, len(text), count, hard_max_tokens)
+            if _count(count, text) > hard_max_tokens
+            else [_TextRange(text=text, start=0, end=len(text))]
+        )
         return [
             _unit_from_range(
                 element,
-                _TextRange(text=text, start=0, end=len(text)),
+                item,
                 count=count,
                 section_id=section_id,
                 section_path=section_path,
-                paragraph_end=True,
-                subsection_end=subsection_end,
+                paragraph_end=index == len(ranges) - 1,
+                subsection_end=subsection_end and index == len(ranges) - 1,
                 unit_kind="formula",
                 paragraph_id=f"{element.id}:0",
             )
+            for index, item in enumerate(ranges)
         ]
     ranges = _sentence_ranges(text, count, hard_max_tokens)
     units: list[SentenceUnit] = []
@@ -182,7 +293,6 @@ def _sentence_ranges(text: str, count: Any, hard_max_tokens: int) -> list[_TextR
     ranges: list[_TextRange] = []
     for paragraph_start, paragraph_end in paragraphs:
         paragraph = text[paragraph_start:paragraph_end]
-        cursor = paragraph_start
         boundaries = [paragraph_start]
         for match in _SENTENCE_SPLIT.finditer(paragraph):
             boundary = paragraph_start + match.end()
@@ -206,7 +316,7 @@ def _sentence_ranges(text: str, count: Any, hard_max_tokens: int) -> list[_TextR
                 ]
             )
             continue
-        for start_offset, end_offset in zip(boundaries, boundaries[1:], strict=False):
+        for start_offset, end_offset in pairwise(boundaries):
             if end_offset <= start_offset:
                 continue
             piece = text[start_offset:end_offset]
@@ -230,71 +340,302 @@ def _emergency_split(
     count: Any,
     hard_max_tokens: int,
 ) -> list[_TextRange]:
-    value = source[start:end]
-    if _count(count, value) <= hard_max_tokens:
-        return [_TextRange(text=value, start=start, end=end, split_type="EMERGENCY_FORCED")]
-
-    midpoint = _nearest_whitespace_split(source, start, end, count, hard_max_tokens)
-    if midpoint is not None and midpoint > start and midpoint < end:
-        left = _emergency_split(source, start, midpoint, count, hard_max_tokens)
-        right = _emergency_split(source, midpoint, end, count, hard_max_tokens)
-        if left:
-            last = left[-1]
-            left[-1] = _TextRange(
-                text=last.text,
-                start=last.start,
-                end=last.end,
-                split_type="EMERGENCY_WHITESPACE",
-            )
-        if right:
-            first = right[0]
-            right[0] = _TextRange(
-                text=first.text,
-                start=first.start,
-                end=first.end,
-                split_type="EMERGENCY_WHITESPACE",
-            )
-        return [*left, *right]
-
-    forced_mid = start + max(1, (end - start) // 2)
-    left = _emergency_split(source, start, forced_mid, count, hard_max_tokens)
-    right = _emergency_split(source, forced_mid, end, count, hard_max_tokens)
-    if left:
-        last = left[-1]
-        left[-1] = _TextRange(
-            text=last.text,
-            start=last.start,
-            end=last.end,
-            split_type="EMERGENCY_FORCED",
-        )
-    if right:
-        first = right[0]
-        right[0] = _TextRange(
-            text=first.text,
-            start=first.start,
-            end=first.end,
-            split_type="EMERGENCY_FORCED",
-        )
-    return [*left, *right]
+    return _fallback_ranges(
+        source,
+        start=start,
+        end=end,
+        count=count,
+        hard_max_tokens=hard_max_tokens,
+        render=lambda value: value,
+    )
 
 
-def _nearest_whitespace_split(
+def _fallback_ranges(
     source: str,
+    *,
     start: int,
     end: int,
     count: Any,
     hard_max_tokens: int,
-) -> int | None:
-    target = start + (end - start) // 2
-    best: int | None = None
-    for index in range(target, end):
-        if source[index].isspace() and _count(count, source[start:index]) <= hard_max_tokens:
-            best = index
+    render: Any,
+) -> list[_TextRange]:
+    """Split exact source ranges, preferring safe punctuation then whitespace."""
+    if start >= end:
+        return []
+    cursor = start
+    ranges: list[_TextRange] = []
+    last_reason: SplitType = "EMERGENCY_TOKEN_SAFE"
+    domains = scan_inline_domains(source)
+    while _count(count, render(source[cursor:end])) > hard_max_tokens:
+        boundary, reason = _preferred_fallback_boundary(
+            source,
+            start=cursor,
+            end=end,
+            domains=domains,
+            fits=lambda candidate, current_cursor=cursor: (
+                _count(count, render(source[current_cursor:candidate]))
+                <= hard_max_tokens
+            ),
+        )
+        if boundary <= cursor or boundary >= end:
+            raise ValueError("Unable to make progress while enforcing chunk hard max")
+        ranges.append(
+            _TextRange(
+                text=source[cursor:boundary],
+                start=cursor,
+                end=boundary,
+                split_type=reason,
+            )
+        )
+        cursor = boundary
+        last_reason = reason
+    ranges.append(
+        _TextRange(
+            text=source[cursor:end],
+            start=cursor,
+            end=end,
+            split_type=last_reason,
+        )
+    )
+    return ranges
+
+
+def _preferred_fallback_boundary(
+    source: str,
+    *,
+    start: int,
+    end: int,
+    domains: list[Any],
+    fits: Any,
+) -> tuple[int, SplitType]:
+    def safe(position: int) -> bool:
+        return not any(domain.start < position < domain.end for domain in domains)
+
+    punctuation = [
+        index + 1
+        for index in range(start, end - 1)
+        if source[index] in _FALLBACK_PUNCTUATION
+        and safe(index + 1)
+        and fits(index + 1)
+    ]
+    if punctuation:
+        return max(punctuation), "EMERGENCY_PUNCTUATION"
+    whitespace = [
+        index + 1
+        for index in range(start, end - 1)
+        if source[index].isspace() and safe(index + 1) and fits(index + 1)
+    ]
+    if whitespace:
+        return max(whitespace), "EMERGENCY_WHITESPACE"
+
+    low = start + 1
+    high = end - 1
+    best = start
+    while low <= high:
+        middle = (low + high) // 2
+        if fits(middle):
+            best = middle
+            low = middle + 1
+        else:
+            high = middle - 1
+    if best == start:
+        for candidate in range(start + 1, end):
+            if fits(candidate):
+                best = candidate
+                break
+    if best == start:
+        raise ValueError("chunk_hard_max_tokens cannot hold a single text unit")
+    return best, "EMERGENCY_TOKEN_SAFE"
+
+
+def _figure_units(
+    element: Element,
+    *,
+    elements_by_id: Mapping[str, Element],
+    count: Any,
+    hard_max_tokens: int,
+    section_id: str | None,
+    section_path: str | None,
+    subsection_end: bool,
+) -> list[SentenceUnit]:
+    description = figure_description(element, elements_by_id=elements_by_id)
+    caption_ranges = _figure_caption_ranges(
+        element, elements_by_id=elements_by_id
+    )
+    whole = figure_placeholder(
+        element, elements_by_id=elements_by_id, description=description
+    )
+    if _count(count, whole) <= hard_max_tokens:
+        return [
+            _figure_unit(
+                element,
+                text=whole,
+                description=description,
+                start=0,
+                end=len(description),
+                count=count,
+                section_id=section_id,
+                section_path=section_path,
+                subsection_end=subsection_end,
+                split_type="FIGURE_PLACEHOLDER",
+                part_index=None,
+                caption_ranges=caption_ranges,
+            )
+        ]
+    if not description:
+        raise ValueError(
+            f"Figure placeholder {element.id} exceeds chunk_hard_max_tokens"
+        )
+
+    total = 1
+    ranges: list[_TextRange] = []
+    for _attempt in range(4):
+        ranges = _fallback_ranges(
+            description,
+            start=0,
+            end=len(description),
+            count=count,
+            hard_max_tokens=hard_max_tokens,
+            render=lambda value, expected_total=total: figure_placeholder(
+                element,
+                elements_by_id=elements_by_id,
+                description=value,
+                part=(expected_total, expected_total),
+            ),
+        )
+        if len(ranges) == total:
             break
-    for index in range(target, start, -1):
-        if source[index - 1].isspace() and _count(count, source[start:index]) <= hard_max_tokens:
-            return index
-    return best
+        total = len(ranges)
+    total = len(ranges)
+    units: list[SentenceUnit] = []
+    for index, item in enumerate(ranges, start=1):
+        placeholder = figure_placeholder(
+            element,
+            elements_by_id=elements_by_id,
+            description=item.text,
+            part=(index, total),
+        )
+        if _count(count, placeholder) > hard_max_tokens:
+            raise ValueError(
+                f"Figure part {element.id}:{index} exceeds chunk_hard_max_tokens"
+            )
+        units.append(
+            _figure_unit(
+                element,
+                text=placeholder,
+                description=description,
+                start=item.start,
+                end=item.end,
+                count=count,
+                section_id=section_id,
+                section_path=section_path,
+                subsection_end=subsection_end and index == total,
+                split_type=item.split_type,
+                part_index=index,
+                caption_ranges=caption_ranges,
+            )
+        )
+    return units
+
+
+def _figure_unit(
+    element: Element,
+    *,
+    text: str,
+    description: str,
+    start: int,
+    end: int,
+    count: Any,
+    section_id: str | None,
+    section_path: str | None,
+    subsection_end: bool,
+    split_type: SplitType,
+    part_index: int | None,
+    caption_ranges: list[tuple[Element, int, int]],
+) -> SentenceUnit:
+    return SentenceUnit(
+        text=text,
+        tokens=_count(count, text),
+        element_id=element.id,
+        span_key=(
+            f"figure:{start}:{end}"
+            if part_index is None
+            else f"figure-part-{part_index}:{start}:{end}"
+        ),
+        character_start_in_element=start,
+        character_end_in_element=end,
+        token_start=_count(count, description[:start]),
+        token_end=_count(count, description[:end]),
+        page=element.page,
+        bounding_box=element.bounding_box,
+        section_id=section_id,
+        section_path=section_path,
+        paragraph_end=True,
+        subsection_end=subsection_end,
+        unit_kind="figure" if part_index is None else "figure_part",
+        split_type=split_type,
+        fallback_reason=(
+            split_type if split_type in _REAL_EMERGENCY_SPLIT_TYPES else None
+        ),
+        paragraph_id=f"{element.id}:figure",
+        supplemental_spans=tuple(
+            _caption_supplemental_span(
+                caption,
+                description=description,
+                description_start=description_start,
+                unit_start=start,
+                unit_end=end,
+                count=count,
+            )
+            for caption, description_start, description_end in caption_ranges
+            if description_start < end and description_end > start
+        ),
+    )
+
+
+def _figure_caption_ranges(
+    figure: Element, *, elements_by_id: Mapping[str, Element]
+) -> list[tuple[Element, int, int]]:
+    ranges: list[tuple[Element, int, int]] = []
+    cursor = 0
+    for caption_id in figure.caption_element_ids:
+        caption = elements_by_id.get(caption_id)
+        if caption is None or caption.element_type != ElementType.CAPTION:
+            continue
+        value = element_text(caption)
+        if not value.strip():
+            continue
+        if ranges:
+            cursor += 1
+        start = cursor
+        cursor += len(value)
+        ranges.append((caption, start, cursor))
+    return ranges
+
+
+def _caption_supplemental_span(
+    caption: Element,
+    *,
+    description: str,
+    description_start: int,
+    unit_start: int,
+    unit_end: int,
+    count: Any,
+) -> SupplementalSpan:
+    overlap_start = max(description_start, unit_start)
+    overlap_end = min(description_start + len(element_text(caption)), unit_end)
+    caption_start = overlap_start - description_start
+    caption_end = overlap_end - description_start
+    caption_text = element_text(caption)
+    return SupplementalSpan(
+        text=description[overlap_start:overlap_end],
+        element_id=caption.id,
+        span_key=f"figure-caption:{caption_start}:{caption_end}",
+        character_start_in_element=caption_start,
+        character_end_in_element=caption_end,
+        token_start=_count(count, caption_text[:caption_start]),
+        token_end=_count(count, caption_text[:caption_end]),
+    )
 
 
 def _table_units(
@@ -339,9 +680,9 @@ def _table_units(
 
     header_end = lines[1][1]
     header_text = text[:header_end].rstrip("\r\n")
-    source_ranges: list[tuple[int, int]] = []
-    batch_start = 0
-    batch_end = header_end
+    source_ranges: list[tuple[int, int]] = [(0, header_end)]
+    batch_start = lines[2][0]
+    batch_end = batch_start
     for row_start, row_end in lines[2:]:
         candidate_display = _table_display_text(
             text, start=batch_start, end=row_end, header_text=header_text
@@ -353,20 +694,52 @@ def _table_units(
     if batch_end > batch_start:
         source_ranges.append((batch_start, batch_end))
 
-    units: list[SentenceUnit] = []
+    hard_safe_ranges: list[_TextRange] = []
+    header_prefix = f"{header_text}\n"
     for start, end in source_ranges:
-        display_text = _table_display_text(
-            text, start=start, end=end, header_text=header_text
+        display_prefix = (
+            header_prefix
+            if start > 0 and _count(count, header_prefix) < hard_max_tokens
+            else ""
         )
-        units.append(
-            _unit_from_range(
-                element,
+        if _count(count, f"{display_prefix}{text[start:end]}") <= hard_max_tokens:
+            hard_safe_ranges.append(
                 _TextRange(
                     text=text[start:end],
                     start=start,
                     end=end,
                     split_type="TABLE_PART",
-                ),
+                )
+            )
+            continue
+        hard_safe_ranges.extend(
+            replace(
+                item,
+                split_type="TABLE_PART",
+                fallback_reason=item.split_type,
+            )
+            for item in _fallback_ranges(
+                text,
+                start=start,
+                end=end,
+                count=count,
+                hard_max_tokens=hard_max_tokens,
+                render=lambda value, prefix=display_prefix: f"{prefix}{value}",
+            )
+        )
+
+    units: list[SentenceUnit] = []
+    for item in hard_safe_ranges:
+        start, end = item.start, item.end
+        display_text = _table_display_text(
+            text, start=start, end=end, header_text=header_text
+        )
+        if _count(count, display_text) > hard_max_tokens:
+            display_text = text[start:end]
+        units.append(
+            _unit_from_range(
+                element,
+                item,
                 count=count,
                 section_id=section_id,
                 section_path=section_path,
@@ -439,6 +812,7 @@ def _unit_from_range(
         subsection_end=subsection_end,
         unit_kind=unit_kind,
         split_type=unit_range.split_type,
+        fallback_reason=unit_range.fallback_reason,
         display_text=display_text,
         paragraph_id=paragraph_id,
     )

@@ -12,8 +12,8 @@ from paperos_core.domain.canonical import (
     CitationMention,
     ReferenceEntry,
 )
-from paperos_core.ingestion.retrieval_text import effective_index_text
 from paperos_core.ingestion.chunk_dp import TINY_TOKEN_THRESHOLD
+from paperos_core.ingestion.retrieval_text import effective_index_text
 
 
 def render_chunk_review_markdown(
@@ -42,6 +42,20 @@ def render_chunk_review_markdown(
         int(chunk.metadata.get("emergency_oversized_sentence_splits") or 0)
         for chunk in chunks
     )
+    figure_placeholders = sum(
+        int(chunk.metadata.get("figure_placeholders") or 0) for chunk in chunks
+    )
+    figure_parts = sum(
+        int(chunk.metadata.get("figure_parts") or 0) for chunk in chunks
+    )
+    fallback_reasons: dict[str, int] = {}
+    for chunk in chunks:
+        for reason, count in (
+            chunk.metadata.get("fallback_split_reasons") or {}
+        ).items():
+            fallback_reasons[str(reason)] = (
+                fallback_reasons.get(str(reason), 0) + int(count)
+            )
     resolved_refs = sum(1 for mention in mentions if mention.reference_entry_id)
     resolved_works = sum(1 for mention in mentions if mention.resolved_work_id)
     span_count = len({mention.citation_span_id for mention in mentions})
@@ -65,6 +79,8 @@ def render_chunk_review_markdown(
         f"- Max tokens: {max(token_counts) if token_counts else 0}",
         f"- Tiny chunks (<{TINY_TOKEN_THRESHOLD}): {tiny}",
         f"- Emergency oversized sentence splits: {emergency}",
+        f"- Figure placeholders/parts: {figure_placeholders}/{figure_parts}",
+        f"- Fallback split reasons: {fallback_reasons}",
         f"- Citation spans: {span_count}",
         f"- Atomic citation targets: {len(mentions)}",
         f"- ReferenceEntry resolved (atomic): {resolved_refs}",
@@ -124,7 +140,7 @@ def _render_chunk_block(
         f"**Pages:** {chunk.page_start or '?'}–{chunk.page_end or '?'}",
         f"**Elements:** {', '.join(chunk.element_ids)}",
         "",
-        f"**Start boundary:** sentence",
+        "**Start boundary:** sentence",
         f"**End boundary:** {end_boundary}",
     ]
     if emergency:
