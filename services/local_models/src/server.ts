@@ -184,6 +184,15 @@ const server = createServer(async (request, response) => {
           original_index: item.originalIndex,
           relevance_score: item.relevanceScore,
           final_rank: item.finalRank,
+          document_token_count: item.documentTokenCount,
+          input_token_count: item.inputTokenCount,
+          model_max_input_tokens: item.modelMaxInputTokens,
+          query_token_count: item.queryTokenCount,
+          truncated: item.truncated,
+          window_count: item.windowCount,
+          winning_window_document_token_count: item.winningWindowDocumentTokenCount,
+          winning_window_index: item.winningWindowIndex,
+          winning_window_text: item.winningWindowText,
         })),
       });
       return;

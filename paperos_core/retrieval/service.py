@@ -11,6 +11,7 @@ from paperos_core.retrieval.candidates import (
     QueryReplay,
     QueryRequest,
     QueryResponse,
+    RerankTrace,
     RetrievalTrace,
     VectorSearchDiagnostics,
 )
@@ -113,12 +114,7 @@ class RetrievalService:
                 set(request.work_ids)
             )
             document_ids.intersection_update(resolved_work_document_ids)
-        snapshot_resolver = getattr(corpus, "snapshot_ids_for_documents", None)
-        allowed_snapshot_ids = (
-            snapshot_resolver(document_ids)
-            if callable(snapshot_resolver)
-            else set(getattr(corpus, "active_snapshot_ids", set()))
-        )
+        allowed_snapshot_ids = corpus.snapshot_ids_for_documents(document_ids)
 
         top_k = request.top_k or self.config.retrieval.top_k
         pool_size = effective_candidate_pool_size(
@@ -264,6 +260,7 @@ class RetrievalService:
             ],
             first_stage_chunk_ids=first_stage_chunk_ids,
             first_reranked_chunk_ids=[item.chunk_id for item in first_reranked],
+            first_rerank_diagnostics=_rerank_trace(first_reranked),
             local_expanded_chunk_ids=[item.chunk_id for item in local_expanded],
             local_new_chunk_ids=[item.chunk_id for item in local_new],
             semantic_expanded_chunk_ids=[item.chunk_id for item in semantic_expanded],
@@ -281,6 +278,9 @@ class RetrievalService:
             ),
             second_reranked_chunk_ids=(
                 [item.chunk_id for item in reranked] if genuinely_new else []
+            ),
+            second_rerank_diagnostics=(
+                _rerank_trace(reranked) if genuinely_new else []
             ),
             second_rerank_candidate_ids=[
                 item.chunk_id for item in second_rerank_candidates
@@ -353,3 +353,22 @@ class RetrievalService:
         if not self.config.retrieval.rerank_enabled:
             return candidates[:limit]
         return await rerank_candidates(self.model_client, query, candidates, limit=limit)
+
+
+def _rerank_trace(candidates: list[Candidate]) -> list[RerankTrace]:
+    return [
+        RerankTrace(
+            chunk_id=candidate.chunk_id,
+            document_token_count=diagnostics.document_token_count,
+            input_token_count=diagnostics.input_token_count,
+            model_max_input_tokens=diagnostics.model_max_input_tokens,
+            query_token_count=diagnostics.query_token_count,
+            truncated=diagnostics.truncated,
+            window_count=diagnostics.window_count,
+            winning_window_document_token_count=diagnostics.winning_window_document_token_count,
+            winning_window_index=diagnostics.winning_window_index,
+            winning_window_score=diagnostics.winning_window_score,
+        )
+        for candidate in candidates
+        if (diagnostics := candidate.rerank_diagnostics) is not None
+    ]

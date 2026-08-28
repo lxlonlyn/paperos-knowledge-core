@@ -18,6 +18,36 @@ class VectorSearchDiagnostics:
     safety_limit_reached: bool = False
 
 
+class RerankDiagnostics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_token_count: int = Field(gt=0)
+    input_token_count: int = Field(gt=0)
+    model_max_input_tokens: int = Field(gt=0)
+    query_token_count: int = Field(gt=0)
+    truncated: bool
+    window_count: int = Field(gt=0)
+    winning_window_document_token_count: int = Field(gt=0)
+    winning_window_index: int = Field(ge=0)
+    winning_window_score: float = Field(ge=0, le=1)
+    winning_window_text: str = Field(min_length=1)
+
+
+class RerankTrace(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chunk_id: str
+    document_token_count: int = Field(gt=0)
+    input_token_count: int = Field(gt=0)
+    model_max_input_tokens: int = Field(gt=0)
+    query_token_count: int = Field(gt=0)
+    truncated: bool
+    window_count: int = Field(gt=0)
+    winning_window_document_token_count: int = Field(gt=0)
+    winning_window_index: int = Field(ge=0)
+    winning_window_score: float = Field(ge=0, le=1)
+
+
 class QueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -61,6 +91,7 @@ class Candidate(BaseModel):
     channel_scores: dict[str, float] = Field(default_factory=dict)
     fused_score: float = 0
     rerank_score: float | None = None
+    rerank_diagnostics: RerankDiagnostics | None = None
     final_rank: int | None = None
     knowledge_kind: Literal[
         "source_fact",
@@ -123,6 +154,7 @@ class RetrievalTrace(BaseModel):
     vector_safety_limit_reached: list[bool] = Field(default_factory=list)
     first_stage_chunk_ids: list[str] = Field(default_factory=list)
     first_reranked_chunk_ids: list[str] = Field(default_factory=list)
+    first_rerank_diagnostics: list[RerankTrace] = Field(default_factory=list)
     local_expanded_chunk_ids: list[str] = Field(default_factory=list)
     local_new_chunk_ids: list[str] = Field(default_factory=list)
     semantic_expanded_chunk_ids: list[str] = Field(default_factory=list)
@@ -131,6 +163,7 @@ class RetrievalTrace(BaseModel):
     relation_types: list[str] = Field(default_factory=list)
     derived_from_ids: list[str] = Field(default_factory=list)
     second_reranked_chunk_ids: list[str] = Field(default_factory=list)
+    second_rerank_diagnostics: list[RerankTrace] = Field(default_factory=list)
     second_rerank_candidate_ids: list[str] = Field(default_factory=list)
     final_selected_chunk_ids: list[str] = Field(default_factory=list)
 
