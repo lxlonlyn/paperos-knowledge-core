@@ -6,6 +6,10 @@ import {
 } from "node-llama-cpp";
 
 import type {LocalInferenceConfig} from "./config.js";
+import {
+  validateRerankerInputTokenTrace,
+  type RerankerInputTokenTrace,
+} from "./reranker_input.js";
 
 export interface RankedDocument {
   candidateId: string;
@@ -14,9 +18,11 @@ export interface RankedDocument {
   finalRank: number;
   documentTokenCount: number;
   inputTokenCount: number;
+  effectiveInputTokenCount: number;
   modelMaxInputTokens: number;
   queryTokenCount: number;
-  truncated: false;
+  specialPromptTokenCount: number;
+  truncated: boolean;
   windowCount: number;
   winningWindowDocumentTokenCount: number;
   winningWindowIndex: number;
@@ -29,8 +35,12 @@ interface RankingWindow {
   documentTokenCount: number;
 }
 
-const RERANKER_WINDOW_DOCUMENT_TOKENS = 96;
-const RERANKER_WINDOW_TOKEN_OVERLAP = 16;
+// Current reranker windowing is a temporary query-time projection. These
+// parameters and max-score aggregation are provisional; they do not define
+// the final PaperOS reranking architecture. The authoritative indexed and evidence unit
+// remains the parent canonical Chunk.
+const PROVISIONAL_WINDOW_DOCUMENT_TOKENS = 96;
+const PROVISIONAL_WINDOW_TOKEN_OVERLAP = 16;
 const SCALAR_RETRIEVAL_HEADER = /^(?:Paper|Year|Region|Section):\n/u;
 const SENTENCE_END = new Set([".", "!", "?", "。", "！", "？"]);
 const NON_TERMINAL_ABBREVIATIONS = new Set([
@@ -80,14 +90,24 @@ export class RerankerService {
     }
     const windows = texts.map((text) => this.windows(text));
     const flatWindows = windows.flat();
+    const queryTokenCount = this.model.tokenize(query).length;
+    const inputTraces = flatWindows.map((window) =>
+      this.inputTokenTrace(query, queryTokenCount, window),
+    );
     const scores = await this.context.rankAll(
       query,
       flatWindows.map((window) => window.text),
     );
     let scoreIndex = 0;
+    let traceIndex = 0;
     const ranked = windows.map((documentWindows, originalIndex) => {
       const documentScores = scores.slice(scoreIndex, scoreIndex + documentWindows.length);
+      const documentInputTraces = inputTraces.slice(
+        traceIndex,
+        traceIndex + documentWindows.length,
+      );
       scoreIndex += documentWindows.length;
+      traceIndex += documentWindows.length;
       let winningWindowIndex = 0;
       for (let index = 1; index < documentScores.length; index += 1) {
         if (documentScores[index]! > documentScores[winningWindowIndex]!) {
@@ -95,6 +115,7 @@ export class RerankerService {
         }
       }
       const winningWindow = documentWindows[winningWindowIndex]!;
+      const winningInputTrace = documentInputTraces[winningWindowIndex]!;
       const relevanceScore = documentScores[winningWindowIndex]!;
       return {
         candidateId: candidateIds[originalIndex]!,
@@ -102,10 +123,12 @@ export class RerankerService {
         relevanceScore,
         finalRank: 0,
         documentTokenCount: this.model!.tokenize(texts[originalIndex]!).length,
-        inputTokenCount: this.evaluationInputTokenCount(query, winningWindow.text),
-        modelMaxInputTokens: this.config.rerankerMaxTokens,
-        queryTokenCount: this.model!.tokenize(query).length,
-        truncated: false as const,
+        inputTokenCount: winningInputTrace.effectiveInputTokenCount,
+        effectiveInputTokenCount: winningInputTrace.effectiveInputTokenCount,
+        modelMaxInputTokens: winningInputTrace.modelMaxInputTokens,
+        queryTokenCount: winningInputTrace.queryTokenCount,
+        specialPromptTokenCount: winningInputTrace.specialPromptTokenCount,
+        truncated: winningInputTrace.truncated,
         windowCount: documentWindows.length,
         winningWindowDocumentTokenCount: winningWindow.documentTokenCount,
         winningWindowIndex,
@@ -139,7 +162,7 @@ export class RerankerService {
 
   private windowsForBlock(prefix: string, block: string): string[] {
     const render = (body: string): string => (prefix ? `${prefix}\n\n${body}` : body);
-    if (this.documentTokenCount(render(block)) <= RERANKER_WINDOW_DOCUMENT_TOKENS) {
+    if (this.documentTokenCount(render(block)) <= PROVISIONAL_WINDOW_DOCUMENT_TOKENS) {
       return [render(block)];
     }
     const sentences = splitSentences(block);
@@ -150,7 +173,7 @@ export class RerankerService {
       while (
         end < sentences.length &&
         this.documentTokenCount(render(sentences.slice(start, end + 1).join(" "))) <=
-          RERANKER_WINDOW_DOCUMENT_TOKENS
+          PROVISIONAL_WINDOW_DOCUMENT_TOKENS
       ) {
         end += 1;
       }
@@ -170,7 +193,7 @@ export class RerankerService {
     if (!this.model) return [];
     const render = (body: string): string => (prefix ? `${prefix}\n\n${body}` : body);
     const prefixTokens = this.documentTokenCount(render(""));
-    const available = Math.max(1, RERANKER_WINDOW_DOCUMENT_TOKENS - prefixTokens);
+    const available = Math.max(1, PROVISIONAL_WINDOW_DOCUMENT_TOKENS - prefixTokens);
     const tokens = this.model.tokenize(text);
     const windows: string[] = [];
     let start = 0;
@@ -178,7 +201,7 @@ export class RerankerService {
       const end = Math.min(tokens.length, start + available);
       windows.push(render(this.model.detokenize(tokens.slice(start, end))));
       if (end >= tokens.length) break;
-      start = Math.max(start + 1, end - RERANKER_WINDOW_TOKEN_OVERLAP);
+      start = Math.max(start + 1, end - PROVISIONAL_WINDOW_TOKEN_OVERLAP);
     }
     return windows;
   }
@@ -194,6 +217,19 @@ export class RerankerService {
       _getEvaluationInput(queryText: string, documentText: string): readonly unknown[];
     };
     return diagnosticContext._getEvaluationInput(query, document).length;
+  }
+
+  private inputTokenTrace(
+    query: string,
+    queryTokenCount: number,
+    window: RankingWindow,
+  ): RerankerInputTokenTrace {
+    return validateRerankerInputTokenTrace(
+      queryTokenCount,
+      window.documentTokenCount,
+      this.evaluationInputTokenCount(query, window.text),
+      this.config.rerankerMaxTokens,
+    );
   }
 
   public async dispose(): Promise<void> {

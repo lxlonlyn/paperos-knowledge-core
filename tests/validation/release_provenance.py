@@ -1,0 +1,172 @@
+"""Pure release-report provenance helpers with no external-service imports."""
+
+from __future__ import annotations
+
+from typing import Any
+
+VALIDATION_ORIGIN_CURRENT = "current_head"
+VALIDATION_ORIGIN_REUSED = "reused_previous_run"
+SEARCH_QUALITY_PENDING = "PENDING_RERANK_OPTIMIZATION"
+RERANK_PROVISIONAL_NOTICE = (
+    "Rerank quality is provisional and will be revalidated after the dedicated "
+    "rerank optimization task."
+)
+ENGINEERING_GATE_NAMES = (
+    "contracts", "ci", "compile", "ruff", "mypy", "node_build",
+    "active_revision", "hard_filters", "hard_max", "figure_provenance",
+    "source_provenance", "citation_provenance", "evidence_replay",
+    "lifecycle", "gpu_restriction", "clean_room_pipeline",
+)
+
+
+def _drop_legacy_gate_fields(report: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(report)
+    normalized.pop("gates", None)
+    normalized.pop("reranker_blocker", None)
+    return normalized
+
+
+def _validation_fields(
+    *, origin: str, validated_head: str, executed_this_run: bool
+) -> dict[str, object]:
+    return {
+        "validation_origin": origin,
+        "validated_head": validated_head,
+        "executed_this_run": executed_this_run,
+    }
+
+
+def _annotate_validation(
+    payload: dict[str, Any],
+    *,
+    origin: str,
+    validated_head: str,
+    executed_this_run: bool,
+) -> dict[str, Any]:
+    return {
+        **payload,
+        **_validation_fields(
+            origin=origin,
+            validated_head=validated_head,
+            executed_this_run=executed_this_run,
+        ),
+    }
+
+
+def _reused_validation(
+    payload: dict[str, Any], *, fallback_head: str
+) -> dict[str, Any]:
+    return _annotate_validation(
+        payload,
+        origin=VALIDATION_ORIGIN_REUSED,
+        validated_head=str(payload.get("validated_head") or fallback_head),
+        executed_this_run=False,
+    )
+
+
+def _merge_query_reviews(
+    case_ids: list[str],
+    previous_reviews: list[dict[str, Any]],
+    current_reviews: list[dict[str, Any]],
+    *,
+    previous_head: str,
+    current_head: str,
+) -> list[dict[str, Any]]:
+    previous_by_id = {item["id"]: item for item in previous_reviews}
+    current_by_id = {item["id"]: item for item in current_reviews}
+    return [
+        (
+            _annotate_validation(
+                current_by_id[case_id],
+                origin=VALIDATION_ORIGIN_CURRENT,
+                validated_head=current_head,
+                executed_this_run=True,
+            )
+            if case_id in current_by_id
+            else _reused_validation(
+                previous_by_id[case_id], fallback_head=previous_head
+            )
+        )
+        for case_id in case_ids
+    ]
+
+
+def _gate_record(
+    passed: bool,
+    *,
+    origin: str,
+    validated_head: str,
+    executed_this_run: bool,
+) -> dict[str, object]:
+    return {
+        "status": "PASS" if passed else "FAIL",
+        **_validation_fields(
+            origin=origin,
+            validated_head=validated_head,
+            executed_this_run=executed_this_run,
+        ),
+    }
+
+
+def _gate_passed(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return isinstance(value, dict) and value.get("status") == "PASS"
+
+
+def _engineering_decision(gates: dict[str, dict[str, object]]) -> str:
+    return (
+        "GO"
+        if set(gates) == set(ENGINEERING_GATE_NAMES)
+        and all(_gate_passed(gates[name]) for name in ENGINEERING_GATE_NAMES)
+        else "NO-GO"
+    )
+
+
+def _legacy_engineering_evidence(
+    report: dict[str, Any], *, legacy_head: str
+) -> dict[str, dict[str, object]]:
+    existing = report.get("engineering_gates")
+    if isinstance(existing, dict) and set(existing) == set(ENGINEERING_GATE_NAMES):
+        return {
+            name: _reused_validation(value, fallback_head=legacy_head)
+            for name, value in existing.items()
+            if isinstance(value, dict)
+        }
+    legacy = report.get("gates", {})
+    clean_room = report.get("clean_room", {})
+    structural = {
+        "active_revision": bool(legacy.get("active_pointer")),
+        "hard_filters": bool(legacy.get("contracts"))
+        and clean_room.get("explicit_filter", {}).get("status") == "PASS",
+        "hard_max": bool(legacy.get("hard_max")),
+        "figure_provenance": bool(legacy.get("figure")),
+        "source_provenance": bool(legacy.get("source_projection")),
+        "citation_provenance": (
+            clean_room.get("citation_provenance", {}).get("status") == "PASS"
+        ),
+        "evidence_replay": bool(legacy.get("evidence_replay")),
+        "lifecycle": bool(legacy.get("lifecycle")),
+        "gpu_restriction": bool(legacy.get("gpu_restricted")),
+        "clean_room_pipeline": bool(
+            clean_room.get("pipeline_completed_pdf_to_llm")
+            and legacy.get("full_pipeline")
+        ),
+    }
+    records = {
+        name: _gate_record(
+            passed,
+            origin=VALIDATION_ORIGIN_REUSED,
+            validated_head=legacy_head,
+            executed_this_run=False,
+        )
+        for name, passed in structural.items()
+    }
+    for name in ("contracts", "ci", "compile", "ruff", "mypy", "node_build"):
+        records[name] = _gate_record(
+            False,
+            origin=VALIDATION_ORIGIN_REUSED,
+            validated_head=legacy_head,
+            executed_this_run=False,
+        )
+    return records

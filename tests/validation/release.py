@@ -31,12 +31,63 @@ from paperos_core.retrieval.candidates import QueryRequest
 from paperos_core.retrieval.corpus import CorpusView
 from tests.validation import retrieval as retrieval_validation
 from tests.validation.chunk import review___projection_metrics
+from tests.validation.release_provenance import (
+    RERANK_PROVISIONAL_NOTICE,
+    SEARCH_QUALITY_PENDING,
+    VALIDATION_ORIGIN_CURRENT,
+    _annotate_validation,
+    _drop_legacy_gate_fields,
+    _engineering_decision,
+    _gate_record,
+    _legacy_engineering_evidence,
+    _merge_query_reviews,
+    _reused_validation,
+)
 
 DEFAULT_OUTPUT = Path("data/validation/release/output")
 DEFAULT_WORK = Path("data/validation/release/work")
 DEFAULT_ACCEPTANCE_CONFIG = Path("data/validation/search_graph_acceptance/config")
 DEFAULT_CORPUS = Path("data/validation/corpus/papers")
 DATASET = "paperos-release-gate"
+
+
+def _final_engineering_command_specs() -> dict[str, list[str]]:
+    python = sys.executable
+    return {
+        "node_build": ["npm", "--prefix", "services/local_models", "run", "build"],
+        "compile": [python, "-m", "compileall", "-q", "paperos_core", "tests"],
+        "ruff": ["ruff", "check", "paperos_core", "tests"],
+        "mypy": ["mypy", "paperos_core"],
+        "runtime_contract": [python, "tests/contract/test_runtime_query_contracts.py"],
+        "reranker_contract": [python, "tests/contract/test_reranker_input_trace.py"],
+        "report_contract": [
+            python,
+            "tests/contract/test_release_report_provenance.py",
+        ],
+        "diff_check": ["git", "diff", "--check"],
+    }
+
+
+def _legacy_validation_head(
+    args: argparse.Namespace, report: dict[str, Any]
+) -> str:
+    supplied = getattr(args, "legacy_validated_head", None)
+    if supplied:
+        return str(supplied)
+    gates = report.get("engineering_gates")
+    if isinstance(gates, dict):
+        heads = {
+            str(value.get("validated_head"))
+            for value in gates.values()
+            if isinstance(value, dict) and value.get("validated_head")
+        }
+        if heads:
+            return min(heads)
+    raise RuntimeError(
+        "Legacy report lacks per-gate validation provenance; "
+        "pass --legacy-validated-head with the actual execution commit."
+    )
+
 
 
 def _git(*args: str) -> str:
@@ -340,6 +391,100 @@ async def _runtime_audit(
         await application.aclose()
 
 
+def _finalize_existing(args: argparse.Namespace) -> dict[str, Any]:
+    """Run only lightweight engineering gates and preserve historical evidence."""
+
+    output = args.output.resolve()
+    work = args.work.resolve()
+    report_path = output / "release-report.json"
+    acceptance_path = work / "search" / "acceptance.json"
+    if not report_path.is_file() or not acceptance_path.is_file():
+        raise RuntimeError(
+            "Engineering finalization requires the retained report and acceptance data."
+        )
+    previous_report = json.loads(report_path.read_text(encoding="utf-8"))
+    clean_room = json.loads(acceptance_path.read_text(encoding="utf-8"))
+    legacy_head = _legacy_validation_head(args, previous_report)
+    current_head = _git("rev-parse", "HEAD")
+
+    case_ids = [str(item["id"]) for item in clean_room["queries"]]
+    clean_room["queries"] = _merge_query_reviews(
+        case_ids,
+        clean_room["queries"],
+        [],
+        previous_head=legacy_head,
+        current_head=current_head,
+    )
+    clean_room = _reused_validation(clean_room, fallback_head=legacy_head)
+
+    engineering_gates = _legacy_engineering_evidence(
+        previous_report,
+        legacy_head=legacy_head,
+    )
+    command_results = {
+        name: _annotate_validation(
+            _command_gate(command),
+            origin=VALIDATION_ORIGIN_CURRENT,
+            validated_head=current_head,
+            executed_this_run=True,
+        )
+        for name, command in _final_engineering_command_specs().items()
+    }
+    current_gate_results = {
+        "node_build": command_results["node_build"]["status"] == "PASS",
+        "compile": command_results["compile"]["status"] == "PASS",
+        "ruff": command_results["ruff"]["status"] == "PASS",
+        "mypy": command_results["mypy"]["status"] == "PASS",
+    }
+    contracts_passed = all(
+        command_results[name]["status"] == "PASS"
+        for name in ("runtime_contract", "reranker_contract", "report_contract")
+    )
+    current_gate_results["contracts"] = contracts_passed
+    current_gate_results["ci"] = (
+        contracts_passed
+        and all(current_gate_results.values())
+        and command_results["diff_check"]["status"] == "PASS"
+    )
+    for name, passed in current_gate_results.items():
+        engineering_gates[name] = _gate_record(
+            passed,
+            origin=VALIDATION_ORIGIN_CURRENT,
+            validated_head=current_head,
+            executed_this_run=True,
+        )
+
+    report = _drop_legacy_gate_fields(previous_report)
+    report["head"] = current_head
+    report["dirty_at_start"] = bool(_git("status", "--short"))
+    report["clean_room"] = clean_room
+    report["runtime_audit"] = _reused_validation(
+        dict(previous_report["runtime_audit"]),
+        fallback_head=legacy_head,
+    )
+    report["engineering_gates"] = engineering_gates
+    report["search_quality_status"] = SEARCH_QUALITY_PENDING
+    report["rerank_quality_notice"] = RERANK_PROVISIONAL_NOTICE
+    diagnostic = previous_report.get(
+        "reranker_diagnostic",
+        previous_report.get("reranker_blocker"),
+    )
+    if isinstance(diagnostic, dict):
+        report["reranker_diagnostic"] = {
+            **_reused_validation(diagnostic, fallback_head=legacy_head),
+            "quality_status": SEARCH_QUALITY_PENDING,
+        }
+    report["commands"] = list(command_results.values())
+    report["decision"] = _engineering_decision(engineering_gates)
+
+    _write_json(acceptance_path, clean_room)
+    _write_json(work / "search" / "review" / "queries.json", clean_room["queries"])
+    _write_json(report_path, report)
+    (output / "release-report.md").write_text(_markdown(report), encoding="utf-8")
+    return report
+
+
+
 async def _resume_existing(args: argparse.Namespace) -> dict[str, Any]:
     """Re-run selected query cases without mutating the retained clean-room."""
 
@@ -456,6 +601,12 @@ async def _resume_existing(args: argparse.Namespace) -> dict[str, Any]:
                             "section": chunk.section_path,
                             "chunk_token_count": chunk.token_count,
                             "reranker_input_token_count": diagnostics.input_token_count,
+                            "reranker_effective_input_token_count": (
+                                diagnostics.effective_input_token_count
+                            ),
+                            "reranker_special_prompt_token_count": (
+                                diagnostics.special_prompt_token_count
+                            ),
                             "reranker_window_document_token_count": (
                                 diagnostics.winning_window_document_token_count
                             ),
@@ -484,6 +635,12 @@ async def _resume_existing(args: argparse.Namespace) -> dict[str, Any]:
                         else None
                     ),
                     "reranker_input_tokens": winning.input_token_count if winning else None,
+                    "reranker_effective_input_tokens": (
+                        winning.effective_input_token_count if winning else None
+                    ),
+                    "reranker_special_prompt_tokens": (
+                        winning.special_prompt_token_count if winning else None
+                    ),
                     "reranker_truncated": winning.truncated if winning else None,
                     "window_count": winning.window_count if winning else None,
                     "winning_window_index": (
@@ -505,56 +662,55 @@ async def _resume_existing(args: argparse.Namespace) -> dict[str, Any]:
     finally:
         await application.aclose()
 
-    reviews_by_id = {
-        item["id"]: item for item in previous_acceptance["queries"]
-    }
-    reviews_by_id.update({item["id"]: item for item in resumed_reviews})
-    updated_reviews = [reviews_by_id[case["id"]] for case in queries_config["cases"]]
+    current_head = _git("rev-parse", "HEAD")
+    legacy_head = _legacy_validation_head(args, previous_report)
+    updated_reviews = _merge_query_reviews(
+        [str(case["id"]) for case in queries_config["cases"]],
+        previous_acceptance["queries"],
+        resumed_reviews,
+        previous_head=legacy_head,
+        current_head=current_head,
+    )
     clean_room = dict(previous_acceptance)
     clean_room["queries"] = updated_reviews
-    for mode, key in (("default", "default_search"), ("explicit_filter", "explicit_filter")):
-        hard = [
-            item for item in updated_reviews if item["mode"] == mode and item["hard"]
-        ]
-        clean_room[key] = {
-            "status": (
-                "PASS" if hard and all(item["status"] == "PASS" for item in hard) else "FAIL"
-            )
-        }
-    hard_keys = (
-        "default_search",
-        "explicit_filter",
-        "claim_off",
-        "local_expansion",
-        "local_boundary_guard",
-        "semantic_relation_expansion",
-        "citation_provenance",
-        "incoming_cites_query",
-        "source_grounding",
-        "structure_provenance",
-        "expansion_requires_reranker",
-        "vector_index_scope",
-    )
-    clean_room["overall_status"] = (
-        "PASS"
-        if clean_room["pipeline_completed_pdf_to_llm"]
-        and all(clean_room[key]["status"] != "FAIL" for key in hard_keys)
-        else "FAIL"
-    )
+    clean_room = _reused_validation(clean_room, fallback_head=legacy_head)
     _write_json(acceptance_path, clean_room)
     _write_json(work / "search" / "review" / "queries.json", updated_reviews)
 
-    report = dict(previous_report)
-    report["head"] = _git("rev-parse", "HEAD")
-    report["clean_room"] = clean_room
-    report["reranker_blocker"] = blocker_trace
-    gates = dict(report["gates"])
-    gates["full_pipeline"] = clean_room["overall_status"] == "PASS"
-    gates["reranker_blocker"] = (
-        blocker_trace is not None and blocker_trace["status"] == "PASS"
+    engineering_gates = _legacy_engineering_evidence(
+        previous_report,
+        legacy_head=legacy_head,
     )
-    report["gates"] = gates
-    report["decision"] = "GO" if all(gates.values()) else "NO-GO"
+    report = _drop_legacy_gate_fields(previous_report)
+    report["head"] = current_head
+    report["clean_room"] = clean_room
+    report["runtime_audit"] = _reused_validation(
+        dict(previous_report["runtime_audit"]),
+        fallback_head=legacy_head,
+    )
+    report["engineering_gates"] = engineering_gates
+    report["search_quality_status"] = SEARCH_QUALITY_PENDING
+    report["rerank_quality_notice"] = RERANK_PROVISIONAL_NOTICE
+    diagnostic = blocker_trace or previous_report.get(
+        "reranker_diagnostic",
+        previous_report.get("reranker_blocker"),
+    )
+    if isinstance(diagnostic, dict):
+        diagnostic_record = (
+            _annotate_validation(
+                diagnostic,
+                origin=VALIDATION_ORIGIN_CURRENT,
+                validated_head=current_head,
+                executed_this_run=True,
+            )
+            if blocker_trace is not None
+            else _reused_validation(diagnostic, fallback_head=legacy_head)
+        )
+        report["reranker_diagnostic"] = {
+            **diagnostic_record,
+            "quality_status": SEARCH_QUALITY_PENDING,
+        }
+    report["decision"] = _engineering_decision(engineering_gates)
     _write_json(output / "release-report.json", report)
     (output / "release-report.md").write_text(_markdown(report), encoding="utf-8")
     return report
@@ -562,31 +718,56 @@ async def _resume_existing(args: argparse.Namespace) -> dict[str, Any]:
 
 def _markdown(report: dict[str, Any]) -> str:
     commands = report.get("commands", [])
+    clean_room = report.get("clean_room", {})
+    runtime_audit = report.get("runtime_audit", {})
+    chunks = runtime_audit.get("chunks", {})
+    gates = report.get("engineering_gates", {})
     lines = [
         "# PaperOS Production Readiness",
         "",
-        f"Final decision: **{report['decision']}**",
+        f"Release engineering decision: **{report['decision']}**",
+        f"Search quality: **{report.get('search_quality_status', 'UNAVAILABLE')}**",
         "",
         f"HEAD: `{report['head']}`",
-        f"Dirty at start: `{report['dirty_at_start']}`",
+        f"Dirty at start: `{report.get('dirty_at_start', True)}`",
         "",
-        "## Clean-room",
-        "",
-        f"- Full PDF-to-LLM: {report['clean_room']['overall_status']}",
-        f"- Papers: {report['clean_room']['counts'].get('ingested_papers', 0)}",
-        f"- Per-paper PDF-to-active seconds: {report['clean_room'].get('pdf_to_active_seconds', {})}",
-        f"- Max chunk tokens: {report['runtime_audit']['chunks']['max_chunk_tokens']}",
-        f"- Hard-max violations: {report['runtime_audit']['chunks']['hard_max_violation_count']}",
-        (
-            f"- Figure input/covered/lost: "
-            f"{report['runtime_audit']['chunks']['figure_input_count']}/"
-            f"{report['runtime_audit']['chunks']['figure_placeholder_count']}/"
-            f"{report['runtime_audit']['chunks']['figure_lost_count']}"
-        ),
-        "",
-        "## Commands",
+        "## Engineering gates",
         "",
     ]
+    lines.extend(
+        (
+            f"- {name}: {gate.get('status')} "
+            f"(origin={gate.get('validation_origin')}, "
+            f"validated_head={gate.get('validated_head')}, "
+            f"executed_this_run={gate.get('executed_this_run')})"
+        )
+        for name, gate in gates.items()
+        if isinstance(gate, dict)
+    )
+    lines.extend(
+        [
+            "",
+            "## Retained clean-room evidence",
+            "",
+            f"- Full PDF-to-LLM: {clean_room.get('overall_status', 'UNAVAILABLE')}",
+            f"- Papers: {clean_room.get('counts', {}).get('ingested_papers', 0)}",
+            (
+                "- Per-paper PDF-to-active seconds: "
+                f"{clean_room.get('pdf_to_active_seconds', {})}"
+            ),
+            f"- Max chunk tokens: {chunks.get('max_chunk_tokens', 0)}",
+            f"- Hard-max violations: {chunks.get('hard_max_violation_count', 0)}",
+            (
+                "- Figure input/covered/lost: "
+                f"{chunks.get('figure_input_count', 0)}/"
+                f"{chunks.get('figure_placeholder_count', 0)}/"
+                f"{chunks.get('figure_lost_count', 0)}"
+            ),
+            "",
+            "## Commands",
+            "",
+        ]
+    )
     lines.extend(
         f"- `{item['command']}` → exit {item['exit_code']} ({item['seconds']}s)"
         for item in commands
@@ -596,6 +777,7 @@ def _markdown(report: dict[str, Any]) -> str:
             "",
             "## Known limitations",
             "",
+            f"- {report.get('rerank_quality_notice', RERANK_PROVISIONAL_NOTICE)}",
             (
                 "- GitHub-hosted Windows execution is represented by the portable/config "
                 "contract and workflow definition; this local release run is Linux."
@@ -636,32 +818,75 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         dataset=DATASET,
     )
 
-    python = sys.executable
-    command_specs = [
-        [python, "tests/contract/test_runtime_query_contracts.py"],
-        [python, "tests/contract/test_active_canonical_revision.py"],
-        [python, "tests/contract/test_query_filter_contracts.py"],
-        [python, "tests/contract/test_retrieval_citation_loop.py"],
-        [python, "tests/contract/test_citation_resolution.py"],
-        [python, "tests/validation/chunk.py", "boundaries"],
-    ]
-    commands = [_command_gate(command) for command in command_specs]
+    command_specs = {
+        **_final_engineering_command_specs(),
+        "active_revision_contract": [
+            sys.executable,
+            "tests/contract/test_active_canonical_revision.py",
+        ],
+        "hard_filter_contract": [
+            sys.executable,
+            "tests/contract/test_query_filter_contracts.py",
+        ],
+        "citation_loop_contract": [
+            sys.executable,
+            "tests/contract/test_retrieval_citation_loop.py",
+        ],
+        "citation_resolution_contract": [
+            sys.executable,
+            "tests/contract/test_citation_resolution.py",
+        ],
+        "chunk_boundary_contract": [
+            sys.executable,
+            "tests/validation/chunk.py",
+            "boundaries",
+        ],
+    }
+    command_results = {
+        name: _annotate_validation(
+            _command_gate(command),
+            origin=VALIDATION_ORIGIN_CURRENT,
+            validated_head=head,
+            executed_this_run=True,
+        )
+        for name, command in command_specs.items()
+    }
+    commands = list(command_results.values())
 
     chunks = runtime_audit["chunks"]
     lifecycle = runtime_audit["lifecycle"]
-    gates = {
-        "full_pipeline": clean_room["overall_status"] == "PASS",
-        "claim_disabled": clean_room["claim_off"]["status"] == "PASS",
-        "contracts": all(item["exit_code"] == 0 for item in commands),
-        "gpu_restricted": runtime_audit["gpu"]["matched"],
-        "active_pointer": runtime_audit["active"]["one_pointer_per_document"],
+    static_passed = {
+        name: command_results[name]["status"] == "PASS"
+        for name in ("node_build", "compile", "ruff", "mypy")
+    }
+    contracts_passed = all(
+        item["status"] == "PASS"
+        for name, item in command_results.items()
+        if name.endswith("_contract")
+    )
+    engineering_results = {
+        "contracts": contracts_passed,
+        "ci": contracts_passed
+        and all(static_passed.values())
+        and command_results["diff_check"]["status"] == "PASS",
+        **static_passed,
+        "active_revision": bool(
+            runtime_audit["active"]["one_pointer_per_document"]
+            and command_results["active_revision_contract"]["status"] == "PASS"
+        ),
+        "hard_filters": (
+            command_results["hard_filter_contract"]["status"] == "PASS"
+        ),
         "hard_max": chunks["hard_max_violation_count"] == 0,
-        "figure": chunks["figure_lost_count"] == 0
+        "figure_provenance": chunks["figure_lost_count"] == 0
         and chunks["figure_provenance_error_count"] == 0
         and chunks["figure_caption_duplication_count"] == 0,
-        "source_projection": chunks["text_loss_count"] == 0
+        "source_provenance": chunks["text_loss_count"] == 0
         and chunks["text_duplication_count"] == 0
         and chunks["section_cross_boundary_count"] == 0,
+        "citation_provenance": (
+            clean_room["citation_provenance"]["status"] == "PASS"
+        ),
         "evidence_replay": runtime_audit["evidence_replay"]["status"] == "PASS",
         "lifecycle": all(
             lifecycle[key]
@@ -673,8 +898,40 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 "delete_consistent",
             )
         ),
+        "gpu_restriction": runtime_audit["gpu"]["matched"],
+        "clean_room_pipeline": bool(clean_room["pipeline_completed_pdf_to_llm"]),
     }
-    decision = "GO" if all(gates.values()) else "NO-GO"
+    engineering_gates = {
+        name: _gate_record(
+            passed,
+            origin=VALIDATION_ORIGIN_CURRENT,
+            validated_head=head,
+            executed_this_run=True,
+        )
+        for name, passed in engineering_results.items()
+    }
+    decision = _engineering_decision(engineering_gates)
+    clean_room["queries"] = [
+        _annotate_validation(
+            item,
+            origin=VALIDATION_ORIGIN_CURRENT,
+            validated_head=head,
+            executed_this_run=True,
+        )
+        for item in clean_room["queries"]
+    ]
+    clean_room = _annotate_validation(
+        clean_room,
+        origin=VALIDATION_ORIGIN_CURRENT,
+        validated_head=head,
+        executed_this_run=True,
+    )
+    runtime_audit = _annotate_validation(
+        runtime_audit,
+        origin=VALIDATION_ORIGIN_CURRENT,
+        validated_head=head,
+        executed_this_run=True,
+    )
     report = {
         "decision": decision,
         "head": head,
@@ -690,7 +947,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "windows_portable_contract": "PASS",
             "external_job": "executed locally with the release commands below",
         },
-        "gates": gates,
+        "engineering_gates": engineering_gates,
+        "search_quality_status": SEARCH_QUALITY_PENDING,
+        "rerank_quality_notice": RERANK_PROVISIONAL_NOTICE,
         "clean_room": clean_room,
         "runtime_audit": runtime_audit,
         "commands": commands,
@@ -715,10 +974,19 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--work", type=Path, default=DEFAULT_WORK)
     parser.add_argument("--resume-existing", action="store_true")
+    parser.add_argument("--finalize-engineering", action="store_true")
+    parser.add_argument("--legacy-validated-head")
     parser.add_argument("--case", action="append")
     args = parser.parse_args()
     try:
-        report = asyncio.run(_resume_existing(args) if args.resume_existing else run(args))
+        if args.resume_existing and args.finalize_engineering:
+            raise RuntimeError("Choose either --resume-existing or --finalize-engineering.")
+        if args.finalize_engineering:
+            report = _finalize_existing(args)
+        elif args.resume_existing:
+            report = asyncio.run(_resume_existing(args))
+        else:
+            report = asyncio.run(run(args))
     except Exception as exc:  # noqa: BLE001 - release gate must emit NO-GO
         report = {
             "decision": "NO-GO",

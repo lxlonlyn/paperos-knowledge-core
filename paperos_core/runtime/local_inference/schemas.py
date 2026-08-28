@@ -41,8 +41,10 @@ class RerankResult(InferenceModel):
     final_rank: int = Field(gt=0)
     document_token_count: int = Field(gt=0)
     input_token_count: int = Field(gt=0)
+    effective_input_token_count: int = Field(gt=0)
     model_max_input_tokens: int = Field(gt=0)
     query_token_count: int = Field(gt=0)
+    special_prompt_token_count: int = Field(ge=0)
     truncated: bool
     window_count: int = Field(gt=0)
     winning_window_document_token_count: int = Field(gt=0)

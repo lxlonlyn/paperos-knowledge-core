@@ -116,3 +116,16 @@ This task intentionally has no previous-pipeline comparison, profile matrix,
 ablation matrix, unique-rescue benchmark, or graph/Claim cost-benefit benchmark.
 Those measurements are separate from proving that the one production
 Chunk-first architecture is structurally correct and operational end to end.
+
+## Provisional reranking quality
+
+Current reranker windowing is a temporary query-time projection. It does not
+define the final PaperOS reranking architecture. The authoritative indexed and
+Evidence unit remains the canonical Chunk; reranking does not rewrite Chunk
+text, retrieval text, embeddings, or Evidence provenance.
+
+Until the dedicated rerank optimization task is complete, semantic benchmark
+quality is reported as `PENDING_RERANK_OPTIMIZATION` and is not a release
+engineering blocker. Reports retain every historical query and gate result with
+its actual validation origin, validated commit, and whether it executed in the
+current run.

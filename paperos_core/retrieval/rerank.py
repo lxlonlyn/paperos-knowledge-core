@@ -33,8 +33,10 @@ async def rerank_candidates(
         candidate.rerank_diagnostics = RerankDiagnostics(
             document_token_count=result.document_token_count,
             input_token_count=result.input_token_count,
+            effective_input_token_count=result.effective_input_token_count,
             model_max_input_tokens=result.model_max_input_tokens,
             query_token_count=result.query_token_count,
+            special_prompt_token_count=result.special_prompt_token_count,
             truncated=result.truncated,
             window_count=result.window_count,
             winning_window_document_token_count=result.winning_window_document_token_count,

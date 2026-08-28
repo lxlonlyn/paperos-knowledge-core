@@ -5,6 +5,7 @@ import {loadConfig} from "./config.js";
 import {EmbeddingService} from "./embedding.js";
 import {errorPayload, RequestError} from "./errors.js";
 import {RerankerService} from "./reranker.js";
+import {RerankerInputTooLargeError} from "./reranker_input.js";
 
 interface EmbeddingRequest {
   input: string | string[];
@@ -171,12 +172,20 @@ const server = createServer(async (request, response) => {
         Number.isSafeInteger(body.limit) && (body.limit ?? 0) > 0
           ? Math.min(body.limit!, body.texts.length)
           : body.texts.length;
-      const results = await reranker.rank(
-        body.query,
-        body.candidate_ids,
-        body.texts,
-        limit,
-      );
+      let results;
+      try {
+        results = await reranker.rank(
+          body.query,
+          body.candidate_ids,
+          body.texts,
+          limit,
+        );
+      } catch (error) {
+        if (error instanceof RerankerInputTooLargeError) {
+          throw new RequestError(error.message, 422, error.code);
+        }
+        throw error;
+      }
       send(response, 200, {
         model: config.rerankerModelName,
         results: results.map((item) => ({
@@ -186,8 +195,10 @@ const server = createServer(async (request, response) => {
           final_rank: item.finalRank,
           document_token_count: item.documentTokenCount,
           input_token_count: item.inputTokenCount,
+          effective_input_token_count: item.effectiveInputTokenCount,
           model_max_input_tokens: item.modelMaxInputTokens,
           query_token_count: item.queryTokenCount,
+          special_prompt_token_count: item.specialPromptTokenCount,
           truncated: item.truncated,
           window_count: item.windowCount,
           winning_window_document_token_count: item.winningWindowDocumentTokenCount,
