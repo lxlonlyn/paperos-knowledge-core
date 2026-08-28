@@ -6,9 +6,9 @@ The custom pipeline runs inside ``cognee.run_custom_pipeline``:
     -> DataPointMappingTask
     -> add_data_points
 
-PaperOS decides the academic chunking rules and the enrichment schema; Cognee
-executes the pipeline, provides the tokenizer and token limits, and owns the
-final DataPoint write.
+PaperOS decides the academic chunking rules, authoritative token estimate, and
+enrichment schema; Cognee executes the pipeline and owns the final DataPoint
+write.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from typing import Any
 from paperos_core.adapters.cognee.compat import (
     CogneeCompatibilityAdapter,
     cognee_uuid,
-    resolve_cognee_tokenizer,
     task,
 )
 from paperos_core.adapters.cognee.llm import LLMClient
@@ -39,6 +38,7 @@ from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.chunking import build_chunks
 from paperos_core.ingestion.retrieval_text import bind_scholarly_citations
 from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
+from paperos_core.ingestion.tokenization import AUTHORITATIVE_CHUNK_TOKENIZER
 
 
 @dataclass(slots=True)
@@ -72,7 +72,6 @@ async def academic_chunk_task(
     chunk_overlap_tokens: int,
 ) -> list[ChunkedBundle]:
     """Produce canonical chunks from sections/elements and persist them."""
-    tokenizer = resolve_cognee_tokenizer()
     results: list[ChunkedBundle] = []
     for item in data:
         bundle = getattr(item, "bundle", item)
@@ -85,7 +84,7 @@ async def academic_chunk_task(
             target_tokens=chunk_target_tokens,
             hard_max_tokens=chunk_hard_max_tokens,
             overlap_tokens=chunk_overlap_tokens,
-            tokenizer=tokenizer,
+            tokenizer=AUTHORITATIVE_CHUNK_TOKENIZER,
         )
         repository.save_chunks(bundle.snapshot.id, chunks, mentions)
         results.append(

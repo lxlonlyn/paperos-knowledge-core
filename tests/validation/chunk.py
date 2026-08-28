@@ -911,6 +911,7 @@ import json
 import statistics
 import subprocess
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -938,23 +939,11 @@ from paperos_core.ingestion.sentence_units import (
     figure_caption_element_ids,
     resolve_major_section_id,
 )
-
-
-class review___WhitespaceTokenizer:
-
-    def count_tokens(self, text: str) -> int:
-        if not text.strip():
-            return 0
-        return max(1, len(text.split()))
+from paperos_core.ingestion.tokenization import AUTHORITATIVE_CHUNK_TOKENIZER
 
 
 def review___resolve_tokenizer() -> Any:
-    try:
-        from paperos_core.adapters.cognee.compat import resolve_cognee_tokenizer
-
-        return resolve_cognee_tokenizer()
-    except ImportError:
-        return review___WhitespaceTokenizer()
+    return AUTHORITATIVE_CHUNK_TOKENIZER
 
 
 review__DEFAULT_RUN_DIR = Path("data/validation/chunk/output")
@@ -1218,6 +1207,7 @@ def review___projection_metrics(
     text_duplication = 0
     figure_lost = 0
     figure_placeholder_count = 0
+    figure_placeholder_part_count = 0
     figure_page_or_id_errors = 0
     figure_description_loss = 0
     figure_description_duplication = 0
@@ -1264,7 +1254,8 @@ def review___projection_metrics(
             if span.element_id == element.id
             and span.text.startswith("[FIGURE ")
         ]
-        figure_placeholder_count += len(markers)
+        figure_placeholder_count += int(bool(markers))
+        figure_placeholder_part_count += len(markers)
         if not markers:
             figure_lost += 1
             continue
@@ -1348,6 +1339,7 @@ def review___projection_metrics(
     return {
         "figure_input_count": len(figures),
         "figure_placeholder_count": figure_placeholder_count,
+        "figure_placeholder_part_count": figure_placeholder_part_count,
         "figure_lost_count": figure_lost,
         "figure_caption_provenance_span_count": bound_caption_spans,
         "figure_caption_duplication_count": bound_caption_duplications,
@@ -1704,6 +1696,7 @@ async def review__run(args: argparse.Namespace) -> dict[str, Any]:
     metric_keys = (
         "figure_input_count",
         "figure_placeholder_count",
+        "figure_placeholder_part_count",
         "figure_lost_count",
         "figure_caption_duplication_count",
         "figure_provenance_error_count",
@@ -3312,6 +3305,104 @@ def boundaries__synthetic_figure_hard_max_contract() -> dict[str, Any]:
     }
 
 
+def boundaries__authoritative_tokenizer_contract() -> dict[str, Any]:
+    """Prove production chunk sizing is independent of Cognee's resolver."""
+
+    from paperos_core.adapters.cognee import compat
+    from paperos_core.adapters.cognee.pipeline_tasks import academic_chunk_task
+
+    failures: list[str] = []
+    tokenizer = review___resolve_tokenizer()
+    samples = ("plain ASCII", "论文证据", "math: α+β", "")
+    for sample in samples:
+        expected = len(sample.encode("utf-8"))
+        first = tokenizer.count_tokens(sample)
+        second = review___resolve_tokenizer().count_tokens(sample)
+        if first != expected or second != expected:
+            failures.append(f"nondeterministic_utf8_bound:{sample!r}:{first}:{second}")
+
+    section = Section(
+        id="tokenizer_section",
+        document_id="tokenizer_document",
+        canonical_snapshot_id="tokenizer_snapshot",
+        title="Tokenizer",
+        level=1,
+        order=0,
+        path="Tokenizer",
+    )
+    element = Element(
+        id="tokenizer_element",
+        document_id="tokenizer_document",
+        canonical_snapshot_id="tokenizer_snapshot",
+        element_type=ElementType.PARAGRAPH,
+        order=0,
+        section_id=section.id,
+        text="ASCII evidence. 中文证据。" * 20,
+    )
+    document = Document(
+        id="tokenizer_document",
+        source_file_id="tokenizer_source",
+        parse_run_id="tokenizer_parse",
+        canonical_snapshot_id="tokenizer_snapshot",
+        language="en",
+        title="Authoritative tokenizer contract",
+    )
+
+    def forbidden_cognee_resolver() -> Any:
+        raise AssertionError("Cognee tokenizer resolver must not size PaperOS chunks")
+
+    original_resolver = compat.resolve_cognee_tokenizer
+    try:
+        compat.resolve_cognee_tokenizer = forbidden_cognee_resolver
+        with tempfile.TemporaryDirectory(prefix="paperos-tokenizer-contract-") as root:
+            paths = build_data_paths(Path(root))
+            bundle = CanonicalBundle(
+                snapshot=CanonicalSnapshot(
+                    id="tokenizer_snapshot",
+                    source_file_id="tokenizer_source",
+                    parse_run_id="tokenizer_parse",
+                    document_id=document.id,
+                    manifest_path=paths.canonical / "manifest.json",
+                ),
+                document=document,
+                sections=[section],
+                elements=[element],
+                references=[],
+                warnings=[],
+            )
+            result = asyncio.run(
+                academic_chunk_task(
+                    [bundle],
+                    repository=CanonicalRepository(paths),
+                    chunk_target_tokens=55,
+                    chunk_hard_max_tokens=75,
+                    chunk_overlap_tokens=0,
+                )
+            )
+    except Exception as exc:  # validation contract reports the exact failure
+        failures.append(f"production_pipeline:{type(exc).__name__}:{exc}")
+        result = []
+    finally:
+        compat.resolve_cognee_tokenizer = original_resolver
+
+    chunks = result[0].projection.chunks if result else []
+    if not chunks:
+        failures.append("production_pipeline:no_chunks")
+    for chunk in chunks:
+        expected = len(chunk.text.encode("utf-8"))
+        if chunk.token_count != expected:
+            failures.append(
+                f"production_token_count:{chunk.id}:{chunk.token_count}:{expected}"
+            )
+        if expected > 75:
+            failures.append(f"production_hard_max:{chunk.id}:{expected}")
+    return {
+        "authoritative_tokenizer_contract_errors": len(failures),
+        "authoritative_tokenizer_failures": failures,
+        "authoritative_tokenizer_chunk_count": len(chunks),
+    }
+
+
 def boundaries__main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -3343,6 +3434,7 @@ def boundaries__main() -> int:
         )
     synthetic = boundaries__synthetic_multi_part_table_contract()
     figure_hard_max = boundaries__synthetic_figure_hard_max_contract()
+    authoritative_tokenizer = boundaries__authoritative_tokenizer_contract()
     report = {
         "git_commit": boundaries___git_commit(),
         "paper_count": len(paper_results),
@@ -3364,6 +3456,7 @@ def boundaries__main() -> int:
         ),
         **synthetic,
         **figure_hard_max,
+        **authoritative_tokenizer,
         "papers": paper_results,
     }
     report["pass"] = all(
@@ -3375,6 +3468,7 @@ def boundaries__main() -> int:
                 "table_part_emergency_misclassification",
                 "multi_part_table_provenance_errors",
                 "figure_hard_max_contract_errors",
+                "authoritative_tokenizer_contract_errors",
             )
         )
     )

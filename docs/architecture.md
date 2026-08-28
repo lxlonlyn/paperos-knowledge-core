@@ -206,8 +206,10 @@ brackets inside math are not prose citation candidates.
 context such as paper title, section breadcrumb, and resolved referenced-work
 identity belongs in `retrieval_text`, which is the lexical/vector projection.
 
-PaperOS decides the academic chunking and scholarly identity rules; Cognee
-executes the pipeline, provides the injected tokenizer, and owns the final
+PaperOS decides the academic chunking and scholarly identity rules. Its
+authoritative hard-max estimate is deterministic UTF-8 byte length, a
+conservative upper bound that does not depend on Cognee's model resolver or
+optional tokenizer packages. Cognee executes the pipeline and owns the final
 DataPoint write. A permanent random Work ID is allocated once in
 `registry.db`; DOI, arXiv, and normalized bibliographic fields are reconciliation
 attributes rather than ID material. Document and Reference links plus merge
