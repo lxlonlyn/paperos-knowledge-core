@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -15,11 +17,13 @@ from urllib.parse import urlsplit
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from paperos_core.config import load_settings
 from paperos_core.errors import ConfigurationError
 from paperos_core.indexes.lexical_store import LexicalStore
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.parser_artifacts import ParserArtifactRepository
 from paperos_core.ingestion.registry import SourceRegistry
+from paperos_core.locations import PROJECT_ROOT
 from paperos_core.paths import build_data_paths
 from paperos_core.storage.path_refs import DataPathCodec
 
@@ -92,6 +96,41 @@ def codec_contract() -> dict[str, object]:
         "status": "passed",
         "posix_separator": True,
         "absolute_and_escape_rejected": True,
+    }
+
+
+def cross_platform_smoke_contract() -> dict[str, object]:
+    """Load the shipped config and public entry modules from an unrelated cwd."""
+
+    modules = (
+        "paperos_core.api.app",
+        "paperos_core.documents",
+        "paperos_core.jobs.worker",
+        "paperos_core.retrieval.service",
+        "server",
+    )
+    original_cwd = Path.cwd()
+    with tempfile.TemporaryDirectory(prefix="paperos-portable-smoke-") as directory:
+        try:
+            os.chdir(directory)
+            settings = load_settings(PROJECT_ROOT / "config/paperos.example.toml")
+            for module in modules:
+                importlib.import_module(module)
+        finally:
+            os.chdir(original_cwd)
+    _require(settings.config_path == PROJECT_ROOT / "config/paperos.example.toml", "Example config path changed.")
+    _require(settings.data_dir == PROJECT_ROOT / "data", "Example data path is cwd-dependent.")
+    _require(
+        settings.local_inference.embedding_model_path
+        == PROJECT_ROOT / "data/models/embedding/embeddinggemma-300M-Q8_0.gguf",
+        "Example embedding model path is cwd-dependent.",
+    )
+    _require(settings.local_inference.enabled, "Example local endpoint is not runnable.")
+    return {
+        "status": "passed",
+        "example_config": True,
+        "cwd_independent": True,
+        "imported_modules": list(modules),
     }
 
 
@@ -254,7 +293,10 @@ def main() -> None:
     parser.add_argument("--old-data-root")
     parser.add_argument("--relocate", action="store_true")
     args = parser.parse_args()
-    report: dict[str, object] = {"codec": codec_contract()}
+    report: dict[str, object] = {
+        "codec": codec_contract(),
+        "cross_platform_smoke": cross_platform_smoke_contract(),
+    }
     if args.data_dir is not None:
         root = args.data_dir.expanduser().resolve(strict=False)
         report["sqlite"] = sqlite_contract(root)

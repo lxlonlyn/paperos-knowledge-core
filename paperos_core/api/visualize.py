@@ -21,7 +21,7 @@ async def visualize_dataset(
     dataset_name = (dataset or application.settings.dataset).strip()
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
-    snapshot_ids: list[str] = []
+    active_snapshot_ids: list[str] = []
     for bundle in application.canonical_repository.list_active_bundles():
         if bundle.snapshot.dataset_id != dataset_name:
             continue
@@ -32,7 +32,7 @@ async def visualize_dataset(
             graph = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        snapshot_ids.append(bundle.snapshot.id)
+        active_snapshot_ids.append(bundle.snapshot.id)
         for raw in graph.get("nodes", []):
             if not isinstance(raw, dict):
                 continue
@@ -56,7 +56,7 @@ async def visualize_dataset(
             })
     return {
         "dataset": dataset_name,
-        "snapshot_ids": snapshot_ids,
+        "active_snapshot_ids": active_snapshot_ids,
         "nodes": list(nodes.values()),
         "edges": edges,
     }

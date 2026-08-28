@@ -147,22 +147,29 @@ Application lifecycle can start or stop the child process.
 - `tests/contract/test_scholarly_identity.py`: fast retained-canonical contract
   for repeated Work resolution, reconciliation, redirects, external provenance,
   and citation-backbone reprojection; it is not a PDF reprocess test.
-- `tests/validation/scholarly_work_reference_acceptance.py`: resumable four-PDF
+- `tests/validation/scholarly_work_reference.py`: resumable four-PDF
   acceptance for provisional-to-ingested identity reuse, real reprocess, formal
   rebuild, and live Cognee citation-backbone readback.
 - `scripts/backfill_scholarly_works.py`: deterministic registry backfill from
   retained canonical snapshots without invoking MinerU, LLM, or Cognee rebuild.
-- `scripts/debug_pipeline.py`: real retained-stage pipeline debugging.
 - `scripts/agent_client.py`: HTTP client example for agents and integrations.
 
-PaperOS does not use pytest, mocks, fabricated papers, or prerecorded downstream
-results. Acceptance exercises behavior; permanent contracts protect boundaries.
+Release and acceptance entry points run directly with Python; they do not use
+pytest, fabricated papers, mock vector hits, or prerecorded downstream results.
+Acceptance exercises production behavior, while permanent contracts protect
+the corresponding boundaries.
 
 Run the complete acceptance path with the authoritative validation corpus:
 
 ```bash
 python tests/validation/retrieval.py --rebuild
 ```
+
+Cross-platform base gates use the same direct commands as
+`.github/workflows/cross-platform.yml`: compileall, full-repository Ruff,
+`mypy paperos_core`, the example-config/portable-path smoke contract, and the
+contracts that do not require external services. Real Cognee/vector contracts
+run only in the explicit Linux external-boundary job.
 See [docs/architecture.md](docs/architecture.md),
 [docs/data_model.md](docs/data_model.md), and
 [docs/interfaces.md](docs/interfaces.md) for the binding internal contracts.

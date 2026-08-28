@@ -861,6 +861,11 @@ async def local_revision_contract(root: Path) -> dict[str, object]:
     detail_payload = detail.model_dump(mode="json")
     _require("snapshot_ids" not in detail_payload, "Inspect exposed snapshot history")
     _require(
+        "deleted" not in listed[0].model_dump(mode="json")
+        and "deleted" not in detail_payload,
+        "Document API exposed obsolete deleted state",
+    )
+    _require(
         detail.canonical_snapshot_id == first.snapshot.id,
         "Inspect did not select active",
     )
@@ -896,7 +901,7 @@ async def local_revision_contract(root: Path) -> dict[str, object]:
         dataset=None,
     )
     _require(
-        visual_before["snapshot_ids"] == [first.snapshot.id],
+        visual_before["active_snapshot_ids"] == [first.snapshot.id],
         "Visualize exposed inactive candidate",
     )
 
@@ -929,7 +934,7 @@ async def local_revision_contract(root: Path) -> dict[str, object]:
         dataset=None,
     )
     _require(
-        visual_after["snapshot_ids"] == [second.snapshot.id],
+        visual_after["active_snapshot_ids"] == [second.snapshot.id],
         "Visualize did not switch atomically to new active",
     )
 
@@ -1010,7 +1015,7 @@ async def local_revision_contract(root: Path) -> dict[str, object]:
         dataset=None,
     )
     _require(
-        visual_deleted["snapshot_ids"] == [],
+        visual_deleted["active_snapshot_ids"] == [],
         "Deleted document remained visualization-visible",
     )
     deleted_query = await _no_active_query(paths, repository, registry, indexes)
@@ -1025,6 +1030,7 @@ async def local_revision_contract(root: Path) -> dict[str, object]:
         "cleanup_first_count": len(first_cleanup),
         "cleanup_second_count": len(second_cleanup),
         "document_history_hidden": "snapshot_ids" not in detail_payload,
+        "document_deleted_state_hidden": "deleted" not in detail_payload,
         "old_canonical_removed": True,
         "delete_active_pointer_count": raw_pointer_count,
         "delete_no_active_query": deleted_query,

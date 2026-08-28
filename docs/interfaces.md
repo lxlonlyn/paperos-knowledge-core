@@ -59,7 +59,14 @@ POST   /api/v1/rebuild                            -> 202
 ```
 
 Logical delete removes active derived projections while retaining immutable
-evidence. Reprocess and rebuild execute through the internal queue.
+evidence. Deleted documents are absent from list, inspect, query, health, and
+visualization responses. Document list/inspect expose only the singular current
+`canonical_snapshot_id`; no history or deleted-document query parameter exists.
+Reprocess and rebuild execute through the internal queue.
+
+`GET /api/v1/visualize` returns graph projections for current active revisions
+only. Its `active_snapshot_ids` field names that scope explicitly; candidate,
+retired, and tombstoned revisions are not exposed.
 
 ### Feedback and improvement
 

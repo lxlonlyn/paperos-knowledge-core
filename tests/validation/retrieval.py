@@ -7,6 +7,7 @@ import asyncio
 import json
 import shutil
 import sys
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -858,13 +859,14 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     await application.start()
     try:
         ingestion_results: dict[str, Any] = {}
+        ingestion_seconds: dict[str, float] = {}
         work_by_symbol: dict[str, str] = {}
         document_by_symbol: dict[str, str] = {}
         retained_by_filename = {
             application.registry.get_source(
                 bundle.document.source_file_id
             ).original_filename: bundle
-            for bundle in application.canonical_repository.list_bundles()
+            for bundle in application.canonical_repository.list_active_bundles()
             if bundle.snapshot.dataset_id == args.dataset
         }
         for symbol in ingest_symbols:
@@ -874,13 +876,16 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 raise RuntimeError(f"Authoritative corpus PDF is missing: {pdf}")
             retained = retained_by_filename.get(pdf.name)
             if retained is None:
+                started = time.perf_counter()
                 result = await application.services.ingestion.ingest_pdf_to_knowledge(
                     pdf,
                     dataset=args.dataset,
                 )
+                ingestion_seconds[symbol] = round(time.perf_counter() - started, 3)
                 ingestion_results[symbol] = result
                 document_id = result.canonical_result.canonical.document.id
             else:
+                ingestion_seconds[symbol] = 0.0
                 ingestion_results[symbol] = retained
                 document_id = retained.document.id
             work = application.scholarly_registry.work_for_document(document_id)
@@ -1117,6 +1122,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "ingest_order": ingest_symbols,
             "runtime_work_ids": work_by_symbol,
             "runtime_document_ids": document_by_symbol,
+            "pdf_to_active_seconds": ingestion_seconds,
             "semantic_relation_types": sorted(item.value for item in SEMANTIC_RELATION_TYPES),
             "default_search": {"status": default_status},
             "explicit_filter": {"status": explicit_status},

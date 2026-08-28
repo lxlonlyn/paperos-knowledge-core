@@ -131,12 +131,11 @@ def _is_prose_numeric_citation(text: str, start: int, end: int) -> bool:
         return True
     if "," in inner:
         parts = [part.strip() for part in inner.split(",") if part.strip()]
-        if parts and all(re.fullmatch(r"\d{1,4}[a-d]?", p, flags=re.I) for p in parts):
-            return True
-        return False
-    if _CITATION_LIST_RE.match(compact):
-        return True
-    return False
+        return bool(parts) and all(
+            re.fullmatch(r"\d{1,4}[a-d]?", part, flags=re.IGNORECASE)
+            for part in parts
+        )
+    return bool(_CITATION_LIST_RE.match(compact))
 
 
 def bracket_inner(text: str, domain: InlineDomain) -> str:
@@ -185,9 +184,7 @@ def _starts_inline_math(text: str, index: int) -> bool:
     nxt = text[index + 1] if index + 1 < len(text) else ""
     if nxt in {" ", ".", ",", ";", ":"}:
         return False
-    if nxt.isalpha() and nxt.islower():
-        return False
-    return True
+    return not (nxt.isalpha() and nxt.islower())
 
 
 def _scan_inline_math(text: str, index: int) -> int | None:

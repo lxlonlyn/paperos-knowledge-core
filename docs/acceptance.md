@@ -88,16 +88,29 @@ cleanup.
 
 ## Permanent Chunk-first contracts
 
-Run the fast contracts independently of external services:
+Run the release base contracts independently of external services and without
+pytest:
 
 ```bash
-conda run -n paperos python -m pytest tests/contract -q
+python tests/contract/test_runtime_query_contracts.py
+python tests/contract/test_portable_data_paths.py
+python tests/contract/test_citation_resolution.py
+python tests/contract/test_document_regions.py
+python tests/contract/test_chunk_boundaries.py
 conda run -n paperos python tests/contract/test_cognee_retrieval_boundary.py
 ```
 
-They enforce the production retrieval boundary, mandatory dedup, explicit
-expansion behavior, canonical evidence rehydration, trace fields, and rejection
-of removed request fields such as `profile`.
+The real active-revision and pre-truncation vector-filter contracts additionally
+require the Linux external Cognee/local-model boundary:
+
+```bash
+conda run -n paperos python tests/contract/test_active_canonical_revision.py
+conda run -n paperos python tests/contract/test_query_filter_contracts.py
+```
+
+Together they enforce the production retrieval boundary, active-only lifecycle,
+mandatory dedup, explicit hard filters, canonical evidence rehydration, trace
+fields, and rejection of removed request fields such as `profile`.
 
 This task intentionally has no previous-pipeline comparison, profile matrix,
 ablation matrix, unique-rescue benchmark, or graph/Claim cost-benefit benchmark.

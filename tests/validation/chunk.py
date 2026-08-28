@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 "Build MinerU-anchored citation Gold v3 by an independent source audit.\n\nThis script intentionally imports no ``paperos_core`` citation code. Historical\nGold v2 supplies reviewed target identities only; every occurrence is located\nagain in raw MinerU fields and bibliography markers in ``ref_text`` are dropped.\n"
@@ -49,7 +48,7 @@ def gold_builder___mineru_content(
         path = parse_dir / artifact["path"]
         payload = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(payload, list) and any(
-            (isinstance(row, dict) and "page_idx" in row for row in payload)
+            isinstance(row, dict) and "page_idx" in row for row in payload
         ):
             return payload
     raise RuntimeError(f"""No MinerU content_list for {source_id }""")
@@ -229,10 +228,8 @@ def gold_builder___locate_group(
     locator = group.get("locator") or {}
     preferred_item = element_item.get(locator.get("element_id", ""))
     if preferred_item is not None and any(
-        (
-            field["source_item"] == preferred_item and field["item_type"] == "ref_text"
-            for field in fields
-        )
+        field["source_item"] == preferred_item and field["item_type"] == "ref_text"
+        for field in fields
     ):
         return (None, "DROPPED_REFERENCE_MARKER")
     candidates: list[tuple[float, dict[str, Any], int, int]] = []
@@ -627,7 +624,7 @@ def gold_builder__build(args: argparse.Namespace) -> dict[str, Any]:
             "style": paper["style"],
             "expected_citation_span_count": len(occurrences),
             "expected_atomic_target_count": sum(
-                (len(item["targets"]) for item in occurrences)
+                len(item["targets"]) for item in occurrences
             ),
             "references": references,
             "occurrences": occurrences,
@@ -635,17 +632,15 @@ def gold_builder__build(args: argparse.Namespace) -> dict[str, Any]:
         audit["papers"][paper_key] = {
             "audited": len(occurrences),
             "dropped_reference_markers": sum(
-                (item["decision"] == "DROPPED_REFERENCE_MARKER" for item in decisions)
+                item["decision"] == "DROPPED_REFERENCE_MARKER" for item in decisions
             ),
             "dropped_container_headings": sum(
-                (item["decision"] == "DROPPED_CONTAINER_HEADING" for item in decisions)
+                item["decision"] == "DROPPED_CONTAINER_HEADING" for item in decisions
             ),
             "discovered_source_citations": len(discovered),
             "source_failures": sum(
-                (
-                    item["decision"] == "SOURCE_OCCURRENCE_NOT_FOUND"
-                    for item in decisions
-                )
+                item["decision"] == "SOURCE_OCCURRENCE_NOT_FOUND"
+                for item in decisions
             ),
             "decisions": decisions,
         }
@@ -721,10 +716,9 @@ def gold_builder__main() -> int:
 
 
 "Rebuild canonical snapshots from cached MinerU parsed artifacts (no re-OCR)."
-import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+
 from paperos_core.adapters.mineru.mapper import MinerUCanonicalMapper
 from paperos_core.domain.documents import SourceFile
 from paperos_core.domain.enums import ParserArtifactType, ParseRunStatus
@@ -894,27 +888,22 @@ def rebuild___overwrite_snapshot(repository: CanonicalRepository, bundle) -> Non
 def rebuild__isogeometric_regression_text(bundle_elements: list) -> dict[str, bool]:
     """Check Isogeometric paragraph markers survived canonical mapping."""
     combined = "\n".join(
-        (
-            element.text or element.markdown or ""
-            for element in bundle_elements
-            if element.text or element.markdown
-        )
+        element.text or element.markdown or ""
+        for element in bundle_elements
+        if element.text or element.markdown
     )
     markers = ["[29]", "[32]", "[30]", "[31]", "[34]", "T <", "J_W", "16\\pi", "16π"]
     return {marker: marker in combined for marker in markers}
 
 
 "Real-PDF chunk corpus review: MinerU → Canonical → production chunk builder.\n\nAll runtime data MUST stay under a validation run root (never production ``data/``).\n\n    PYTHONPATH=. python tests/validation/chunk.py review \\\n      --run-dir data/validation/chunk/output\n"
-import argparse
 import asyncio
-import json
 import statistics
 import subprocess
 import sys
 import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any
 
 review__REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(review__REPOSITORY_ROOT))
@@ -928,11 +917,11 @@ from paperos_core.domain.canonical import (
     Section,
 )
 from paperos_core.domain.enums import ElementType
-from paperos_core.ingestion.chunk_markdown import render_chunk_review_markdown
-from paperos_core.ingestion.chunking import build_chunks
 from paperos_core.domain.ids import CHUNKING_VERSION
 from paperos_core.ingestion.chunk_dp import TINY_TOKEN_THRESHOLD
 from paperos_core.ingestion.chunk_eligibility import classify_chunk_eligibility
+from paperos_core.ingestion.chunk_markdown import render_chunk_review_markdown
+from paperos_core.ingestion.chunking import build_chunks
 from paperos_core.ingestion.document_regions import build_document_regions
 from paperos_core.ingestion.sentence_units import (
     element_text,
@@ -986,7 +975,7 @@ def review___selected_pdfs(corpus_dir: Path, papers_config: Path) -> list[Path]:
 
 def review___slugify(name: str) -> str:
     stem = Path(name).stem
-    return "".join((char if char.isalnum() else "_" for char in stem)).strip("_")[:120]
+    return "".join(char if char.isalnum() else "_" for char in stem).strip("_")[:120]
 
 
 def review___git_commit() -> str | None:
@@ -1021,11 +1010,11 @@ def review___citation_metrics(mentions: list[Any]) -> dict[str, Any]:
     for group in spans.values():
         span_status[group[0].span_resolution_status] += 1
     atomic_resolved_reference = sum(
-        (1 for mention in mentions if mention.reference_entry_id)
+        1 for mention in mentions if mention.reference_entry_id
     )
-    atomic_resolved_work = sum((1 for mention in mentions if mention.resolved_work_id))
+    atomic_resolved_work = sum(1 for mention in mentions if mention.resolved_work_id)
     failure_reasons = Counter(
-        (mention.failure_reason for mention in mentions if mention.failure_reason)
+        mention.failure_reason for mention in mentions if mention.failure_reason
     )
     unresolved_targets = [
         {
@@ -1067,7 +1056,7 @@ def review___validate_chunks(
                 f"""hard_max_violation:{chunk .id }:{chunk .token_count }>{hard_max_tokens }"""
             )
         if chunk.retrieval_text and any(
-            (span.text not in chunk.retrieval_text for span in chunk.spans)
+            span.text not in chunk.retrieval_text for span in chunk.spans
         ):
             errors.append(f"""retrieval_missing_authoritative:{chunk .id }""")
         if chunk.text.startswith("Paper:") or "\nSection:\n" in chunk.text[:80]:
@@ -1480,12 +1469,12 @@ def review___process_bundle(
             }
         )
         token_counts = [chunk.token_count or 0 for chunk in chunks]
-        boundaries = Counter((chunk.metadata.get("end_boundary") for chunk in chunks))
+        boundaries = Counter(chunk.metadata.get("end_boundary") for chunk in chunks)
         real_emergency_splits = sum(
-            (int(chunk.metadata.get("real_emergency_splits") or 0) for chunk in chunks)
+            int(chunk.metadata.get("real_emergency_splits") or 0) for chunk in chunks
         )
         table_parts = sum(
-            (int(chunk.metadata.get("table_parts") or 0) for chunk in chunks)
+            int(chunk.metadata.get("table_parts") or 0) for chunk in chunks
         )
         ref_chunks = [
             element
@@ -1538,7 +1527,7 @@ def review___process_bundle(
                 "median_tokens": statistics.median(token_counts) if token_counts else 0,
                 "max_tokens": max(token_counts) if token_counts else 0,
                 "tiny_chunks": sum(
-                    (1 for count in token_counts if count < TINY_TOKEN_THRESHOLD)
+                    1 for count in token_counts if count < TINY_TOKEN_THRESHOLD
                 ),
                 "emergency_splits": real_emergency_splits,
                 "real_emergency_splits": real_emergency_splits,
@@ -1556,7 +1545,7 @@ def review___process_bundle(
                 **citation_stats,
             }
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - validation report captures all failures
         result.update(
             {"status": "ERROR", "error": f"""{type (exc ).__name__ }: {exc }"""}
         )
@@ -1583,7 +1572,7 @@ async def review___process_pdf(
             output_dir=output_dir,
             overlap_tokens=overlap_tokens,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - validation report captures all failures
         result.update(
             {"status": "ERROR", "error": f"""{type (exc ).__name__ }: {exc }"""}
         )
@@ -1682,13 +1671,13 @@ async def review__run(args: argparse.Namespace) -> dict[str, Any]:
         "chunk_target_tokens": settings.ingestion.chunk_target_tokens,
         "chunk_hard_max_tokens": settings.ingestion.chunk_hard_max_tokens,
         "pdf_count": len(rows),
-        "pass_count": sum((1 for row in rows if row.get("status") == "PASS")),
+        "pass_count": sum(1 for row in rows if row.get("status") == "PASS"),
         "structure_only_pass_count": sum(
-            (1 for row in rows if row.get("status") == "PASS")
+            1 for row in rows if row.get("status") == "PASS"
         ),
         "overall_status": (
             "STRUCTURE_ONLY_PASS"
-            if rows and all((row.get("status") == "PASS" for row in rows))
+            if rows and all(row.get("status") == "PASS" for row in rows)
             else "FAIL"
         ),
         "results": rows,
@@ -1744,16 +1733,24 @@ async def review__run(args: argparse.Namespace) -> dict[str, Any]:
         f"Papers: {summary['pdf_count']}",
         f"Maximum Chunk tokens: {summary['max_chunk_tokens']}",
         f"Hard-max violations: {summary['hard_max_violation_count']}",
-        f"Figure inputs/placeholders/lost: {summary['figure_input_count']}/"
-        f"{summary['figure_placeholder_count']}/{summary['figure_lost_count']}",
+        (
+            f"Figure inputs/placeholders/lost: {summary['figure_input_count']}/"
+            f"{summary['figure_placeholder_count']}/{summary['figure_lost_count']}"
+        ),
         f"Figure caption duplications: {summary['figure_caption_duplication_count']}",
-        f"Table/Equation/Citation counts: {summary['table_input_count']}/"
-        f"{summary['equation_input_count']}/{summary['citation_mention_count']}",
-        f"Text loss/duplication: {summary['text_loss_count']}/"
-        f"{summary['text_duplication_count']}",
+        (
+            f"Table/Equation/Citation counts: {summary['table_input_count']}/"
+            f"{summary['equation_input_count']}/{summary['citation_mention_count']}"
+        ),
+        (
+            f"Text loss/duplication: {summary['text_loss_count']}/"
+            f"{summary['text_duplication_count']}"
+        ),
         f"Section cross-boundary count: {summary['section_cross_boundary_count']}",
-        f"Fallback splits: {summary['fallback_split_count']} "
-        f"{summary['fallback_split_reasons']}",
+        (
+            f"Fallback splits: {summary['fallback_split_count']} "
+            f"{summary['fallback_split_reasons']}"
+        ),
         "",
         "## Papers",
         "",
@@ -1762,14 +1759,20 @@ async def review__run(args: argparse.Namespace) -> dict[str, Any]:
         markdown_lines.extend(
             [
                 f"- {Path(str(row['pdf'])).name}: {row.get('status')}",
-                f"  - chunks/max tokens: {row.get('chunk_count', 0)}/"
-                f"{row.get('max_tokens', 0)}",
-                f"  - figures input/placeholders/lost: "
-                f"{row.get('figure_input_count', 0)}/"
-                f"{row.get('figure_placeholder_count', 0)}/"
-                f"{row.get('figure_lost_count', 0)}",
-                f"  - fallback splits: {row.get('fallback_split_count', 0)} "
-                f"{row.get('fallback_split_reasons', {})}",
+                (
+                    f"  - chunks/max tokens: {row.get('chunk_count', 0)}/"
+                    f"{row.get('max_tokens', 0)}"
+                ),
+                (
+                    "  - figures input/placeholders/lost: "
+                    f"{row.get('figure_input_count', 0)}/"
+                    f"{row.get('figure_placeholder_count', 0)}/"
+                    f"{row.get('figure_lost_count', 0)}"
+                ),
+                (
+                    f"  - fallback splits: {row.get('fallback_split_count', 0)} "
+                    f"{row.get('fallback_split_reasons', {})}"
+                ),
             ]
         )
     markdown_path.write_text("\n".join(markdown_lines) + "\n", encoding="utf-8")
@@ -1819,20 +1822,13 @@ def review__main() -> None:
 
 
 "Validate MinerU source fields → Canonical provenance using Gold v3 anchors."
-import argparse
-import json
 import re
-import subprocess
 import sys
-from collections import defaultdict
 from pathlib import Path
-from typing import Any
 
 source__REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(source__REPOSITORY_ROOT))
-from paperos_core.domain.enums import ElementType
 from paperos_core.ingestion.normalization import source_evidence_text
-from paperos_core.ingestion.sentence_units import element_text
 
 
 def source___git_commit() -> str | None:
@@ -2058,7 +2054,7 @@ def source__main() -> int:
             "source_id": paper["source_id"],
             "snapshot_id": bundle.snapshot.id,
             "canonical_elements_checked": sum(
-                (bool(element_text(element)) for element in bundle.elements)
+                bool(element_text(element)) for element in bundle.elements
             ),
             "gold_occurrences_checked": len(paper["occurrences"]),
             "canonical_source_loss": len(element_failures),
@@ -2070,10 +2066,10 @@ def source__main() -> int:
         "git_commit": source___git_commit(),
         "gold_version": gold.get("gold_version"),
         "canonical_source_loss": sum(
-            (item["canonical_source_loss"] for item in papers_report.values())
+            item["canonical_source_loss"] for item in papers_report.values()
         ),
         "gold_canonical_source_loss": sum(
-            (item["gold_canonical_source_loss"] for item in papers_report.values())
+            item["gold_canonical_source_loss"] for item in papers_report.values()
         ),
         "failure_count": len(failures),
         "papers": papers_report,
@@ -2094,21 +2090,11 @@ def source__main() -> int:
 
 
 "Validate canonical element text coverage by chunk authoritative spans."
-import argparse
-import json
-import subprocess
 import sys
-from collections import Counter
 from pathlib import Path
 
 coverage__REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(coverage__REPOSITORY_ROOT))
-from paperos_core.ingestion.chunk_eligibility import classify_chunk_eligibility
-from paperos_core.ingestion.document_regions import build_document_regions
-from paperos_core.ingestion.sentence_units import (
-    element_text,
-    figure_caption_element_ids,
-)
 
 
 def coverage___git_commit() -> str | None:
@@ -2379,9 +2365,9 @@ def coverage__main() -> int:
         )
     report = {
         "git_commit": coverage___git_commit(),
-        "chunk_source_holes": sum((item["chunk_source_holes"] for item in papers)),
+        "chunk_source_holes": sum(item["chunk_source_holes"] for item in papers),
         "chunk_source_overlaps": sum(
-            (item["chunk_source_overlaps"] for item in papers)
+            item["chunk_source_overlaps"] for item in papers
         ),
         "failure_count": total_failures,
         "papers": papers,
@@ -2401,13 +2387,9 @@ def coverage__main() -> int:
 
 
 "Validate DocumentRegion boundaries and preassigned CitationNamespace flow."
-import argparse
-import json
-import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
 
 regions__REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(regions__REPOSITORY_ROOT))
@@ -2416,7 +2398,6 @@ from paperos_core.ingestion.bibliography_scope import (
     REGION_REFERENCES,
 )
 from paperos_core.ingestion.document_regions import (
-    build_document_regions,
     region_for_element,
 )
 
@@ -2461,7 +2442,7 @@ def regions__validate_paper(
         span_infos = [
             element_regions.get(span["element_id"]) for span in chunk.get("spans", [])
         ]
-        if not span_infos or any((info is None for info in span_infos)):
+        if not span_infos or any(info is None for info in span_infos):
             wrong_regions += 1
             failures.append(
                 {
@@ -2510,7 +2491,7 @@ def regions__validate_paper(
                 {
                     "failure_type": FAILURE_NAMESPACE_NOT_ASSIGNED,
                     "chunk_id": chunk.get("id"),
-                    "namespaces": sorted((value or "<none>" for value in namespaces)),
+                    "namespaces": sorted(value or "<none>" for value in namespaces),
                 }
             )
         else:
@@ -2620,9 +2601,9 @@ def regions__main() -> int:
         )
     report = {
         "git_commit": regions___git_commit(),
-        "wrong_regions": sum((item["wrong_regions"] for item in papers)),
-        "wrong_namespaces": sum((item["wrong_namespaces"] for item in papers)),
-        "wrong_bibliography_scopes": sum((item["wrong_namespaces"] for item in papers)),
+        "wrong_regions": sum(item["wrong_regions"] for item in papers),
+        "wrong_namespaces": sum(item["wrong_namespaces"] for item in papers),
+        "wrong_bibliography_scopes": sum(item["wrong_namespaces"] for item in papers),
         "papers": papers,
     }
     report["pass"] = report["wrong_regions"] == 0 and report["wrong_namespaces"] == 0
@@ -2645,28 +2626,19 @@ def regions__main() -> int:
 
 
 "Validate abstract, formula-cohesion, and table-part chunk contracts."
-import argparse
-import json
-import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 boundaries__REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(boundaries__REPOSITORY_ROOT))
-from paperos_core.domain.canonical import Document, Element, Section
-from paperos_core.domain.enums import ElementType
-from paperos_core.ingestion.chunk_eligibility import classify_chunk_eligibility
-from paperos_core.ingestion.chunking import _is_subsection_boundary, build_chunks
+from paperos_core.ingestion.chunking import _is_subsection_boundary
 from paperos_core.ingestion.document_regions import (
-    build_document_regions,
     region_id_for_element,
 )
 from paperos_core.ingestion.inline_domains import scan_inline_domains
 from paperos_core.ingestion.sentence_units import (
     SentenceUnit,
     formula_cohesion_boundary,
-    resolve_major_section_id,
     units_for_element,
 )
 
@@ -2752,7 +2724,7 @@ def boundaries___paper_contracts(
         if (
             infos
             and all(
-                (info is not None and info.region_type == "abstract" for info in infos)
+                info is not None and info.region_type == "abstract" for info in infos
             )
             and (chunk.get("document_region") != "abstract")
         ):
@@ -2790,7 +2762,7 @@ def boundaries___paper_contracts(
             ):
                 group_end += 1
             group = units[group_start:group_end]
-            if sum((unit.tokens for unit in group)) > hard_max_tokens:
+            if sum(unit.tokens for unit in group) > hard_max_tokens:
                 continue
             cohesion_cases += 1
             shared_chunks = span_chunks.get(
@@ -2801,7 +2773,7 @@ def boundaries___paper_contracts(
                     {
                         "left_span_id": units[index].span_id,
                         "right_span_id": units[index + 1].span_id,
-                        "group_tokens": sum((unit.tokens for unit in group)),
+                        "group_tokens": sum(unit.tokens for unit in group),
                     }
                 )
     metadata_errors: list[dict[str, Any]] = []
@@ -2813,8 +2785,8 @@ def boundaries___paper_contracts(
             for span in chunk.get("spans", [])
             if span["id"] in unit_by_span
         ]
-        expected_table = sum((unit.split_type == "TABLE_PART" for unit in chunk_units))
-        expected_emergency = sum((unit.emergency_split for unit in chunk_units))
+        expected_table = sum(unit.split_type == "TABLE_PART" for unit in chunk_units)
+        expected_emergency = sum(unit.emergency_split for unit in chunk_units)
         table_parts += expected_table
         real_emergency_splits += expected_emergency
         metadata = chunk.get("metadata") or {}
@@ -2853,10 +2825,8 @@ class boundaries___CharacterTokenizer:
 def boundaries__synthetic_multi_part_table_contract() -> dict[str, Any]:
     header = "| Col A | Col B |\n| --- | --- |\n"
     rows = "".join(
-        (
-            f"""| row{index :02d} value | payload{index :02d} |\n"""
-            for index in range(1, 7)
-        )
+        f"""| row{index :02d} value | payload{index :02d} |\n"""
+        for index in range(1, 7)
     )
     source = header + rows
     section = Section(
@@ -2928,7 +2898,7 @@ def boundaries__synthetic_multi_part_table_contract() -> dict[str, Any]:
     )
     for chunk in chunks:
         starts_after_header = any(
-            (span.character_start_in_element > 0 for span in chunk.spans)
+            span.character_start_in_element > 0 for span in chunk.spans
         )
         if starts_after_header:
             if header.rstrip("\n") not in (chunk.retrieval_text or ""):
@@ -3379,7 +3349,7 @@ def boundaries__authoritative_tokenizer_contract() -> dict[str, Any]:
                     chunk_overlap_tokens=0,
                 )
             )
-    except Exception as exc:  # validation contract reports the exact failure
+    except Exception as exc:  # noqa: BLE001 - contract reports exact failures
         failures.append(f"production_pipeline:{type(exc).__name__}:{exc}")
         result = []
     finally:
@@ -3439,20 +3409,20 @@ def boundaries__main() -> int:
         "git_commit": boundaries___git_commit(),
         "paper_count": len(paper_results),
         "abstract_region_errors": sum(
-            (item["abstract_region_errors"] for item in paper_results)
+            item["abstract_region_errors"] for item in paper_results
         ),
         "formula_cohesion_cases": sum(
-            (item["formula_cohesion_cases"] for item in paper_results)
+            item["formula_cohesion_cases"] for item in paper_results
         ),
         "avoidable_formula_cohesion_breaks": sum(
-            (item["avoidable_formula_cohesion_breaks"] for item in paper_results)
+            item["avoidable_formula_cohesion_breaks"] for item in paper_results
         ),
-        "table_parts": sum((item["table_parts"] for item in paper_results)),
+        "table_parts": sum(item["table_parts"] for item in paper_results),
         "real_emergency_splits": sum(
-            (item["real_emergency_splits"] for item in paper_results)
+            item["real_emergency_splits"] for item in paper_results
         ),
         "table_part_emergency_misclassification": sum(
-            (item["table_part_emergency_misclassification"] for item in paper_results)
+            item["table_part_emergency_misclassification"] for item in paper_results
         ),
         **synthetic,
         **figure_hard_max,
@@ -3460,16 +3430,14 @@ def boundaries__main() -> int:
         "papers": paper_results,
     }
     report["pass"] = all(
-        (
-            report[key] == 0
-            for key in (
-                "abstract_region_errors",
-                "avoidable_formula_cohesion_breaks",
-                "table_part_emergency_misclassification",
-                "multi_part_table_provenance_errors",
-                "figure_hard_max_contract_errors",
-                "authoritative_tokenizer_contract_errors",
-            )
+        report[key] == 0
+        for key in (
+            "abstract_region_errors",
+            "avoidable_formula_cohesion_breaks",
+            "table_part_emergency_misclassification",
+            "multi_part_table_provenance_errors",
+            "figure_hard_max_contract_errors",
+            "authoritative_tokenizer_contract_errors",
         )
     )
     output = args.run_dir / "chunk-boundary-contracts.json"
@@ -3493,14 +3461,8 @@ def boundaries__main() -> int:
 
 
 "Validate production citations against MinerU-anchored Gold v3."
-import argparse
-import hashlib
-import json
 import sys
-from collections import defaultdict
-from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any
 
 gold__ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(gold__ROOT))
@@ -3693,13 +3655,11 @@ def gold__validate_paper(paper: dict[str, Any], *, run_dir: Path) -> dict[str, A
                 }
             )
         unresolved_expected += sum(
-            (
-                target["resolution_status"] != "resolved"
-                for target in actual[item_key]["targets"]
-            )
+            target["resolution_status"] != "resolved"
+            for target in actual[item_key]["targets"]
         )
         unattached += sum(
-            (not target["chunk_id"] for target in actual[item_key]["targets"])
+            not target["chunk_id"] for target in actual[item_key]["targets"]
         )
         if (
             expected[item_key]["citation_namespace_id"]
@@ -3762,24 +3722,24 @@ def gold__main() -> int:
         "gold_version": "citation-gold-v3",
         "papers": papers,
         "missing_occurrences": sum(
-            (item["missing_occurrences"] for item in papers.values())
+            item["missing_occurrences"] for item in papers.values()
         ),
         "extra_occurrences": sum(
-            (item["extra_occurrences"] for item in papers.values())
+            item["extra_occurrences"] for item in papers.values()
         ),
-        "wrong_targets": sum((item["wrong_targets"] for item in papers.values())),
+        "wrong_targets": sum(item["wrong_targets"] for item in papers.values()),
         "unresolved_expected_targets": sum(
-            (item["unresolved_expected_targets"] for item in papers.values())
+            item["unresolved_expected_targets"] for item in papers.values()
         ),
         "unattached_targets": sum(
-            (item["unattached_targets"] for item in papers.values())
+            item["unattached_targets"] for item in papers.values()
         ),
-        "wrong_namespaces": sum((item["wrong_namespaces"] for item in papers.values())),
+        "wrong_namespaces": sum(item["wrong_namespaces"] for item in papers.values()),
         "source_mapping_failures": sum(
-            (len(item["source_mapping_failures"]) for item in papers.values())
+            len(item["source_mapping_failures"]) for item in papers.values()
         ),
     }
-    report["pass"] = all((item["status"] == "PASS" for item in papers.values()))
+    report["pass"] = all(item["status"] == "PASS" for item in papers.values())
     output = args.run_dir / "citation-gold-v3-validation.json"
     output.write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -3807,12 +3767,8 @@ def gold__main() -> int:
 
 
 "Validate used ReferenceEntry identities against Gold v3 citation targets."
-import argparse
-import json
-import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 references__REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(references__REPOSITORY_ROOT))
@@ -3873,33 +3829,29 @@ def references__validate_paper(
             accepted = target.get("acceptable_fingerprints") or [
                 target.get("fingerprint")
             ]
-            expected_groups.add(tuple(sorted((value for value in accepted if value))))
+            expected_groups.add(tuple(sorted(value for value in accepted if value)))
     expected_union = {fingerprint for group in expected_groups for fingerprint in group}
     unexpected = sorted(actual - expected_union)
     missed = sorted(
-        (group for group in expected_groups if not actual.intersection(group))
+        group for group in expected_groups if not actual.intersection(group)
     )
     failures: list[dict[str, Any]] = [
         {"failure_type": "UNEXPECTED_USED_REFERENCE", "fingerprint": fingerprint}
         for fingerprint in unexpected
     ]
     failures.extend(
-        (
-            {
-                "failure_type": "MISSED_EXPECTED_USED_REFERENCE",
-                "acceptable_fingerprints": list(group),
-            }
-            for group in missed
-        )
+        {
+            "failure_type": "MISSED_EXPECTED_USED_REFERENCE",
+            "acceptable_fingerprints": list(group),
+        }
+        for group in missed
     )
     failures.extend(
-        (
-            {
-                "failure_type": "REFERENCE_ID_NOT_IN_CANONICAL_BIBLIOGRAPHY",
-                "reference_entry_id": reference_id,
-            }
-            for reference_id in sorted(set(invalid_reference_ids))
-        )
+        {
+            "failure_type": "REFERENCE_ID_NOT_IN_CANONICAL_BIBLIOGRAPHY",
+            "reference_entry_id": reference_id,
+        }
+        for reference_id in sorted(set(invalid_reference_ids))
     )
     return {
         "expected_used_reference_identities": len(expected_groups),
@@ -3952,10 +3904,10 @@ def references__main() -> int:
         "git_commit": references___git_commit(),
         "gold_version": gold.get("gold_version"),
         "missed_used_references": sum(
-            (item["missed_used_references"] for item in papers.values())
+            item["missed_used_references"] for item in papers.values()
         ),
         "unexpected_used_references": sum(
-            (item["unexpected_used_references"] for item in papers.values())
+            item["unexpected_used_references"] for item in papers.values()
         ),
         "papers": papers,
     }
@@ -3982,16 +3934,11 @@ def references__main() -> int:
 
 
 "Run the four authoritative six-paper chunk/citation acceptance gates."
-import argparse
-import hashlib
-import json
 import os
-import subprocess
 import sys
 import zipfile
-from datetime import UTC, datetime
+from datetime import UTC
 from pathlib import Path
-from typing import Any
 
 runner__REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 runner__CONTRACT_REPORT_NAME = "chunk-citation-acceptance.json"
@@ -4332,7 +4279,7 @@ def runner__main() -> int:
             projection_hashes=second_projection_hashes,
             source_anchor_hashes=second_anchor_hashes,
         )
-    overall_pass = all((gate["status"] == "PASS" for gate in gates.values()))
+    overall_pass = all(gate["status"] == "PASS" for gate in gates.values())
     summary = {
         "overall_status": "PASS" if overall_pass else "FAIL",
         "git_commit": runner___git_commit(),

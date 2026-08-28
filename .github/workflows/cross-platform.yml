@@ -3,9 +3,11 @@ name: Cross-platform compatibility
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  compatibility:
+  quality:
+    name: Base gates (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -13,14 +15,14 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
           cache: npm
@@ -35,10 +37,54 @@ jobs:
           npm ci
           npm run build
 
-      - name: Compile and lint Python
-        run: |
-          python -m compileall -q paperos_core scripts
-          ruff check paperos_core scripts
+      - name: Compile Python
+        run: python -m compileall -q paperos_core tests scripts server.py
 
-      - name: Import modules and load isolated configuration
-        run: python scripts/check_cross_platform.py
+      - name: Ruff
+        run: ruff check paperos_core tests scripts server.py
+
+      - name: Mypy
+        run: mypy paperos_core
+
+      - name: Example config and portable import/path smoke
+        run: python tests/contract/test_portable_data_paths.py
+
+      - name: Direct contracts without external services
+        run: |
+          python tests/contract/test_runtime_query_contracts.py
+          python tests/contract/test_citation_resolution.py
+          python tests/contract/test_document_regions.py
+          python tests/contract/test_chunk_boundaries.py
+          python tests/contract/test_cognee_retrieval_boundary.py
+
+  external-boundaries:
+    name: Linux external Cognee/GPU boundaries
+    if: ${{ github.event_name == 'workflow_dispatch' && vars.PAPEROS_RUN_EXTERNAL_BOUNDARIES == 'true' }}
+    needs: quality
+    runs-on: [self-hosted, linux, x64, paperos-external]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: services/local_models/package-lock.json
+
+      - name: Install and build
+        run: |
+          python -m pip install -r requirements.lock
+          cd services/local_models
+          npm ci
+          npm run build
+
+      - name: Real Cognee/vector contracts
+        run: |
+          python tests/contract/test_active_canonical_revision.py
+          python tests/contract/test_query_filter_contracts.py

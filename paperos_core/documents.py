@@ -26,7 +26,6 @@ class DocumentSummary(BaseModel):
     canonical_snapshot_id: str
     chunk_count: int
     section_count: int
-    deleted: bool = False
 
 
 class DocumentDetail(DocumentSummary):
@@ -75,7 +74,7 @@ class DocumentService:
             ).fetchall()
         return {str(row["document_id"]) for row in rows}
 
-    def list_documents(self, *, include_deleted: bool = False) -> list[DocumentSummary]:
+    def list_documents(self) -> list[DocumentSummary]:
         deleted = self.deleted_document_ids()
         active = {
             bundle.document.id: bundle
@@ -85,8 +84,7 @@ class DocumentService:
         for document_id, bundle in sorted(
             active.items(), key=lambda item: (item[1].document.title, item[0])
         ):
-            is_deleted = document_id in deleted
-            if is_deleted and not include_deleted:
+            if document_id in deleted:
                 continue
             source = self.ingestion.get_source(bundle.document.source_file_id)
             projection = self.canonical_repository.get_chunk_projection(
@@ -101,7 +99,6 @@ class DocumentService:
                     canonical_snapshot_id=bundle.snapshot.id,
                     chunk_count=len(projection.chunks),
                     section_count=len(bundle.sections),
-                    deleted=is_deleted,
                 )
             )
         return result
@@ -109,7 +106,7 @@ class DocumentService:
     def inspect(self, document_id: str) -> DocumentDetail:
         summaries = {
             item.document_id: item
-            for item in self.list_documents(include_deleted=True)
+            for item in self.list_documents()
         }
         if document_id not in summaries:
             raise DocumentNotFoundError(
