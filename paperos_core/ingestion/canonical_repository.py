@@ -31,6 +31,7 @@ from paperos_core.domain.canonical import (
 from paperos_core.domain.documents import utc_now
 from paperos_core.domain.ids import CHUNKING_VERSION, canonical_snapshot_id
 from paperos_core.errors import CanonicalStorageError, CanonicalValidationError
+from paperos_core.ingestion.tokenization import AUTHORITATIVE_CHUNK_TOKENIZER
 from paperos_core.ingestion.validation import calculate_sha256
 from paperos_core.paths import DataPaths
 from paperos_core.storage.immutable import ImmutableConflictError, write_immutable_bytes
@@ -647,16 +648,33 @@ class CanonicalRepository:
                     affected=span.id,
                 )
             try:
-                span.scoring_text(chunk)
+                scoring_text = span.scoring_text(chunk)
             except ValueError as exc:
                 raise CanonicalValidationError(
                     "RerankProjection has invalid parent Chunk coordinates.",
                     affected=span.id,
                 ) from exc
-            if span.token_count > projection.hard_max_tokens:
+            actual_token_count = AUTHORITATIVE_CHUNK_TOKENIZER.count_tokens(
+                scoring_text
+            )
+            if actual_token_count > projection.hard_max_tokens:
                 raise CanonicalValidationError(
                     "RerankProjection span exceeds its hard maximum.",
                     affected=span.id,
+                    details={
+                        "actual_token_count": actual_token_count,
+                        "hard_max_tokens": projection.hard_max_tokens,
+                    },
+                )
+            if actual_token_count != span.token_count:
+                raise CanonicalValidationError(
+                    "RerankProjection persisted token count does not match its "
+                    "parent Chunk text.",
+                    affected=span.id,
+                    details={
+                        "actual_token_count": actual_token_count,
+                        "stored_token_count": span.token_count,
+                    },
                 )
             spans_by_chunk.setdefault(span.parent_chunk_id, []).append(span)
         if chunks and set(spans_by_chunk) != set(chunks_by_id):
@@ -671,12 +689,28 @@ class CanonicalRepository:
                     "RerankProjection ordinals are not contiguous.",
                     affected=chunk_id,
                 )
+            chunk = chunks_by_id[chunk_id]
+            if ordered[0].character_start_in_chunk != 0:
+                raise CanonicalValidationError(
+                    "RerankProjection is missing a parent Chunk prefix.",
+                    affected=chunk_id,
+                )
             for left, right in pairwise(ordered):
                 if left.character_end_in_chunk > right.character_start_in_chunk:
                     raise CanonicalValidationError(
                         "RerankProjection ranges overlap.",
                         affected=chunk_id,
                     )
+                if left.character_end_in_chunk < right.character_start_in_chunk:
+                    raise CanonicalValidationError(
+                        "RerankProjection ranges contain a gap.",
+                        affected=chunk_id,
+                    )
+            if ordered[-1].character_end_in_chunk != len(chunk.text):
+                raise CanonicalValidationError(
+                    "RerankProjection is missing a parent Chunk suffix.",
+                    affected=chunk_id,
+                )
 
     def _write_immutable(self, path: Path, content: bytes) -> None:
         self.paths.assert_within_root(path)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -75,6 +76,28 @@ async def rerank_candidates(
             details={
                 "expected_count": len(scoring_ids),
                 "returned_count": len(results),
+            },
+        )
+
+    returned_ids = [result.candidate_id for result in results]
+    returned_id_counts = Counter(returned_ids)
+    returned_id_set = set(returned_ids)
+    expected_id_set = set(scoring_ids)
+    duplicate_ids = sorted(
+        candidate_id
+        for candidate_id, count in returned_id_counts.items()
+        if count > 1
+    )
+    if duplicate_ids or returned_id_set != expected_id_set:
+        raise LocalInferenceResponseError(
+            "Local reranker returned an invalid structured scoring span ID set.",
+            details={
+                "reason": "rerank_candidate_id_mismatch",
+                "expected_count": len(scoring_ids),
+                "returned_count": len(results),
+                "duplicate_candidate_ids": duplicate_ids,
+                "missing_candidate_ids": sorted(expected_id_set - returned_id_set),
+                "unknown_candidate_ids": sorted(returned_id_set - expected_id_set),
             },
         )
 
