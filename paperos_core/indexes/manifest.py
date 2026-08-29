@@ -46,6 +46,7 @@ class IndexingReport(BaseModel):
     lexical_object_count: int = Field(ge=0)
     vector_object_count: int = Field(ge=0)
     embedding_dimensions: int = Field(gt=0)
+    semantic_enrichment_enabled: bool = False
     semantic_entity_count: int = Field(ge=0)
     semantic_claim_count: int = Field(ge=0)
     semantic_relation_count: int = Field(ge=0)

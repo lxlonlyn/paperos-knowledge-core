@@ -86,10 +86,10 @@ def _schema_contract(node: dict[str, object]) -> dict[str, object]:
             "query_token_count": 7,
             "special_prompt_token_count": 9,
             "truncated": False,
-            "window_count": 2,
+            "window_count": 1,
             "winning_window_document_token_count": 13,
-            "winning_window_index": 1,
-            "winning_window_text": "contract window",
+            "winning_window_index": 0,
+            "winning_window_text": "contract span",
         }
     )
     _require(
@@ -123,15 +123,19 @@ def _source_contract() -> dict[str, object]:
         "Reranker trace still hard-codes truncated=false at result construction",
     )
     _require(
-        "temporary query-time projection" in source
-        and "authoritative indexed and evidence unit" in source,
-        "Provisional reranker projection is not documented",
+        "one prebuilt PaperOS RerankSpan" in source
+        and "authoritative canonical parent Chunk" in source,
+        "Structured reranker input boundary is not documented",
+    )
+    _require(
+        "splitSentences" not in source
+        and "PROVISIONAL_WINDOW_DOCUMENT_TOKENS" not in source,
+        "Local reranker still performs query-time string windowing",
     )
     return {
         "validated_before_rank": True,
-        "provisional_projection": True,
-        "parent_chunk_identity_preserved": "candidateId: candidateIds[originalIndex]!"
-        in source,
+        "structured_projection": True,
+        "one_score_per_span": True,
     }
 
 

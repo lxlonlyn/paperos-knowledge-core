@@ -19,7 +19,8 @@ PDF
 → MinerU / configured parser
 → Canonical Document / Section / Element / ReferenceEntry
 → ChunkProjection and retrieval_text
-→ Claim-disabled Cognee semantic enrichment
+→ canonical + scholarly Cognee graph mapping
+→ optional semantic enrichment (disabled by default)
 → PAPEROS_CHUNKS vector index + SQLite FTS5 lexical index
 → lexical Chunk + vector Chunk retrieval
 → RRF → chunk_id dedup → rerank
@@ -117,15 +118,17 @@ ablation matrix, unique-rescue benchmark, or graph/Claim cost-benefit benchmark.
 Those measurements are separate from proving that the one production
 Chunk-first architecture is structurally correct and operational end to end.
 
-## Provisional reranking quality
+## Structured reranking and provisional quality
 
-Current reranker windowing is a temporary query-time projection. It does not
-define the final PaperOS reranking architecture. The authoritative indexed and
-Evidence unit remains the canonical Chunk; reranking does not rewrite Chunk
-text, retrieval text, embeddings, or Evidence provenance.
+Reranking scores rebuildable, snapshot-scoped `RerankSpan` ranges generated
+from the canonical `SentenceUnit` structure during ChunkProjection construction.
+The local model does not split strings at query time. Task 6A aggregates span
+scores to parent Chunks with MaxP. The authoritative indexed and Evidence unit
+remains the canonical Chunk; reranking does not rewrite Chunk text, retrieval
+text, embeddings, or Evidence provenance.
 
-Until the dedicated rerank optimization task is complete, semantic benchmark
-quality is reported as `PENDING_RERANK_OPTIMIZATION` and is not a release
+Until Task 6B compares aggregation and sizing policies, semantic benchmark
+quality remains provisional and is not a release
 engineering blocker. Reports retain every historical query and gate result with
 its actual validation origin, validated commit, and whether it executed in the
 current run.

@@ -105,13 +105,46 @@ def configuration_contract(root: Path) -> dict[str, object]:
         "no remote reranker is configured",
     )
 
+    claim_without_semantic = root / "claim-without-semantic.toml"
+    claim_without_semantic.write_text(
+        "[cognee.embedding]\n"
+        "endpoint = \"https://embedding.example/v1\"\n"
+        "\n"
+        "[local_inference]\n"
+        "enabled = false\n"
+        "\n"
+        "[retrieval]\n"
+        "rerank_enabled = false\n"
+        "\n"
+        "[ingestion]\n"
+        "semantic_enrichment_enabled = false\n"
+        "claim_enrichment_enabled = true\n",
+        encoding="utf-8",
+    )
+    _require_configuration_error(
+        claim_without_semantic,
+        "semantic_enrichment_enabled=true",
+    )
+
     example = load_settings(REPOSITORY_ROOT / "config" / "paperos.example.toml")
     _require(example.local_inference.enabled, "Example local inference must be enabled")
     _require(example.retrieval.rerank_enabled, "Example reranker must be enabled")
+    _require(
+        not example.ingestion.semantic_enrichment_enabled,
+        "Example semantic enrichment must default to disabled",
+    )
+    defaults = RuntimeSettings()
+    _require(
+        not defaults.ingestion.semantic_enrichment_enabled
+        and not defaults.ingestion.claim_enrichment_enabled,
+        "Semantic and Claim enrichment defaults must both be disabled",
+    )
     return {
         "status": "passed",
         "invalid_local_embedding": True,
         "invalid_local_reranker": True,
+        "invalid_claim_without_semantic": True,
+        "semantic_enrichment_default": False,
         "example_consistent": True,
     }
 
@@ -137,7 +170,7 @@ def _assert_no_evidence_response(
     trace = response.trace.model_dump(mode="json")
     _require(trace["applied_document_ids"] == [], "Empty query applied documents")
     _require(
-        all(value == [] for key, value in trace.items() if key != "applied_document_ids"),
+        all(not value for value in trace.values()),
         f"Empty query trace is not empty: {trace}",
     )
 
@@ -182,11 +215,6 @@ async def empty_retrieval_contract(root: Path) -> dict[str, object]:
             QueryRequest(query="empty local expansion", expand_context=True),
             {"local_post_hit_expansion"},
         ),
-        (
-            "expand_graph",
-            QueryRequest(query="empty graph expansion", expand_graph=True),
-            {"semantic_relation_expansion"},
-        ),
     )
     executed: list[str] = []
     for name, request, case_forbidden in cases:
@@ -197,12 +225,42 @@ async def empty_retrieval_contract(root: Path) -> dict[str, object]:
         )
         executed.append(name)
 
+    try:
+        await service.query(
+            QueryRequest(query="disabled graph expansion", expand_graph=True)
+        )
+    except ConfigurationError as exc:
+        _require(
+            exc.details.get("reason") == "semantic_enrichment_disabled",
+            f"Unexpected semantic expansion guard: {exc.details}",
+        )
+        public = exc.as_api_dict()
+        public_error = public.get("error", {})
+        public_details = (
+            public_error.get("details", {})
+            if isinstance(public_error, dict)
+            else {}
+        )
+        _require(
+            isinstance(public_details, dict)
+            and public_details.get("reason") == "semantic_enrichment_disabled",
+            f"Semantic expansion reason was not safe for the API: {public}",
+        )
+    else:
+        raise RuntimeError("Disabled semantic expansion did not fail explicitly.")
+
     reranked = await service._rerank(
         "documents exist but channels returned no candidates",
         [],
+        corpus=object(),  # type: ignore[arg-type]
         limit=40,
     )
-    _require(reranked == [], "Zero candidates unexpectedly invoked reranking")
+    _require(
+        reranked.candidates == []
+        and reranked.projection_version is None
+        and reranked.span_count == 0,
+        "Zero candidates unexpectedly invoked reranking",
+    )
 
     service_source = (
         REPOSITORY_ROOT / "paperos_core" / "retrieval" / "service.py"
@@ -215,10 +273,7 @@ async def empty_retrieval_contract(root: Path) -> dict[str, object]:
         "if request.expand_graph and seeds:" in service_source,
         "Graph post-hit expansion is not guarded by real seeds",
     )
-    _require(
-        "if fused else []" in service_source,
-        "First reranking is not guarded by actual candidates",
-    )
+    _require("if fused" in service_source, "First reranking lacks an empty guard")
     _require(
         effective_candidate_pool_size(40, 100) == 100,
         "top_k is still truncated by candidate_pool_size",
@@ -226,6 +281,7 @@ async def empty_retrieval_contract(root: Path) -> dict[str, object]:
     return {
         "status": "passed",
         "runtime_cases": executed,
+        "semantic_expansion_guard": "semantic_enrichment_disabled",
         "zero_candidate_guards": True,
         "top_k_pool": 100,
     }

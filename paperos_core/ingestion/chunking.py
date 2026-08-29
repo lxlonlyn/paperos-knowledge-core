@@ -18,6 +18,7 @@ from paperos_core.domain.canonical import (
     Document,
     Element,
     ReferenceEntry,
+    RerankSpan,
     Section,
 )
 from paperos_core.domain.enums import ElementType
@@ -40,6 +41,7 @@ from paperos_core.ingestion.document_regions import (
     region_for_element,
     region_id_for_element,
 )
+from paperos_core.ingestion.rerank_projection import build_rerank_spans
 from paperos_core.ingestion.retrieval_text import build_retrieval_text
 from paperos_core.ingestion.sentence_units import (
     _PROSE_TYPES,
@@ -66,6 +68,7 @@ def build_chunks(
     hard_max_tokens: int,
     overlap_tokens: int,
     tokenizer: Tokenizer,
+    rerank_span_sink: list[RerankSpan] | None = None,
 ) -> tuple[list[Chunk], list[CitationMention]]:
     """Build section-local, span-identified chunks from canonical elements."""
     count = tokenizer.count_tokens
@@ -209,6 +212,7 @@ def build_chunks(
             section_by_id=section_by_id,
             element_regions=element_regions,
             region_instance_id=group_region_id,
+            rerank_span_sink=rerank_span_sink,
         )
         built.extend(section_chunks)
         order += len(section_chunks)
@@ -334,6 +338,7 @@ def _chunks_from_ranges(
     section_by_id: dict[str, Section],
     element_regions: dict[str, ElementRegionInfo],
     region_instance_id: str | None = None,
+    rerank_span_sink: list[RerankSpan] | None = None,
 ) -> list[Chunk]:
     built: list[Chunk] = []
     overlap_tail: list[SentenceUnit] = []
@@ -366,6 +371,10 @@ def _chunks_from_ranges(
                 f"{chunk.token_count}>{hard_max_tokens}"
             )
         built.append(chunk)
+        if rerank_span_sink is not None:
+            rerank_span_sink.extend(
+                build_rerank_spans(chunk, chunk_units, count=count)
+            )
         overlap_tail = _overlap_tail_units(chunk_units, count, overlap_tokens)
     return built
 

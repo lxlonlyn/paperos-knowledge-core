@@ -18,6 +18,7 @@ CANONICAL_PIPELINE_VERSION = "gate3.2"
 CLEANING_VERSION = "1"
 CLASSIFICATION_VERSION = "1"
 CHUNKING_VERSION = "7"
+RERANK_PROJECTION_VERSION = "1"
 REFERENCE_PROCESSING_VERSION = "1"
 QUERY_RESPONSE_ID_VERSION = "1"
 SCHOLARLY_WORK_SCHEMA_VERSION = "1.0"
@@ -162,6 +163,28 @@ def chunk_id(
         str(order),
         chunking_version,
         *element_span_ids,
+        id_version=id_version,
+    )
+
+
+def rerank_span_id(
+    parent_chunk_id: str,
+    ordinal: int,
+    character_start_in_chunk: int,
+    character_end_in_chunk: int,
+    *,
+    projection_version: str = RERANK_PROJECTION_VERSION,
+    id_version: str = CANONICAL_ID_VERSION,
+) -> str:
+    """Identify a rebuildable scoring span within one canonical parent Chunk."""
+
+    return stable_id(
+        "rerank_span",
+        parent_chunk_id,
+        str(ordinal),
+        str(character_start_in_chunk),
+        str(character_end_in_chunk),
+        projection_version,
         id_version=id_version,
     )
 

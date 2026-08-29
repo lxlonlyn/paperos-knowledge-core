@@ -13,7 +13,7 @@ from paperos_core.adapters.cognee.compat import (
     CogneeSemanticRelation,
     _direct_semantic_relations,
     _vector_groups,
-    cognee_uuid,
+    cognee_snapshot_uuid,
 )
 from paperos_core.adapters.cognee.llm import _SectionExtractionWithoutClaims
 from paperos_core.domain.canonical import Chunk
@@ -26,6 +26,7 @@ from paperos_core.retrieval.expansion import (
     semantic_post_hit_expand,
 )
 from paperos_core.retrieval.fusion import weighted_rrf
+from paperos_core.retrieval.rerank import RerankPass
 from paperos_core.retrieval.service import RetrievalService
 
 
@@ -123,7 +124,8 @@ def test_semantic_relation_grammar_is_central_and_excludes_infrastructure() -> N
 
 def test_direct_semantic_operator_rejects_indirect_and_infrastructure_paths() -> None:
     seed_id = "chunk_seed"
-    seed_graph_id = str(cognee_uuid(seed_id))
+    snapshot_id = "snapshot_1"
+    seed_graph_id = str(cognee_snapshot_uuid(snapshot_id, seed_id))
     entity_a = "entity-a"
     entity_b = "entity-b"
     entity_c = "entity-c"
@@ -176,7 +178,7 @@ def test_direct_semantic_operator_rejects_indirect_and_infrastructure_paths() ->
     relations = _direct_semantic_relations(
         nodes,
         edges,
-        seed_chunk_ids={seed_id},
+        seed_chunk_snapshot_ids={seed_id: snapshot_id},
         relation_types={item.value for item in SEMANTIC_RELATION_TYPES},
         limit=20,
     )
@@ -189,7 +191,8 @@ def test_direct_semantic_operator_rejects_indirect_and_infrastructure_paths() ->
 
 def test_direct_semantic_operator_requires_relation_level_source_provenance() -> None:
     seed_id = "chunk_seed"
-    seed_graph_id = str(cognee_uuid(seed_id))
+    snapshot_id = "snapshot_1"
+    seed_graph_id = str(cognee_snapshot_uuid(snapshot_id, seed_id))
     nodes = [
         (seed_graph_id, {"type": "PaperOSChunkDataPoint", "canonical_id": seed_id}),
         (
@@ -218,7 +221,7 @@ def test_direct_semantic_operator_requires_relation_level_source_provenance() ->
     relations = _direct_semantic_relations(
         nodes,
         [("entity-a", "entity-b", "USES", {})],
-        seed_chunk_ids={seed_id},
+        seed_chunk_snapshot_ids={seed_id: snapshot_id},
         relation_types={"USES"},
         limit=20,
         diagnostics=diagnostics,
@@ -258,13 +261,13 @@ def test_semantic_expansion_is_dataset_scoped_and_rehydrates_canonical_chunks() 
 
         async def semantic_relations_for_chunks(
             self,
-            chunk_ids: list[str],
+            chunk_snapshot_ids: dict[str, str],
             *,
             dataset_name: str,
             relation_types: set[str],
             limit: int,
         ) -> list[CogneeSemanticRelation]:
-            assert chunk_ids == ["chunk_seed"]
+            assert chunk_snapshot_ids == {"chunk_seed": "snapshot_1"}
             assert limit == 10
             self.dataset_name = dataset_name
             self.relation_types = relation_types
@@ -371,6 +374,7 @@ def _retrieval_service(*, rerank_enabled: bool) -> RetrievalService:
     service = object.__new__(RetrievalService)
     service.config = SimpleNamespace(
         dataset="dataset_1",
+        ingestion=SimpleNamespace(semantic_enrichment_enabled=True),
         retrieval=SimpleNamespace(
             top_k=2,
             candidate_pool_size=4,
@@ -418,6 +422,7 @@ def _pipeline_corpus() -> SimpleNamespace:
         },
         filtered_document_ids=lambda _ids, _dataset: {"document_1"},
         document_ids_for_works=lambda _ids: {"document_1"},
+        snapshot_ids_for_documents=lambda _ids: {"snapshot_1"},
     )
 
 
@@ -432,10 +437,19 @@ def _run_expansion_pipeline(
     synthesis_prompts: list[str] = []
 
     async def rerank(
-        _query: str, candidates: list[Candidate], *, limit: int
-    ) -> list[Candidate]:
+        _query: str,
+        candidates: list[Candidate],
+        *,
+        corpus: object,
+        limit: int,
+    ) -> RerankPass:
+        del corpus
         rerank_inputs.append([item.chunk_id for item in candidates])
-        return candidates[:limit]
+        return RerankPass(
+            candidates=candidates[:limit],
+            projection_version="contract",
+            span_count=len(candidates),
+        )
 
     async def no_vector(*_args: object, **_kwargs: object) -> list[Candidate]:
         return []

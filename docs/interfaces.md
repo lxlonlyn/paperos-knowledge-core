@@ -94,7 +94,8 @@ the canonical boundary.
 `CogneeConfigurator` applies the single TOML's Cognee settings before any
 engine or gateway is created. `LLMClient` then reads credential-free
 provider/model metadata through `CogneeRuntimeConfigReader` and provides
-semantic enrichment and evidence-bound answer synthesis exclusively through
+optional semantic enrichment (when explicitly enabled) and evidence-bound answer
+synthesis exclusively through
 Cognee's `LLMGateway`. It never starts the provider and never knows the vendor.
 
 ## Private local inference protocol

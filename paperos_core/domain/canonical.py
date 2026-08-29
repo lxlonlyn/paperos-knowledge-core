@@ -18,6 +18,7 @@ from paperos_core.domain.ids import (
     CLASSIFICATION_VERSION,
     CLEANING_VERSION,
     REFERENCE_PROCESSING_VERSION,
+    RERANK_PROJECTION_VERSION,
 )
 from paperos_core.domain.parsing import ParsedIngestionResult
 
@@ -183,6 +184,74 @@ class Chunk(DomainModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class RerankSpan(DomainModel):
+    """Rebuildable scoring range over one authoritative parent Chunk."""
+
+    id: str
+    parent_chunk_id: str
+    canonical_snapshot_id: str
+    ordinal: int = Field(ge=0)
+    character_start_in_chunk: int = Field(ge=0)
+    character_end_in_chunk: int = Field(gt=0)
+    unit_start: int = Field(ge=0)
+    unit_end: int = Field(gt=0)
+    token_count: int = Field(gt=0)
+    projection_version: str = RERANK_PROJECTION_VERSION
+    fallback_reasons: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_ranges(self) -> RerankSpan:
+        if self.character_end_in_chunk <= self.character_start_in_chunk:
+            raise ValueError("RerankSpan character range must be non-empty")
+        if self.unit_end <= self.unit_start:
+            raise ValueError("RerankSpan unit range must be non-empty")
+        return self
+
+    def scoring_text(self, chunk: Chunk) -> str:
+        """Rebuild scoring text without storing a second evidence string."""
+
+        if chunk.id != self.parent_chunk_id:
+            raise ValueError("RerankSpan parent Chunk does not match")
+        if chunk.canonical_snapshot_id != self.canonical_snapshot_id:
+            raise ValueError("RerankSpan snapshot does not match its parent Chunk")
+        if self.character_end_in_chunk > len(chunk.text):
+            raise ValueError("RerankSpan character range exceeds its parent Chunk")
+        text = chunk.text[
+            self.character_start_in_chunk : self.character_end_in_chunk
+        ]
+        if not text:
+            raise ValueError("RerankSpan scoring text must be non-empty")
+        return text
+
+
+class RerankProjection(DomainModel):
+    """Snapshot-scoped, derived scoring projection outside knowledge indexes."""
+
+    snapshot_id: str
+    projection_version: str = RERANK_PROJECTION_VERSION
+    target_tokens: int = 256
+    hard_max_tokens: int = 384
+    overlap_tokens: int = 0
+    spans: list[RerankSpan] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_projection(self) -> RerankProjection:
+        if self.overlap_tokens != 0:
+            raise ValueError("Task 6A RerankProjection overlap must remain zero")
+        if self.target_tokens <= 0 or self.hard_max_tokens < self.target_tokens:
+            raise ValueError("RerankProjection token policy is invalid")
+        span_ids = [span.id for span in self.spans]
+        if len(span_ids) != len(set(span_ids)):
+            raise ValueError("RerankProjection span IDs must be unique")
+        if any(
+            span.canonical_snapshot_id != self.snapshot_id
+            or span.projection_version != self.projection_version
+            for span in self.spans
+        ):
+            raise ValueError("RerankProjection span provenance is inconsistent")
+        return self
+
+
 class CitationMention(DomainModel):
     """Atomic citation target within one inline citation span."""
 
@@ -264,6 +333,7 @@ class ChunkProjection(DomainModel):
     chunking_version: str = CHUNKING_VERSION
     chunks: list[Chunk] = Field(default_factory=list)
     citation_mentions: list[CitationMention] = Field(default_factory=list)
+    rerank_projection: RerankProjection | None = None
 
 
 class CanonicalBundle(DomainModel):

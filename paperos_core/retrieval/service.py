@@ -26,7 +26,7 @@ from paperos_core.retrieval.fusion import (
     weighted_rrf,
 )
 from paperos_core.retrieval.lexical import lexical_retrieve
-from paperos_core.retrieval.rerank import rerank_candidates
+from paperos_core.retrieval.rerank import RerankPass, rerank_candidates
 from paperos_core.retrieval.semantic import semantic_retrieve
 from paperos_core.retrieval.synthesis import (
     FinalSynthesisContext,
@@ -85,6 +85,18 @@ class RetrievalService:
         self.llm = llm
 
     async def query(self, request: QueryRequest) -> QueryResponse:
+        if (
+            request.expand_graph
+            and not self.config.ingestion.semantic_enrichment_enabled
+        ):
+            raise ConfigurationError(
+                "Semantic graph expansion requires "
+                "ingestion.semantic_enrichment_enabled=true.",
+                details={
+                    "reason": "semantic_enrichment_disabled",
+                    "semantic_enrichment_enabled": False,
+                },
+            )
         if (request.expand_context or request.expand_graph) and not (
             self.config.retrieval.rerank_enabled
         ):
@@ -167,9 +179,17 @@ class RetrievalService:
         stages.extend(["rrf", "chunk_id_dedup"])
         first_stage_chunk_ids = [item.chunk_id for item in fused]
 
-        first_reranked = (
-            await self._rerank(request.query, fused, limit=pool_size) if fused else []
+        first_rerank = (
+            await self._rerank(
+                request.query,
+                fused,
+                corpus=corpus,
+                limit=pool_size,
+            )
+            if fused
+            else RerankPass(candidates=[], projection_version=None, span_count=0)
         )
+        first_reranked = first_rerank.candidates
         if self.config.retrieval.rerank_enabled and fused:
             stages.append("first_rerank")
         seeds = first_reranked[:top_k]
@@ -198,13 +218,22 @@ class RetrievalService:
         ]
         genuinely_new = [item for item in expanded if item.chunk_id not in first_stage_ids]
         second_rerank_candidates: list[Candidate] = []
+        second_rerank = RerankPass(
+            candidates=[],
+            projection_version=None,
+            span_count=0,
+        )
         if genuinely_new:
             second_rerank_candidates = deduplicate_candidates_by_chunk(
                 [*first_reranked, *genuinely_new]
             )
-            reranked = await self._rerank(
-                request.query, second_rerank_candidates, limit=pool_size
+            second_rerank = await self._rerank(
+                request.query,
+                second_rerank_candidates,
+                corpus=corpus,
+                limit=pool_size,
             )
+            reranked = second_rerank.candidates
             stages.append("second_rerank")
         else:
             reranked = first_reranked
@@ -259,6 +288,11 @@ class RetrievalService:
                 vector_diagnostics.safety_limit_reached
             ],
             first_stage_chunk_ids=first_stage_chunk_ids,
+            rerank_projection_version=(
+                first_rerank.projection_version
+                or second_rerank.projection_version
+            ),
+            first_rerank_span_count=first_rerank.span_count,
             first_reranked_chunk_ids=[item.chunk_id for item in first_reranked],
             first_rerank_diagnostics=_rerank_trace(first_reranked),
             local_expanded_chunk_ids=[item.chunk_id for item in local_expanded],
@@ -279,6 +313,7 @@ class RetrievalService:
             second_reranked_chunk_ids=(
                 [item.chunk_id for item in reranked] if genuinely_new else []
             ),
+            second_rerank_span_count=second_rerank.span_count,
             second_rerank_diagnostics=(
                 _rerank_trace(reranked) if genuinely_new else []
             ),
@@ -348,11 +383,26 @@ class RetrievalService:
         )
 
     async def _rerank(
-        self, query: str, candidates: list[Candidate], *, limit: int
-    ) -> list[Candidate]:
+        self,
+        query: str,
+        candidates: list[Candidate],
+        *,
+        corpus: CorpusView,
+        limit: int,
+    ) -> RerankPass:
         if not self.config.retrieval.rerank_enabled:
-            return candidates[:limit]
-        return await rerank_candidates(self.model_client, query, candidates, limit=limit)
+            return RerankPass(
+                candidates=candidates[:limit],
+                projection_version=None,
+                span_count=0,
+            )
+        return await rerank_candidates(
+            self.model_client,
+            query,
+            candidates,
+            corpus=corpus,
+            limit=limit,
+        )
 
 
 def _rerank_trace(candidates: list[Candidate]) -> list[RerankTrace]:

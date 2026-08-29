@@ -248,6 +248,16 @@ class LocalInferenceRuntime:
                 retryable=False,
             ) from exc
         if health.get("status") == "healthy":
+            expected_cuda = ",".join(
+                str(device) for device in self.settings.local_inference.cuda_devices
+            )
+            if health.get("cuda_visible_devices") != expected_cuda:
+                raise LocalInferenceUnavailableError(
+                    "Existing local inference runtime has incompatible CUDA visibility.",
+                    affected=f"{host}:{port}",
+                    details={"cuda_visibility_matches": False},
+                    retryable=False,
+                )
             self._owned = False
             return health
         raise LocalInferenceUnavailableError(

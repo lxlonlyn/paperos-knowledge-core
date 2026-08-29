@@ -6,7 +6,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Literal
 
-from paperos_core.domain.canonical import CanonicalBundle, Chunk
+from paperos_core.domain.canonical import CanonicalBundle, Chunk, RerankSpan
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.registry import SourceRegistry
 from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
@@ -26,6 +26,8 @@ class CorpusView:
     document_ids_by_work: dict[str, set[str]] = field(default_factory=dict)
     work_titles: dict[str, str] = field(default_factory=dict)
     cited_work_ids_by_chunk: dict[str, set[str]] = field(default_factory=dict)
+    rerank_spans_by_chunk: dict[str, list[RerankSpan]] = field(default_factory=dict)
+    rerank_projection_versions: set[str] = field(default_factory=set)
 
     @classmethod
     def load(
@@ -60,16 +62,33 @@ class CorpusView:
         active_snapshot_ids = {
             bundle.snapshot.id for bundle in retained_bundles
         }
+        projections = {
+            bundle.snapshot.id: canonical_repository.get_chunk_projection(
+                bundle.snapshot.id
+            )
+            for bundle in retained_bundles
+        }
         chunks = {
             chunk.id: chunk
             for bundle in retained_bundles
-            for chunk in canonical_repository.get_chunk_projection(bundle.snapshot.id).chunks
+            for chunk in projections[bundle.snapshot.id].chunks
         }
         chunk_bundles = {
             chunk.id: bundle
             for bundle in retained_bundles
-            for chunk in canonical_repository.get_chunk_projection(bundle.snapshot.id).chunks
+            for chunk in projections[bundle.snapshot.id].chunks
         }
+        rerank_spans_by_chunk: dict[str, list[RerankSpan]] = {}
+        rerank_projection_versions: set[str] = set()
+        for projection in projections.values():
+            rerank_projection = projection.rerank_projection
+            if rerank_projection is None:
+                continue
+            rerank_projection_versions.add(rerank_projection.projection_version)
+            for span in rerank_projection.spans:
+                rerank_spans_by_chunk.setdefault(span.parent_chunk_id, []).append(span)
+        for spans in rerank_spans_by_chunk.values():
+            spans.sort(key=lambda item: item.ordinal)
         source_filenames = {
             bundle.document.source_file_id: registry.get_source(
                 bundle.document.source_file_id
@@ -113,6 +132,8 @@ class CorpusView:
             document_ids_by_work=document_ids_by_work,
             work_titles=work_titles,
             cited_work_ids_by_chunk=cited_work_ids_by_chunk,
+            rerank_spans_by_chunk=rerank_spans_by_chunk,
+            rerank_projection_versions=rerank_projection_versions,
         )
 
     def candidate_for_chunk(

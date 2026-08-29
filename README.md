@@ -103,9 +103,9 @@ references; repositories decode them to absolute `Path` objects at runtime.
 Copying the project or `data/` therefore does not rewrite retained artifacts.
 
 Original PDFs and raw MinerU responses are immutable. Canonical snapshots are
-versioned. Cognee and FTS projections, semantic enrichment, and exports are
-rebuildable. Every derived object and graph relation retains canonical chunk
-provenance.
+versioned. Cognee and FTS projections and exports are rebuildable. Semantic
+enrichment is an optional derived projection and is disabled by default. Every
+derived object and graph relation retains canonical chunk provenance.
 
 `registry.db` also owns stable `ScholarlyWork` identities independently of
 parsed Documents. External cited works may exist without a PDF. Cognee projects

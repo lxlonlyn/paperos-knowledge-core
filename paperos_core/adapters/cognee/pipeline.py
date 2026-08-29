@@ -46,7 +46,7 @@ class KnowledgeIngestionResult(BaseModel):
 
     canonical_result: CanonicalIngestionResult
     indexing: IndexingReport
-    enrichment_path: Path
+    enrichment_path: Path | None
 
     def public_dict(self) -> dict[str, object]:
         payload = self.canonical_result.public_dict()
@@ -166,7 +166,8 @@ class CogneePipelineAdapter:
                     active_snapshot_id
                 )
                 current_candidate_id = candidate.snapshot.id
-                self.reproject_enrichment(active_snapshot_id, current_candidate_id)
+                if self.ingestion.semantic_enrichment_enabled:
+                    self.reproject_enrichment(active_snapshot_id, current_candidate_id)
                 await self.ingest_bundle(
                     candidate,
                     rebuilt=True,
@@ -204,8 +205,8 @@ class CogneePipelineAdapter:
         reuse_existing_enrichment: bool = False,
         generate_enrichment_if_missing: bool = True,
         scholarly_candidate_snapshot_id: str | None = None,
-    ) -> tuple[IndexingReport, Path]:
-        """Run one canonical/enrichment pair through the Cognee custom pipeline."""
+    ) -> tuple[IndexingReport, Path | None]:
+        """Run one canonical graph projection with optional semantic enrichment."""
         self.canonical_repository.verify_snapshot(bundle.snapshot.id)
         dataset_name = bundle.snapshot.dataset_id
         dataset = await self.compat.ensure_dataset(dataset_name)
@@ -238,6 +239,7 @@ class CogneePipelineAdapter:
             scholarly_candidate_snapshot_id=scholarly_candidate_snapshot_id,
             reuse_existing_enrichment=reuse_existing_enrichment,
             generate_enrichment_if_missing=generate_enrichment_if_missing,
+            semantic_enrichment_enabled=self.ingestion.semantic_enrichment_enabled,
             claim_enrichment_enabled=self.ingestion.claim_enrichment_enabled,
         )
         item = PipelineItem(
@@ -255,8 +257,15 @@ class CogneePipelineAdapter:
         run_id = UUID(str(run_info.pipeline_run_id))
         fresh_bundle = self.canonical_repository.get_bundle(bundle.snapshot.id)
         projection = self.canonical_repository.get_chunk_projection(bundle.snapshot.id)
-        enrichment = self._load_enrichment(bundle.snapshot.id)
-        _validate_semantic_provenance(projection.chunks, enrichment)
+        if projection.rerank_projection is None:
+            raise CogneeStorageError(
+                "Structured rerank projection is missing after ChunkProjection build.",
+                affected=bundle.snapshot.id,
+            )
+        enrichment: SemanticEnrichment | None = None
+        if self.ingestion.semantic_enrichment_enabled:
+            enrichment = self._load_enrichment(bundle.snapshot.id)
+            _validate_semantic_provenance(projection.chunks, enrichment)
         if len(graph_results) != 1:
             raise CogneeStorageError(
                 "Cognee pipeline did not return exactly one mapped DataPointGraph.",
@@ -313,13 +322,19 @@ class CogneePipelineAdapter:
             lexical_object_count=len(index_manifest.lexical_object_ids),
             vector_object_count=len(cognee_vector_ids),
             embedding_dimensions=runtime_config.embedding_dimensions,
-            semantic_entity_count=len(enrichment.entities),
-            semantic_claim_count=len(enrichment.claims),
-            semantic_relation_count=len(enrichment.relations),
+            semantic_enrichment_enabled=self.ingestion.semantic_enrichment_enabled,
+            semantic_entity_count=len(enrichment.entities) if enrichment else 0,
+            semantic_claim_count=len(enrichment.claims) if enrichment else 0,
+            semantic_relation_count=len(enrichment.relations) if enrichment else 0,
             consistency_valid=True,
             rebuilt=rebuilt,
         )
-        return report, self.paths.cognee / "enrichment" / f"{bundle.snapshot.id}.json"
+        enrichment_path = (
+            self.paths.cognee / "enrichment" / f"{bundle.snapshot.id}.json"
+            if self.ingestion.semantic_enrichment_enabled
+            else None
+        )
+        return report, enrichment_path
 
     async def cleanup_snapshot_derived(
         self,
@@ -349,6 +364,7 @@ class CogneePipelineAdapter:
             self.paths.cognee / "graphs" / f"{snapshot_id}.json",
             self.paths.cognee / "chunks" / f"{snapshot_id}.jsonl",
             self.paths.cognee / "citation_mentions" / f"{snapshot_id}.jsonl",
+            self.paths.cognee / "rerank_projections" / f"{snapshot_id}.json",
         ]
         if not preserve_enrichment:
             targets.append(self.paths.cognee / "enrichment" / f"{snapshot_id}.json")
@@ -595,6 +611,7 @@ class CogneePipelineAdapter:
             },
             "node_count": len(graph.nodes),
             "relation_count": len(graph.relations),
+            "semantic_enrichment_enabled": self.ingestion.semantic_enrichment_enabled,
             "canonical_to_cognee_id": graph.id_mapping,
             "relations": [relation.model_dump(mode="json") for relation in graph.relations],
         }

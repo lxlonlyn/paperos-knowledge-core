@@ -157,6 +157,8 @@ class RetrievalTrace(BaseModel):
     vector_backend_exhausted: list[bool] = Field(default_factory=list)
     vector_safety_limit_reached: list[bool] = Field(default_factory=list)
     first_stage_chunk_ids: list[str] = Field(default_factory=list)
+    rerank_projection_version: str | None = None
+    first_rerank_span_count: int = Field(default=0, ge=0)
     first_reranked_chunk_ids: list[str] = Field(default_factory=list)
     first_rerank_diagnostics: list[RerankTrace] = Field(default_factory=list)
     local_expanded_chunk_ids: list[str] = Field(default_factory=list)
@@ -167,6 +169,7 @@ class RetrievalTrace(BaseModel):
     relation_types: list[str] = Field(default_factory=list)
     derived_from_ids: list[str] = Field(default_factory=list)
     second_reranked_chunk_ids: list[str] = Field(default_factory=list)
+    second_rerank_span_count: int = Field(default=0, ge=0)
     second_rerank_diagnostics: list[RerankTrace] = Field(default_factory=list)
     second_rerank_candidate_ids: list[str] = Field(default_factory=list)
     final_selected_chunk_ids: list[str] = Field(default_factory=list)

@@ -444,6 +444,9 @@ class _LocalRebuildPipeline:
         self.indexes = indexes
         self.fail_build = fail_build
         self.scholarly_registry = ScholarlyRegistry(paths)
+        self.ingestion = RuntimeSettings().ingestion.model_copy(
+            update={"semantic_enrichment_enabled": True}
+        )
         self.cleanup_adapter = CogneePipelineAdapter(
             paths,
             repository,
@@ -452,7 +455,7 @@ class _LocalRebuildPipeline:
             SimpleNamespace(),  # type: ignore[arg-type]
             indexes,
             SimpleNamespace(),  # type: ignore[arg-type]
-            RuntimeSettings().ingestion,
+            self.ingestion,
         )
 
     def reproject_enrichment(

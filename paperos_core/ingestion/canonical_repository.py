@@ -9,6 +9,7 @@ import shutil
 import sqlite3
 import tempfile
 from collections.abc import Sequence
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, TypeVar
 from uuid import uuid4
@@ -24,6 +25,7 @@ from paperos_core.domain.canonical import (
     Document,
     Element,
     ReferenceEntry,
+    RerankProjection,
     Section,
 )
 from paperos_core.domain.documents import utc_now
@@ -55,6 +57,42 @@ class CanonicalRepository:
             self.paths.cognee / "citation_mentions" / f"{snapshot_id}.jsonl"
         ).resolve(strict=False)
         self.paths.assert_within_root(path)
+        return path
+
+    def rerank_projection_store_path(self, snapshot_id: str) -> Path:
+        path = (
+            self.paths.cognee / "rerank_projections" / f"{snapshot_id}.json"
+        ).resolve(strict=False)
+        self.paths.assert_within_root(path)
+        return path
+
+    def save_rerank_projection(self, projection: RerankProjection) -> Path:
+        """Atomically persist one rebuildable snapshot-scoped scoring projection."""
+
+        chunk_path = self.chunk_store_path(projection.snapshot_id)
+        chunks = self._read_jsonl(chunk_path, Chunk) if chunk_path.is_file() else []
+        self._validate_rerank_projection(projection, chunks=chunks)
+        path = self.rerank_projection_store_path(projection.snapshot_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = self._json_bytes(projection)
+        temporary_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=".rerank-projection-", dir=path.parent, delete=False
+            ) as temporary:
+                temporary_name = temporary.name
+                temporary.write(payload)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_name, path)
+        except OSError as exc:
+            raise CanonicalStorageError(
+                f"Unable to persist rerank projection: {exc}",
+                affected=path,
+            ) from exc
+        finally:
+            if temporary_name:
+                Path(temporary_name).unlink(missing_ok=True)
         return path
 
     def save_chunks(
@@ -264,11 +302,20 @@ class CanonicalRepository:
             if mention_store.is_file()
             else []
         )
+        rerank_store = self.rerank_projection_store_path(snapshot_id)
+        rerank_projection = (
+            self._read_model(rerank_store, RerankProjection)
+            if rerank_store.is_file()
+            else None
+        )
+        if rerank_projection is not None:
+            self._validate_rerank_projection(rerank_projection, chunks=chunks)
         return ChunkProjection(
             snapshot_id=snapshot_id,
             chunking_version=CHUNKING_VERSION,
             chunks=chunks,
             citation_mentions=citation_mentions,
+            rerank_projection=rerank_projection,
         )
 
     def activate_snapshot(
@@ -583,6 +630,53 @@ class CanonicalRepository:
                     "ReferenceEntry references an unknown source Element.",
                     affected=reference.id,
                 )
+
+    @staticmethod
+    def _validate_rerank_projection(
+        projection: RerankProjection,
+        *,
+        chunks: list[Chunk],
+    ) -> None:
+        chunks_by_id = {chunk.id: chunk for chunk in chunks}
+        spans_by_chunk: dict[str, list[Any]] = {}
+        for span in projection.spans:
+            chunk = chunks_by_id.get(span.parent_chunk_id)
+            if chunk is None:
+                raise CanonicalValidationError(
+                    "RerankProjection references an unknown parent Chunk.",
+                    affected=span.id,
+                )
+            try:
+                span.scoring_text(chunk)
+            except ValueError as exc:
+                raise CanonicalValidationError(
+                    "RerankProjection has invalid parent Chunk coordinates.",
+                    affected=span.id,
+                ) from exc
+            if span.token_count > projection.hard_max_tokens:
+                raise CanonicalValidationError(
+                    "RerankProjection span exceeds its hard maximum.",
+                    affected=span.id,
+                )
+            spans_by_chunk.setdefault(span.parent_chunk_id, []).append(span)
+        if chunks and set(spans_by_chunk) != set(chunks_by_id):
+            raise CanonicalValidationError(
+                "RerankProjection must cover every parent Chunk exactly by ID.",
+                affected=projection.snapshot_id,
+            )
+        for chunk_id, spans in spans_by_chunk.items():
+            ordered = sorted(spans, key=lambda item: item.ordinal)
+            if [span.ordinal for span in ordered] != list(range(len(ordered))):
+                raise CanonicalValidationError(
+                    "RerankProjection ordinals are not contiguous.",
+                    affected=chunk_id,
+                )
+            for left, right in pairwise(ordered):
+                if left.character_end_in_chunk > right.character_start_in_chunk:
+                    raise CanonicalValidationError(
+                        "RerankProjection ranges overlap.",
+                        affected=chunk_id,
+                    )
 
     def _write_immutable(self, path: Path, content: bytes) -> None:
         self.paths.assert_within_root(path)

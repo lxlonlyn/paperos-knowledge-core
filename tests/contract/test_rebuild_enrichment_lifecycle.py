@@ -56,7 +56,11 @@ class _LLMProbe:
         self.calls = 0
 
     async def enrich(
-        self, bundle: Any, chunks: list[Any], scholarly: Any = None
+        self,
+        bundle: Any,
+        chunks: list[Any],
+        scholarly: Any = None,
+        claim_enrichment_enabled: bool = False,
     ) -> SemanticEnrichment:
         self.calls += 1
         return self.enrichment
@@ -93,6 +97,31 @@ async def enrichment_reuse_contract() -> dict[str, object]:
     enrichment = _empty_enrichment()
     with tempfile.TemporaryDirectory(prefix="paperos-enrichment-contract-") as directory:
         root = Path(directory)
+
+        disabled_id = "snapshot_disabled"
+        disabled_path = root / f"{disabled_id}.json"
+        disabled_path.write_text("not-valid-enrichment", encoding="utf-8")
+        disabled_probe = _LLMProbe(enrichment)
+        disabled = await semantic_enrichment_task(
+            [_identity_bound(disabled_id)],
+            llm=disabled_probe,
+            enrichment_root=root,
+            semantic_enrichment_enabled=False,
+            reuse_existing=True,
+            generate_if_missing=False,
+        )
+        _require(disabled_probe.calls == 0, "Disabled enrichment called the LLM.")
+        _require(
+            disabled_path.read_text(encoding="utf-8") == "not-valid-enrichment",
+            "Disabled enrichment read or rewrote an existing artifact.",
+        )
+        _require(
+            len(disabled) == 1
+            and not disabled[0].enrichment.entities
+            and not disabled[0].enrichment.claims
+            and not disabled[0].enrichment.relations,
+            "Disabled enrichment did not return the in-memory empty projection.",
+        )
 
         existing_id = "snapshot_existing"
         (root / f"{existing_id}.json").write_text(
@@ -142,6 +171,8 @@ async def enrichment_reuse_contract() -> dict[str, object]:
 
     return {
         "status": "passed",
+        "disabled_artifact_untouched": True,
+        "disabled_llm_calls": disabled_probe.calls,
         "existing_artifact_llm_calls": existing_probe.calls,
         "missing_artifact_llm_calls": missing_probe.calls,
         "explicit_generation_llm_calls": generation_probe.calls,
@@ -150,12 +181,13 @@ async def enrichment_reuse_contract() -> dict[str, object]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--live-data-dir", type=Path, required=True)
+    parser.add_argument("--live-data-dir", type=Path)
     args = parser.parse_args()
     report = {
-        "current_snapshots": current_snapshot_contract(args.live_data_dir),
         "enrichment_reuse": asyncio.run(enrichment_reuse_contract()),
     }
+    if args.live_data_dir is not None:
+        report["current_snapshots"] = current_snapshot_contract(args.live_data_dir)
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
 
 

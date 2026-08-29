@@ -30,12 +30,13 @@ from paperos_core.adapters.cognee.models import (
     DataPointGraph,
     canonical_to_datapoints,
 )
-from paperos_core.domain.canonical import CanonicalBundle, ChunkProjection
+from paperos_core.domain.canonical import CanonicalBundle, ChunkProjection, RerankSpan
 from paperos_core.domain.knowledge import SemanticEnrichment
 from paperos_core.domain.scholarly import ScholarlyContext
 from paperos_core.errors import CogneeStorageError
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.chunking import build_chunks
+from paperos_core.ingestion.rerank_projection import build_rerank_projection
 from paperos_core.ingestion.retrieval_text import bind_scholarly_citations
 from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
 from paperos_core.ingestion.tokenization import AUTHORITATIVE_CHUNK_TOKENIZER
@@ -75,6 +76,7 @@ async def academic_chunk_task(
     results: list[ChunkedBundle] = []
     for item in data:
         bundle = getattr(item, "bundle", item)
+        rerank_spans: list[RerankSpan] = []
         chunks, mentions = build_chunks(
             document=bundle.document,
             snapshot_id=bundle.snapshot.id,
@@ -85,8 +87,14 @@ async def academic_chunk_task(
             hard_max_tokens=chunk_hard_max_tokens,
             overlap_tokens=chunk_overlap_tokens,
             tokenizer=AUTHORITATIVE_CHUNK_TOKENIZER,
+            rerank_span_sink=rerank_spans,
+        )
+        rerank_projection = build_rerank_projection(
+            bundle.snapshot.id,
+            rerank_spans,
         )
         repository.save_chunks(bundle.snapshot.id, chunks, mentions)
+        repository.save_rerank_projection(rerank_projection)
         results.append(
             ChunkedBundle(
                 bundle=bundle,
@@ -94,6 +102,7 @@ async def academic_chunk_task(
                     snapshot_id=bundle.snapshot.id,
                     chunks=chunks,
                     citation_mentions=mentions,
+                    rerank_projection=rerank_projection,
                 ),
             )
         )
@@ -154,35 +163,41 @@ async def semantic_enrichment_task(
     *,
     llm: LLMClient,
     enrichment_root: Path,
+    semantic_enrichment_enabled: bool = True,
     reuse_existing: bool = False,
     generate_if_missing: bool = True,
     claim_enrichment_enabled: bool = False,
 ) -> list[EnrichedBundle]:
-    """Reuse validated enrichment or generate it only when explicitly allowed."""
+    """Return an in-memory empty projection when semantic enrichment is disabled."""
     results: list[EnrichedBundle] = []
     for chunked in data:
-        enrichment_path = enrichment_root / f"{chunked.bundle.snapshot.id}.json"
-        if reuse_existing and enrichment_path.is_file():
-            enrichment = _load_enrichment(enrichment_path)
-            if not claim_enrichment_enabled and enrichment.claims:
+        if not semantic_enrichment_enabled:
+            enrichment = _empty_semantic_enrichment(chunked.projection.chunks)
+        else:
+            enrichment_path = enrichment_root / f"{chunked.bundle.snapshot.id}.json"
+            if reuse_existing and enrichment_path.is_file():
+                enrichment = _load_enrichment(enrichment_path)
+                if not claim_enrichment_enabled and enrichment.claims:
+                    raise CogneeStorageError(
+                        "Claim-disabled ingestion cannot reuse enrichment containing claims.",
+                        affected=enrichment_path,
+                    )
+            elif not generate_if_missing:
                 raise CogneeStorageError(
-                    "Claim-disabled ingestion cannot reuse enrichment containing claims.",
+                    "Semantic enrichment artifact is missing and generation is disabled.",
                     affected=enrichment_path,
                 )
-        elif not generate_if_missing:
-            raise CogneeStorageError(
-                "Semantic enrichment artifact is missing and generation is disabled.",
-                affected=enrichment_path,
-            )
-        else:
-            enrichment = await llm.enrich(
-                chunked.bundle,
-                chunked.projection.chunks,
-                scholarly=chunked.scholarly,
-                claim_enrichment_enabled=claim_enrichment_enabled,
-            )
-            _persist_enrichment(enrichment_root, chunked.bundle.snapshot.id, enrichment)
-        _validate_semantic_provenance(chunked.projection.chunks, enrichment)
+            else:
+                enrichment = await llm.enrich(
+                    chunked.bundle,
+                    chunked.projection.chunks,
+                    scholarly=chunked.scholarly,
+                    claim_enrichment_enabled=claim_enrichment_enabled,
+                )
+                _persist_enrichment(
+                    enrichment_root, chunked.bundle.snapshot.id, enrichment
+                )
+            _validate_semantic_provenance(chunked.projection.chunks, enrichment)
         results.append(
             EnrichedBundle(
                 bundle=chunked.bundle,
@@ -192,6 +207,25 @@ async def semantic_enrichment_task(
             )
         )
     return results
+
+
+def _empty_semantic_enrichment(chunks: list[Any]) -> SemanticEnrichment:
+    """Create a non-persistent compatibility value for the disabled task path."""
+
+    return SemanticEnrichment(
+        entities=[],
+        claims=[],
+        relations=[],
+        model="paperos/no-semantic-enrichment",
+        provider="paperos",
+        model_version="disabled",
+        prompt_name="semantic_enrichment",
+        prompt_version="disabled",
+        prompt_sha256="0" * 64,
+        covered_chunk_ids=[],
+        uncovered_chunk_ids=[chunk.id for chunk in chunks],
+        coverage_ratio=0.0,
+    )
 
 
 async def datapoint_mapping_task(
@@ -255,6 +289,7 @@ def configure_pipeline_tasks(
     scholarly_candidate_snapshot_id: str | None = None,
     reuse_existing_enrichment: bool,
     generate_enrichment_if_missing: bool,
+    semantic_enrichment_enabled: bool,
     claim_enrichment_enabled: bool,
 ) -> list[Any]:
     """Bind per-run dependencies and return the Cognee Task list."""
@@ -279,6 +314,7 @@ def configure_pipeline_tasks(
             batch_size=1,
             llm=llm,
             enrichment_root=enrichment_root,
+            semantic_enrichment_enabled=semantic_enrichment_enabled,
             reuse_existing=reuse_existing_enrichment,
             generate_if_missing=generate_enrichment_if_missing,
             claim_enrichment_enabled=claim_enrichment_enabled,

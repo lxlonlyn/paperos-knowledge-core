@@ -23,6 +23,7 @@ class RebuildReport(BaseModel):
     reports: list[IndexingReport]
     all_snapshot_count: int
     active_snapshot_count: int
+    semantic_enrichment_enabled: bool
     enrichment_existing_count: int
     enrichment_missing_count: int
     enrichment_generated_count: int
@@ -36,6 +37,7 @@ class RebuildReport(BaseModel):
             "reports": [report.public_dict() for report in self.reports],
             "all_snapshot_count": self.all_snapshot_count,
             "active_snapshot_count": self.active_snapshot_count,
+            "semantic_enrichment_enabled": self.semantic_enrichment_enabled,
             "enrichment_existing_count": self.enrichment_existing_count,
             "enrichment_missing_count": self.enrichment_missing_count,
             "enrichment_generated_count": self.enrichment_generated_count,
@@ -104,14 +106,23 @@ class DerivedDataRebuilder:
         for selected_id in selected:
             self.canonical_repository.verify_snapshot(selected_id)
 
+        enrichment_enabled = self.pipeline.ingestion.semantic_enrichment_enabled
         enrichment_root = self.paths.cognee / "enrichment"
-        existing = [
-            selected_id
-            for selected_id in selected
-            if (enrichment_root / f"{selected_id}.json").is_file()
-        ]
+        existing = (
+            [
+                selected_id
+                for selected_id in selected
+                if (enrichment_root / f"{selected_id}.json").is_file()
+            ]
+            if enrichment_enabled
+            else []
+        )
         existing_set = set(existing)
-        missing = [selected_id for selected_id in selected if selected_id not in existing_set]
+        missing = (
+            [selected_id for selected_id in selected if selected_id not in existing_set]
+            if enrichment_enabled
+            else []
+        )
         if missing and not refresh_enrichment:
             raise CogneeStorageError(
                 "Semantic enrichment is missing for current rebuild snapshots; "
@@ -167,6 +178,7 @@ class DerivedDataRebuilder:
             reports=reports,
             all_snapshot_count=len(all_snapshot_ids),
             active_snapshot_count=len(active_snapshot_ids),
+            semantic_enrichment_enabled=enrichment_enabled,
             enrichment_existing_count=len(existing),
             enrichment_missing_count=len(missing),
             enrichment_generated_count=len(missing),

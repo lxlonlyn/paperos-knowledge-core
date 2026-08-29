@@ -51,6 +51,7 @@ max_file_mb = 200
 chunk_target_tokens = 900
 chunk_hard_max_tokens = 1200
 chunk_overlap_tokens = 0
+semantic_enrichment_enabled = false
 claim_enrichment_enabled = false
 
 [retrieval]

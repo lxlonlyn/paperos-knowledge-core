@@ -132,6 +132,7 @@ class IngestionSettings(StrictSettings):
     chunk_target_tokens: int = Field(default=900, gt=0)
     chunk_hard_max_tokens: int = Field(default=1200, gt=0)
     chunk_overlap_tokens: int = Field(default=0, ge=0)
+    semantic_enrichment_enabled: bool = False
     claim_enrichment_enabled: bool = False
 
 
@@ -187,6 +188,14 @@ class RuntimeSettings(StrictSettings):
             raise ValueError(
                 "retrieval.rerank_enabled=true requires local_inference.enabled=true; "
                 "no remote reranker is configured"
+            )
+        if (
+            self.ingestion.claim_enrichment_enabled
+            and not self.ingestion.semantic_enrichment_enabled
+        ):
+            raise ValueError(
+                "ingestion.claim_enrichment_enabled=true requires "
+                "ingestion.semantic_enrichment_enabled=true"
             )
         return self
 

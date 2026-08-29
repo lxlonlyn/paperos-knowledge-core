@@ -417,6 +417,27 @@ def _emergency_split(
     )
 
 
+def fallback_text_ranges(
+    text: str,
+    *,
+    count: Any,
+    hard_max_tokens: int,
+) -> list[tuple[int, int, SplitType]]:
+    """Expose the canonical protected-domain fallback without sentence guessing."""
+
+    return [
+        (item.start, item.end, item.split_type)
+        for item in _fallback_ranges(
+            text,
+            start=0,
+            end=len(text),
+            count=count,
+            hard_max_tokens=hard_max_tokens,
+            render=lambda value: value,
+        )
+    ]
+
+
 def _fallback_ranges(
     source: str,
     *,
