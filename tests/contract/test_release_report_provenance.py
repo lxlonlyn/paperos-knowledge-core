@@ -12,13 +12,20 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 from tests.validation.release_provenance import (
     ENGINEERING_GATE_NAMES,
     SEARCH_QUALITY_PENDING,
+    VALIDATION_HEAD_ATTRIBUTED,
+    VALIDATION_HEAD_LEGACY_UNATTRIBUTED,
+    VALIDATION_HEAD_MIXED,
     VALIDATION_ORIGIN_CURRENT,
+    VALIDATION_ORIGIN_MIXED_REUSED,
     VALIDATION_ORIGIN_REUSED,
+    _annotate_validation,
+    _composite_reused_validation,
     _drop_legacy_gate_fields,
     _engineering_decision,
     _gate_record,
     _legacy_engineering_evidence,
     _merge_query_reviews,
+    _reused_validation,
 )
 
 
@@ -46,6 +53,14 @@ def _legacy_field_contract() -> dict[str, object]:
 def _query_provenance_contract() -> list[dict[str, object]]:
     previous_head = "1" * 40
     current_head = "2" * 40
+    explicit = _reused_validation(
+        {"id": "explicit_query", "status": "PASS", "validated_head": previous_head}
+    )
+    _require(
+        explicit["validated_head"] == previous_head
+        and explicit["validation_head_status"] == VALIDATION_HEAD_ATTRIBUTED,
+        "Explicit historical HEAD was not preserved",
+    )
     merged = _merge_query_reviews(
         ["old_query", "current_query"],
         [
@@ -53,16 +68,18 @@ def _query_provenance_contract() -> list[dict[str, object]]:
             {"id": "current_query", "status": "FAIL"},
         ],
         [{"id": "current_query", "status": "PASS"}],
-        previous_head=previous_head,
         current_head=current_head,
+        previous_provenance_trusted=False,
     )
     old, current = merged
     _require(
         old["status"] == "PASS"
         and old["validation_origin"] == VALIDATION_ORIGIN_REUSED
-        and old["validated_head"] == previous_head
+        and old["validated_head"] is None
+        and old["validation_head_status"]
+        == VALIDATION_HEAD_LEGACY_UNATTRIBUTED
         and old["executed_this_run"] is False,
-        "Historical query was presented as a current-HEAD execution",
+        "Unattributed historical query received a guessed HEAD",
     )
     _require(
         current["status"] == "PASS"
@@ -71,7 +88,53 @@ def _query_provenance_contract() -> list[dict[str, object]]:
         and current["executed_this_run"] is True,
         "Current query execution provenance is incorrect",
     )
+    diagnostic = _reused_validation(
+        {
+            "id": "adadiv_self_limitation_default",
+            "status": "PASS",
+            "validated_head": previous_head,
+            "window_count": 3,
+            "winning_window_index": 2,
+            "rerank_rank": 12,
+        },
+        force_unattributed=True,
+    )
+    _require(
+        diagnostic["status"] == "PASS"
+        and diagnostic["validated_head"] is None
+        and diagnostic["validation_head_status"]
+        == VALIDATION_HEAD_LEGACY_UNATTRIBUTED,
+        "Legacy reranker diagnostic retained a guessed clean-room HEAD",
+    )
     return merged
+
+
+def _composite_provenance_contract() -> dict[str, object]:
+    head_a = "a" * 40
+    head_b = "b" * 40
+    child_a = _annotate_validation(
+        {"status": "PASS"},
+        origin=VALIDATION_ORIGIN_REUSED,
+        validated_head=head_a,
+        executed_this_run=False,
+    )
+    child_b = _annotate_validation(
+        {"status": "PASS"},
+        origin=VALIDATION_ORIGIN_REUSED,
+        validated_head=head_b,
+        executed_this_run=False,
+    )
+    composite = _composite_reused_validation(
+        {"status": "PASS", "validated_head": head_a},
+        children=[child_a, child_b],
+    )
+    _require(
+        composite["validation_origin"] == VALIDATION_ORIGIN_MIXED_REUSED
+        and composite["validated_head"] is None
+        and composite["validation_head_status"] == VALIDATION_HEAD_MIXED,
+        "Mixed composite was assigned one child's HEAD",
+    )
+    return composite
 
 
 def _gate_provenance_contract() -> dict[str, dict[str, object]]:
@@ -97,7 +160,7 @@ def _gate_provenance_contract() -> dict[str, dict[str, object]]:
     }
     gates = _legacy_engineering_evidence(
         legacy_report,
-        legacy_head=previous_head,
+        legacy_structural_head=previous_head,
     )
     for name in (
         "active_revision",
@@ -119,7 +182,15 @@ def _gate_provenance_contract() -> dict[str, dict[str, object]]:
             and gate["executed_this_run"] is False,
             f"Historical gate provenance is incorrect: {name}",
         )
-    for name in ("contracts", "ci", "compile", "ruff", "mypy", "node_build"):
+    for name in (
+        "contracts",
+        "ci_local_equivalent",
+        "ci_workflow_contract",
+        "compile",
+        "ruff",
+        "mypy",
+        "node_build",
+    ):
         gates[name] = _gate_record(
             True,
             origin=VALIDATION_ORIGIN_CURRENT,
@@ -178,6 +249,7 @@ def main() -> None:
         "status": "passed",
         "legacy_fields": _legacy_field_contract(),
         "queries": _query_provenance_contract(),
+        "mixed_composite": _composite_provenance_contract(),
         "gates": _gate_provenance_contract(),
         "ci": _ci_contract(),
         "search_quality_status": SEARCH_QUALITY_PENDING,

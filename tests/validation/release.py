@@ -32,10 +32,14 @@ from paperos_core.retrieval.corpus import CorpusView
 from tests.validation import retrieval as retrieval_validation
 from tests.validation.chunk import review___projection_metrics
 from tests.validation.release_provenance import (
+    PROVENANCE_SCHEMA_VERSION,
     RERANK_PROVISIONAL_NOTICE,
     SEARCH_QUALITY_PENDING,
+    VALIDATION_HEAD_MIXED,
     VALIDATION_ORIGIN_CURRENT,
+    VALIDATION_ORIGIN_MIXED_REUSED,
     _annotate_validation,
+    _composite_reused_validation,
     _drop_legacy_gate_fields,
     _engineering_decision,
     _gate_record,
@@ -51,7 +55,7 @@ DEFAULT_CORPUS = Path("data/validation/corpus/papers")
 DATASET = "paperos-release-gate"
 
 
-def _final_engineering_command_specs() -> dict[str, list[str]]:
+def _full_engineering_command_specs() -> dict[str, list[str]]:
     python = sys.executable
     return {
         "node_build": ["npm", "--prefix", "services/local_models", "run", "build"],
@@ -68,26 +72,25 @@ def _final_engineering_command_specs() -> dict[str, list[str]]:
     }
 
 
-def _legacy_validation_head(
-    args: argparse.Namespace, report: dict[str, Any]
-) -> str:
-    supplied = getattr(args, "legacy_validated_head", None)
+def _provenance_final_command_specs() -> dict[str, list[str]]:
+    python = sys.executable
+    return {
+        "compile": [python, "-m", "compileall", "-q", "paperos_core", "tests"],
+        "ruff": ["ruff", "check", "paperos_core", "tests"],
+        "mypy": ["mypy", "paperos_core"],
+        "report_contract": [
+            python,
+            "tests/contract/test_release_report_provenance.py",
+        ],
+        "diff_check": ["git", "diff", "--check"],
+    }
+
+
+def _legacy_structural_head(args: argparse.Namespace) -> str | None:
+    supplied = getattr(args, "legacy_structural_head", None)
     if supplied:
         return str(supplied)
-    gates = report.get("engineering_gates")
-    if isinstance(gates, dict):
-        heads = {
-            str(value.get("validated_head"))
-            for value in gates.values()
-            if isinstance(value, dict) and value.get("validated_head")
-        }
-        if heads:
-            return min(heads)
-    raise RuntimeError(
-        "Legacy report lacks per-gate validation provenance; "
-        "pass --legacy-validated-head with the actual execution commit."
-    )
-
+    return None
 
 
 def _git(*args: str) -> str:
@@ -404,7 +407,10 @@ def _finalize_existing(args: argparse.Namespace) -> dict[str, Any]:
         )
     previous_report = json.loads(report_path.read_text(encoding="utf-8"))
     clean_room = json.loads(acceptance_path.read_text(encoding="utf-8"))
-    legacy_head = _legacy_validation_head(args, previous_report)
+    provenance_trusted = (
+        previous_report.get("validation_provenance_schema_version")
+        == PROVENANCE_SCHEMA_VERSION
+    )
     current_head = _git("rev-parse", "HEAD")
 
     case_ids = [str(item["id"]) for item in clean_room["queries"]]
@@ -412,14 +418,21 @@ def _finalize_existing(args: argparse.Namespace) -> dict[str, Any]:
         case_ids,
         clean_room["queries"],
         [],
-        previous_head=legacy_head,
         current_head=current_head,
+        previous_provenance_trusted=provenance_trusted,
     )
-    clean_room = _reused_validation(clean_room, fallback_head=legacy_head)
 
     engineering_gates = _legacy_engineering_evidence(
         previous_report,
-        legacy_head=legacy_head,
+        legacy_structural_head=_legacy_structural_head(args),
+    )
+    clean_room = _composite_reused_validation(
+        clean_room,
+        children=[
+            *clean_room["queries"],
+            engineering_gates["clean_room_pipeline"],
+            engineering_gates["citation_provenance"],
+        ],
     )
     command_results = {
         name: _annotate_validation(
@@ -428,41 +441,58 @@ def _finalize_existing(args: argparse.Namespace) -> dict[str, Any]:
             validated_head=current_head,
             executed_this_run=True,
         )
-        for name, command in _final_engineering_command_specs().items()
+        for name, command in _provenance_final_command_specs().items()
     }
-    current_gate_results = {
-        "node_build": command_results["node_build"]["status"] == "PASS",
-        "compile": command_results["compile"]["status"] == "PASS",
-        "ruff": command_results["ruff"]["status"] == "PASS",
-        "mypy": command_results["mypy"]["status"] == "PASS",
-    }
-    contracts_passed = all(
-        command_results[name]["status"] == "PASS"
-        for name in ("runtime_contract", "reranker_contract", "report_contract")
-    )
-    current_gate_results["contracts"] = contracts_passed
-    current_gate_results["ci"] = (
-        contracts_passed
-        and all(current_gate_results.values())
-        and command_results["diff_check"]["status"] == "PASS"
-    )
-    for name, passed in current_gate_results.items():
+    for name in ("compile", "ruff", "mypy"):
         engineering_gates[name] = _gate_record(
-            passed,
+            command_results[name]["status"] == "PASS",
             origin=VALIDATION_ORIGIN_CURRENT,
             validated_head=current_head,
             executed_this_run=True,
         )
+    contracts_passed = engineering_gates["contracts"]["status"] == "PASS"
+    workflow_contract_passed = command_results["report_contract"]["status"] == "PASS"
+    engineering_gates["ci_workflow_contract"] = _gate_record(
+        workflow_contract_passed,
+        origin=VALIDATION_ORIGIN_CURRENT,
+        validated_head=current_head,
+        executed_this_run=True,
+    )
+    local_equivalent_passed = (
+        contracts_passed
+        and engineering_gates["node_build"]["status"] == "PASS"
+        and all(
+            engineering_gates[name]["status"] == "PASS"
+            for name in ("compile", "ruff", "mypy")
+        )
+        and workflow_contract_passed
+        and command_results["diff_check"]["status"] == "PASS"
+    )
+    engineering_gates["ci_local_equivalent"] = _gate_record(
+        local_equivalent_passed,
+        origin=VALIDATION_ORIGIN_MIXED_REUSED,
+        validated_head=None,
+        executed_this_run=False,
+        validation_head_status=VALIDATION_HEAD_MIXED,
+    )
 
     report = _drop_legacy_gate_fields(previous_report)
+    report["validation_provenance_schema_version"] = PROVENANCE_SCHEMA_VERSION
     report["head"] = current_head
     report["dirty_at_start"] = bool(_git("status", "--short"))
     report["clean_room"] = clean_room
-    report["runtime_audit"] = _reused_validation(
+    report["runtime_audit"] = _composite_reused_validation(
         dict(previous_report["runtime_audit"]),
-        fallback_head=legacy_head,
+        children=list(engineering_gates.values()),
     )
     report["engineering_gates"] = engineering_gates
+    report["ci"] = {
+        "workflow": ".github/workflows/cross-platform.yml",
+        "ci_local_equivalent": "PASS" if local_equivalent_passed else "FAIL",
+        "ci_workflow_contract": "PASS" if workflow_contract_passed else "FAIL",
+        "github_hosted_ci": "UNVERIFIED",
+        "external_boundaries": "REUSED_PREVIOUS_RUN",
+    }
     report["search_quality_status"] = SEARCH_QUALITY_PENDING
     report["rerank_quality_notice"] = RERANK_PROVISIONAL_NOTICE
     diagnostic = previous_report.get(
@@ -471,7 +501,7 @@ def _finalize_existing(args: argparse.Namespace) -> dict[str, Any]:
     )
     if isinstance(diagnostic, dict):
         report["reranker_diagnostic"] = {
-            **_reused_validation(diagnostic, fallback_head=legacy_head),
+            **_reused_validation(diagnostic, force_unattributed=not provenance_trusted),
             "quality_status": SEARCH_QUALITY_PENDING,
         }
     report["commands"] = list(command_results.values())
@@ -662,33 +692,49 @@ async def _resume_existing(args: argparse.Namespace) -> dict[str, Any]:
     finally:
         await application.aclose()
 
+    provenance_trusted = (
+        previous_report.get("validation_provenance_schema_version")
+        == PROVENANCE_SCHEMA_VERSION
+    )
     current_head = _git("rev-parse", "HEAD")
-    legacy_head = _legacy_validation_head(args, previous_report)
     updated_reviews = _merge_query_reviews(
         [str(case["id"]) for case in queries_config["cases"]],
         previous_acceptance["queries"],
         resumed_reviews,
-        previous_head=legacy_head,
         current_head=current_head,
+        previous_provenance_trusted=provenance_trusted,
     )
     clean_room = dict(previous_acceptance)
     clean_room["queries"] = updated_reviews
-    clean_room = _reused_validation(clean_room, fallback_head=legacy_head)
-    _write_json(acceptance_path, clean_room)
-    _write_json(work / "search" / "review" / "queries.json", updated_reviews)
 
     engineering_gates = _legacy_engineering_evidence(
         previous_report,
-        legacy_head=legacy_head,
+        legacy_structural_head=_legacy_structural_head(args),
+    )
+    clean_room = _composite_reused_validation(
+        clean_room,
+        children=[
+            *updated_reviews,
+            engineering_gates["clean_room_pipeline"],
+            engineering_gates["citation_provenance"],
+        ],
     )
     report = _drop_legacy_gate_fields(previous_report)
+    report["validation_provenance_schema_version"] = PROVENANCE_SCHEMA_VERSION
     report["head"] = current_head
     report["clean_room"] = clean_room
-    report["runtime_audit"] = _reused_validation(
+    report["runtime_audit"] = _composite_reused_validation(
         dict(previous_report["runtime_audit"]),
-        fallback_head=legacy_head,
+        children=list(engineering_gates.values()),
     )
     report["engineering_gates"] = engineering_gates
+    report["ci"] = {
+        "workflow": ".github/workflows/cross-platform.yml",
+        "ci_local_equivalent": engineering_gates["ci_local_equivalent"]["status"],
+        "ci_workflow_contract": engineering_gates["ci_workflow_contract"]["status"],
+        "github_hosted_ci": "UNVERIFIED",
+        "external_boundaries": "REUSED_PREVIOUS_RUN",
+    }
     report["search_quality_status"] = SEARCH_QUALITY_PENDING
     report["rerank_quality_notice"] = RERANK_PROVISIONAL_NOTICE
     diagnostic = blocker_trace or previous_report.get(
@@ -704,13 +750,18 @@ async def _resume_existing(args: argparse.Namespace) -> dict[str, Any]:
                 executed_this_run=True,
             )
             if blocker_trace is not None
-            else _reused_validation(diagnostic, fallback_head=legacy_head)
+            else _reused_validation(
+                diagnostic,
+                force_unattributed=not provenance_trusted,
+            )
         )
         report["reranker_diagnostic"] = {
             **diagnostic_record,
             "quality_status": SEARCH_QUALITY_PENDING,
         }
     report["decision"] = _engineering_decision(engineering_gates)
+    _write_json(acceptance_path, clean_room)
+    _write_json(work / "search" / "review" / "queries.json", updated_reviews)
     _write_json(output / "release-report.json", report)
     (output / "release-report.md").write_text(_markdown(report), encoding="utf-8")
     return report
@@ -739,6 +790,7 @@ def _markdown(report: dict[str, Any]) -> str:
             f"- {name}: {gate.get('status')} "
             f"(origin={gate.get('validation_origin')}, "
             f"validated_head={gate.get('validated_head')}, "
+            f"head_status={gate.get('validation_head_status')}, "
             f"executed_this_run={gate.get('executed_this_run')})"
         )
         for name, gate in gates.items()
@@ -778,10 +830,7 @@ def _markdown(report: dict[str, Any]) -> str:
             "## Known limitations",
             "",
             f"- {report.get('rerank_quality_notice', RERANK_PROVISIONAL_NOTICE)}",
-            (
-                "- GitHub-hosted Windows execution is represented by the portable/config "
-                "contract and workflow definition; this local release run is Linux."
-            ),
+            f"- GitHub-hosted CI: {report.get('ci', {}).get('github_hosted_ci', 'UNVERIFIED')}",
             (
                 "- Cognee may emit its own informational/deprecation logs; PaperOS "
                 "hard-max sizing no longer uses Cognee's tokenizer resolver."
@@ -819,7 +868,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     command_specs = {
-        **_final_engineering_command_specs(),
+        **_full_engineering_command_specs(),
         "active_revision_contract": [
             sys.executable,
             "tests/contract/test_active_canonical_revision.py",
@@ -866,9 +915,11 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     engineering_results = {
         "contracts": contracts_passed,
-        "ci": contracts_passed
+        "ci_local_equivalent": contracts_passed
         and all(static_passed.values())
         and command_results["diff_check"]["status"] == "PASS",
+        "ci_workflow_contract": command_results["report_contract"]["status"]
+        == "PASS",
         **static_passed,
         "active_revision": bool(
             runtime_audit["active"]["one_pointer_per_document"]
@@ -934,6 +985,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     report = {
         "decision": decision,
+        "validation_provenance_schema_version": PROVENANCE_SCHEMA_VERSION,
         "head": head,
         "dirty_at_start": dirty_at_start,
         "environment": {
@@ -943,9 +995,14 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         },
         "ci": {
             "workflow": ".github/workflows/cross-platform.yml",
-            "linux_local_equivalent": "PASS",
-            "windows_portable_contract": "PASS",
-            "external_job": "executed locally with the release commands below",
+            "ci_local_equivalent": engineering_gates["ci_local_equivalent"][
+                "status"
+            ],
+            "ci_workflow_contract": engineering_gates["ci_workflow_contract"][
+                "status"
+            ],
+            "github_hosted_ci": "UNVERIFIED",
+            "external_boundaries": "executed locally with the release commands below",
         },
         "engineering_gates": engineering_gates,
         "search_quality_status": SEARCH_QUALITY_PENDING,
@@ -975,7 +1032,7 @@ def main() -> None:
     parser.add_argument("--work", type=Path, default=DEFAULT_WORK)
     parser.add_argument("--resume-existing", action="store_true")
     parser.add_argument("--finalize-engineering", action="store_true")
-    parser.add_argument("--legacy-validated-head")
+    parser.add_argument("--legacy-structural-head")
     parser.add_argument("--case", action="append")
     args = parser.parse_args()
     try:
