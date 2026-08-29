@@ -1,0 +1,150 @@
+{
+  "gold": [
+    {
+      "case_id": "volume_reported_limitations",
+      "expected_work": "volume_preserving",
+      "gold_chunk_ids": ["chunk_38c00b6168754a8ae9ab89eeab0b8d70"],
+      "anchors": [
+        "the details tend to be smoothed out",
+        "Another limitation is the computation time",
+        "necessary first order differentiation"
+      ]
+    },
+    {
+      "case_id": "volume_null_div_detail_conflict",
+      "expected_work": "volume_preserving",
+      "gold_chunk_ids": ["chunk_d195ab81057cf625ed1d7a71096d57e5"],
+      "anchors": [
+        "Enforcing zero-divergence on V yields very low detail surfaces",
+        "it preserves the volume of every level set"
+      ]
+    },
+    {
+      "case_id": "lipschitz_fewshot_semantic_limit",
+      "expected_work": "liu_lipschitz",
+      "gold_chunk_ids": [
+        "chunk_bcdfdc9619c68f8d68f1c242c1a0ea99",
+        "chunk_e53e613fe36444c00562a87555c390bc"
+      ],
+      "anchors": [
+        "cannot extract high-level information, such as semantics",
+        "may not be realistic animals",
+        "learning high-level structural information from few examples"
+      ]
+    },
+    {
+      "case_id": "lipschitz_parameter_bound",
+      "expected_work": "liu_lipschitz",
+      "gold_chunk_ids": ["chunk_df1b9fca8a6fa6121e809008a49aa00d"],
+      "anchors": [
+        "the upper bound of the Lipschitz constant",
+        "only depends on the weight matrices"
+      ]
+    },
+    {
+      "case_id": "nise_initial_condition_comparison",
+      "expected_work": "nise",
+      "gold_chunk_ids": ["chunk_076f3a9b4472be26acb41598daefe63a"],
+      "anchors": [
+        "results in a better approximation of the initial conditions",
+        "Lipschitz MLP cannot adequately approximate the initial conditions"
+      ]
+    },
+    {
+      "case_id": "nise_lse_without_extra_data",
+      "expected_work": "nise",
+      "gold_chunk_ids": ["chunk_95c92a207fe63329e8b14d40491d0f44"],
+      "anchors": [
+        "without the use of additional data, only the initial conditions are used",
+        "learn the animation only considering the LSE constraint"
+      ]
+    },
+    {
+      "case_id": "4deform_future_limits",
+      "expected_work": "4deform",
+      "gold_chunk_ids": ["chunk_9ef45d5c3b187a69f4098cf2c012a524"],
+      "anchors": [
+        "mechanical joints and fluid dynamics",
+        "the deformations of the body and clothing do not align",
+        "separate deformation estimation"
+      ]
+    },
+    {
+      "case_id": "4deform_partial_noisy_input",
+      "expected_work": "4deform",
+      "gold_chunk_ids": ["chunk_ed4f6e8220a4a501fa024e5667d2cdda"],
+      "anchors": [
+        "partially available while having noisy correspondences",
+        "collapse the unseen part or create unreasonable stretches",
+        "plausible interpolations, both for the visible and missing parts"
+      ]
+    },
+    {
+      "case_id": "explicit_higher_genus_failure",
+      "expected_work": "explicit_flows",
+      "gold_chunk_ids": ["chunk_02c6a2b92937fec5933f3fe5a0a73c3d"],
+      "anchors": [
+        "when topological features have too diferent sizes",
+        "training can fail in local minima",
+        "adding a topological feature detection and matching step"
+      ]
+    },
+    {
+      "case_id": "explicit_baseline_comparison",
+      "expected_work": "explicit_flows",
+      "gold_chunk_ids": ["chunk_4924c9718d1c8b69b0fd82a8d82bbe5b"],
+      "anchors": [
+        "trajectory produced by NeuralFlow is noticeably less smooth over time",
+        "faster baselines",
+        "yield considerably less natural results"
+      ]
+    },
+    {
+      "case_id": "volume_weak_coupling_topology",
+      "expected_work": "volume_preserving",
+      "gold_chunk_ids": ["chunk_df67ce68f1f50bff7919b4a066075275"],
+      "anchors": [
+        "does not allow topological genus changes",
+        "weakly coupled, it may happen that the implicit representation undergoes topological changes"
+      ]
+    },
+    {
+      "case_id": "lipschitz_linear_interpolation_limit",
+      "expected_work": "liu_lipschitz",
+      "gold_chunk_ids": ["chunk_e53e613fe36444c00562a87555c390bc"],
+      "anchors": [
+        "defined on a loose upper bound of the true Lipschitz constant",
+        "shape interpolation behaves similarly to linear interpolation"
+      ]
+    },
+    {
+      "case_id": "nise_pretrained_initialization",
+      "expected_work": "nise",
+      "gold_chunk_ids": ["chunk_40c247a6093efb78e69383207ad24860"],
+      "anchors": [
+        "initialized based onpreviously trained initial conditions",
+        "resulting infaster convergence compared to the standard approach"
+      ]
+    },
+    {
+      "case_id": "4deform_changing_topology",
+      "expected_work": "4deform",
+      "gold_chunk_ids": ["chunk_950d92bd0d2957f19f687dc03e07d2e2"],
+      "anchors": [
+        "takes a sparse temporal sequence of point clouds as input",
+        "pairs of point clouds and estimated sparse, noisy correspondences",
+        "even for shapes with changing topology"
+      ]
+    },
+    {
+      "case_id": "explicit_pairwise_canonical_condition",
+      "expected_work": "explicit_flows",
+      "gold_chunk_ids": ["chunk_a40c84412ac792320ddaf08e0b8cbd7f"],
+      "anchors": [
+        "provided that pairwise flows between each individual shape and a suitable canonical shape have been computed",
+        "canonical shape should have the same topology",
+        "this choice strongly impacts the results"
+      ]
+    }
+  ]
+}

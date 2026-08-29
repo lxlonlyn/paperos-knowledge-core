@@ -29,9 +29,10 @@ export interface RankedDocument {
   winningWindowText: string;
 }
 
-// Every input is one prebuilt PaperOS RerankSpan. This service validates and
-// scores spans without query-time sentence/window splitting. Python performs
-// MaxP aggregation back to the authoritative canonical parent Chunk.
+// Every input is a prebuilt PaperOS scoring document: either an authoritative
+// canonical parent Chunk or one structured RerankSpan. This service scores the
+// supplied text without query-time sentence/window splitting. Python fuses the
+// full-Chunk rank with structured MaxP rank back to canonical parent Chunks.
 
 export class RerankerService {
   private llama: Llama | undefined;

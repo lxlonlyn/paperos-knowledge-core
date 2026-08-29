@@ -1,0 +1,125 @@
+{
+  "dataset": "rerank_projection_acceptance",
+  "cases": [
+    {
+      "id": "volume_reported_limitations",
+      "split": "dev",
+      "query": "What limitations does Volume Preserving Neural Shape Morphing report about geometric detail and computation time?",
+      "top_k": 10,
+      "work_ids": [],
+      "expand_context": false
+    },
+    {
+      "id": "volume_null_div_detail_conflict",
+      "split": "dev",
+      "query": "Why do strictly divergence-free NullDiv fields produce low-detail surfaces under the Eikonal constraint?",
+      "top_k": 10,
+      "work_ids": ["volume_preserving"],
+      "expand_context": false
+    },
+    {
+      "id": "lipschitz_fewshot_semantic_limit",
+      "split": "dev",
+      "query": "What can Lipschitz MLP not infer from only a handful of animal shapes in few-shot interpolation?",
+      "top_k": 10,
+      "work_ids": ["liu_lipschitz"],
+      "expand_context": false
+    },
+    {
+      "id": "lipschitz_parameter_bound",
+      "split": "dev",
+      "query": "How is the input Lipschitz constant upper bound expressed using the neural network weight matrices?",
+      "top_k": 10,
+      "work_ids": ["liu_lipschitz"],
+      "expand_context": false
+    },
+    {
+      "id": "nise_initial_condition_comparison",
+      "split": "dev",
+      "query": "How does NISE compare with Lipschitz MLP when approximating the Witch and Falcon initial conditions?",
+      "top_k": 10,
+      "work_ids": [],
+      "expand_context": false
+    },
+    {
+      "id": "nise_lse_without_extra_data",
+      "split": "dev",
+      "query": "What data does Neural Implicit Surface Evolution require to learn an animation under the level set equation?",
+      "top_k": 10,
+      "work_ids": ["nise"],
+      "expand_context": false
+    },
+    {
+      "id": "4deform_future_limits",
+      "split": "dev",
+      "query": "Which deformation types remain difficult for 4Deform, and why must loose clothing be estimated separately from the body?",
+      "top_k": 10,
+      "work_ids": ["4deform"],
+      "expand_context": true
+    },
+    {
+      "id": "4deform_partial_noisy_input",
+      "split": "dev",
+      "query": "What happens on partial shapes with noisy correspondences, and how does 4Deform compare with methods that collapse unseen parts?",
+      "top_k": 10,
+      "work_ids": ["4deform"],
+      "expand_context": false
+    },
+    {
+      "id": "explicit_higher_genus_failure",
+      "split": "dev",
+      "query": "Under what higher-genus condition can EFIS training fail in a local minimum, and what mitigation is proposed?",
+      "top_k": 10,
+      "work_ids": ["explicit_flows"],
+      "expand_context": false
+    },
+    {
+      "id": "explicit_baseline_comparison",
+      "split": "dev",
+      "query": "How does EFIS compare with NeuralFlow, ADADIV, NISE, and LipMLP in shape interpolation quality and temporal smoothness?",
+      "top_k": 10,
+      "work_ids": [],
+      "expand_context": false
+    },
+    {
+      "id": "volume_weak_coupling_topology",
+      "split": "holdout",
+      "query": "Why can the implicit representation still undergo topology changes even though adaptive-divergence advection is fold-over free?",
+      "top_k": 10,
+      "work_ids": ["volume_preserving"],
+      "expand_context": false
+    },
+    {
+      "id": "lipschitz_linear_interpolation_limit",
+      "split": "holdout",
+      "query": "What two limitations does the Lipschitz paper identify about its bound estimate and linear-like shape interpolation?",
+      "top_k": 10,
+      "work_ids": ["liu_lipschitz"],
+      "expand_context": false
+    },
+    {
+      "id": "nise_pretrained_initialization",
+      "split": "holdout",
+      "query": "What convergence benefit is reported when NISE is initialized from previously trained initial conditions?",
+      "top_k": 10,
+      "work_ids": ["nise"],
+      "expand_context": false
+    },
+    {
+      "id": "4deform_changing_topology",
+      "split": "holdout",
+      "query": "What input does 4Deform use to produce long-range interpolation when topology changes?",
+      "top_k": 10,
+      "work_ids": ["4deform"],
+      "expand_context": false
+    },
+    {
+      "id": "explicit_pairwise_canonical_condition",
+      "split": "holdout",
+      "query": "What conditions make EFIS pairwise-to-any morphing possible, and why does the canonical shape choice matter?",
+      "top_k": 10,
+      "work_ids": ["explicit_flows"],
+      "expand_context": false
+    }
+  ]
+}

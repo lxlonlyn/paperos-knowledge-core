@@ -41,7 +41,11 @@ from paperos_core.ingestion.document_regions import (
     region_for_element,
     region_id_for_element,
 )
-from paperos_core.ingestion.rerank_projection import build_rerank_spans
+from paperos_core.ingestion.rerank_projection import (
+    RERANK_HARD_MAX_TOKENS,
+    RERANK_TARGET_TOKENS,
+    build_rerank_spans,
+)
 from paperos_core.ingestion.retrieval_text import build_retrieval_text
 from paperos_core.ingestion.sentence_units import (
     _PROSE_TYPES,
@@ -69,6 +73,8 @@ def build_chunks(
     overlap_tokens: int,
     tokenizer: Tokenizer,
     rerank_span_sink: list[RerankSpan] | None = None,
+    rerank_target_tokens: int = RERANK_TARGET_TOKENS,
+    rerank_hard_max_tokens: int = RERANK_HARD_MAX_TOKENS,
 ) -> tuple[list[Chunk], list[CitationMention]]:
     """Build section-local, span-identified chunks from canonical elements."""
     count = tokenizer.count_tokens
@@ -213,6 +219,8 @@ def build_chunks(
             element_regions=element_regions,
             region_instance_id=group_region_id,
             rerank_span_sink=rerank_span_sink,
+            rerank_target_tokens=rerank_target_tokens,
+            rerank_hard_max_tokens=rerank_hard_max_tokens,
         )
         built.extend(section_chunks)
         order += len(section_chunks)
@@ -339,6 +347,8 @@ def _chunks_from_ranges(
     element_regions: dict[str, ElementRegionInfo],
     region_instance_id: str | None = None,
     rerank_span_sink: list[RerankSpan] | None = None,
+    rerank_target_tokens: int = RERANK_TARGET_TOKENS,
+    rerank_hard_max_tokens: int = RERANK_HARD_MAX_TOKENS,
 ) -> list[Chunk]:
     built: list[Chunk] = []
     overlap_tail: list[SentenceUnit] = []
@@ -373,7 +383,13 @@ def _chunks_from_ranges(
         built.append(chunk)
         if rerank_span_sink is not None:
             rerank_span_sink.extend(
-                build_rerank_spans(chunk, chunk_units, count=count)
+                build_rerank_spans(
+                    chunk,
+                    chunk_units,
+                    count=count,
+                    target_tokens=rerank_target_tokens,
+                    hard_max_tokens=rerank_hard_max_tokens,
+                )
             )
         overlap_tail = _overlap_tail_units(chunk_units, count, overlap_tokens)
     return built

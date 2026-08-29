@@ -33,6 +33,8 @@ from paperos_core.domain.enums import ElementType
 from paperos_core.domain.ids import canonical_snapshot_id
 from paperos_core.errors import CanonicalValidationError, LocalInferenceResponseError
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
+from paperos_core.ingestion.rerank_projection import build_rerank_spans
+from paperos_core.ingestion.sentence_units import SentenceUnit
 from paperos_core.ingestion.tokenization import AUTHORITATIVE_CHUNK_TOKENIZER
 from paperos_core.paths import build_data_paths
 from paperos_core.retrieval.candidates import Candidate
@@ -229,6 +231,57 @@ def _assert_persisted_projection(
             raise RuntimeError(f"{case_name}: corrupt persisted projection was accepted")
 
 
+def _builder_separator_contract() -> None:
+    text = "left\n\nright"
+    chunk = Chunk(
+        id="chunk_structural_separator",
+        document_id="document_structural_separator",
+        canonical_snapshot_id="snapshot_structural_separator",
+        text=text,
+        order=0,
+        element_ids=["element_left", "element_right"],
+        token_count=len(text),
+    )
+    units = [
+        SentenceUnit(
+            text=value,
+            tokens=len(value),
+            element_id=element_id,
+            span_key="0:source",
+            character_start_in_element=0,
+            character_end_in_element=len(value),
+            token_start=0,
+            token_end=len(value),
+            section_id=None,
+            section_path=None,
+            page=None,
+            bounding_box=None,
+            paragraph_end=True,
+            subsection_end=True,
+            source_field="text",
+        )
+        for element_id, value in (("element_left", "left"), ("element_right", "right"))
+    ]
+    spans = build_rerank_spans(
+        chunk,
+        units,
+        count=AUTHORITATIVE_CHUNK_TOKENIZER.count_tokens,
+        target_tokens=4,
+        hard_max_tokens=6,
+    )
+    _require(len(spans) == 2, "Separator contract did not force two spans")
+    _require(
+        spans[0].character_start_in_chunk == 0
+        and spans[0].character_end_in_chunk == spans[1].character_start_in_chunk
+        and spans[1].character_end_in_chunk == len(text),
+        "Structural separator is not continuously assigned",
+    )
+    _require(
+        "".join(span.scoring_text(chunk) for span in spans) == text,
+        "Structural separator was lost, duplicated, or reordered",
+    )
+
+
 def _projection_contracts() -> None:
     text = "x" * 200
     _assert_persisted_projection("valid", text, [(0, 100), (100, 200)])
@@ -275,7 +328,39 @@ class _RerankClient:
         _require(query == "contract query", "reranker query changed")
         _require(limit == len(candidate_ids), "reranker span limit changed")
         _require(len(texts) == len(candidate_ids), "reranker scoring input changed")
+        _require(
+            candidate_ids[0].startswith("full:") and len(texts[0]) == 30,
+            "Full parent Chunk was not scored first",
+        )
+        _require(
+            all(len(text) == 10 for text in texts[1:]),
+            "Structured span scoring texts changed",
+        )
         return [_rerank_result(candidate_id, index) for index, candidate_id in enumerate(self.returned_ids)]
+
+
+class _ScoreRerankClient:
+    def __init__(self, scores: dict[str, float]) -> None:
+        self.scores = scores
+
+    async def rerank(
+        self,
+        query: str,
+        candidate_ids: list[str],
+        texts: list[str],
+        *,
+        limit: int,
+    ) -> list[RerankResult]:
+        _require(query == "contract query", "hybrid reranker query changed")
+        _require(limit == len(candidate_ids), "hybrid reranker limit changed")
+        _require(set(candidate_ids) == set(self.scores), "hybrid scoring IDs changed")
+        _require(len(texts) == len(candidate_ids), "hybrid scoring texts changed")
+        return [
+            _rerank_result(candidate_id, index).model_copy(
+                update={"relevance_score": self.scores[candidate_id]}
+            )
+            for index, candidate_id in enumerate(candidate_ids)
+        ]
 
 
 def _rerank_result(candidate_id: str, index: int) -> RerankResult:
@@ -328,7 +413,7 @@ def _rerank_fixture() -> tuple[Candidate, Any, list[str]]:
         text=chunk.text,
         channels=["contract"],
     )
-    return candidate, corpus, [span.id for span in spans]
+    return candidate, corpus, [f"full:{chunk.id}", *(span.id for span in spans)]
 
 
 async def _expect_rerank_error(
@@ -356,7 +441,71 @@ async def _expect_rerank_error(
         raise RuntimeError(f"{case_name}: invalid reranker response IDs were accepted")
 
 
+async def _hybrid_ranking_contract() -> None:
+    snapshot_id = "snapshot_hybrid_ranking_contract"
+    chunks: dict[str, Chunk] = {}
+    spans_by_chunk: dict[str, list[RerankSpan]] = {}
+    candidates: list[Candidate] = []
+    scores: dict[str, float] = {}
+    full_scores = [0.9, 0.8, 0.7]
+    structured_scores = [0.7, 0.9, 0.8]
+    for index in range(3):
+        chunk = Chunk(
+            id=f"chunk_hybrid_{index}",
+            document_id=f"document_hybrid_{index}",
+            canonical_snapshot_id=snapshot_id,
+            text=chr(ord("a") + index) * 10,
+            order=index,
+            element_ids=[f"element_hybrid_{index}"],
+            token_count=10,
+        )
+        span = _projection(chunk, [(0, 10)]).spans[0]
+        chunks[chunk.id] = chunk
+        spans_by_chunk[chunk.id] = [span]
+        candidates.append(
+            Candidate(
+                id=f"candidate_hybrid_{index}",
+                object_id=chunk.id,
+                object_type="chunk",
+                document_id=chunk.document_id,
+                source_file_id=f"source_hybrid_{index}",
+                source_filename=f"contract_{index}.pdf",
+                canonical_snapshot_id=snapshot_id,
+                chunk_id=chunk.id,
+                text=chunk.text,
+                channels=["contract"],
+            )
+        )
+        scores[f"full:{chunk.id}"] = full_scores[index]
+        scores[span.id] = structured_scores[index]
+
+    passed = await rerank_candidates(
+        _ScoreRerankClient(scores),  # type: ignore[arg-type]
+        "contract query",
+        candidates,
+        corpus=SimpleNamespace(
+            chunks=chunks,
+            rerank_spans_by_chunk=spans_by_chunk,
+        ),  # type: ignore[arg-type]
+        limit=3,
+    )
+    _require(
+        [candidate.chunk_id for candidate in passed.candidates]
+        == ["chunk_hybrid_1", "chunk_hybrid_0", "chunk_hybrid_2"],
+        "Full-Chunk and structured MaxP ranks were not fused with RRF",
+    )
+    _require(passed.span_count == 3, "Hybrid pass changed span-count semantics")
+    _require(
+        all(
+            candidate.text == chunks[candidate.chunk_id].text
+            for candidate in passed.candidates
+        ),
+        "Hybrid reranking modified canonical parent Chunk text",
+    )
+
+
 async def _reranker_response_contracts() -> None:
+    await _hybrid_ranking_contract()
     candidate, corpus, expected_ids = _rerank_fixture()
     passed = await rerank_candidates(
         _RerankClient(list(reversed(expected_ids))),  # type: ignore[arg-type]
@@ -366,26 +515,31 @@ async def _reranker_response_contracts() -> None:
         limit=1,
     )
     _require(passed.span_count == 3, "valid reranker ID set did not pass")
+    _require(
+        passed.candidates[0].rerank_score == 2.0 / 61.0,
+        "Hybrid full/structured RRF score was not applied",
+    )
 
     await _expect_rerank_error(
         "duplicate",
-        [expected_ids[0], expected_ids[0], expected_ids[1]],
+        [expected_ids[0], expected_ids[0], expected_ids[1], expected_ids[2]],
         expected_reason="rerank_candidate_id_mismatch",
     )
     await _expect_rerank_error(
         "unknown",
-        [expected_ids[0], expected_ids[1], "unknown_span_id"],
+        [expected_ids[0], expected_ids[1], expected_ids[2], "unknown_span_id"],
         expected_reason="rerank_candidate_id_mismatch",
     )
-    await _expect_rerank_error("missing", expected_ids[:2])
+    await _expect_rerank_error("missing", expected_ids[:3])
     await _expect_rerank_error(
         "same_count_missing_and_duplicate",
-        [expected_ids[1], expected_ids[1], expected_ids[2]],
+        [expected_ids[0], expected_ids[1], expected_ids[1], expected_ids[3]],
         expected_reason="rerank_candidate_id_mismatch",
     )
 
 
 def main() -> None:
+    _builder_separator_contract()
     _projection_contracts()
     asyncio.run(_reranker_response_contracts())
     print("PASS: rerank projection integrity and response ID contracts")

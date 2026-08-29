@@ -30,6 +30,8 @@ def build_rerank_spans(
     units: list[SentenceUnit],
     *,
     count: Any,
+    target_tokens: int = RERANK_TARGET_TOKENS,
+    hard_max_tokens: int = RERANK_HARD_MAX_TOKENS,
 ) -> list[RerankSpan]:
     """Project the exact units used by one Chunk into smaller scoring ranges."""
 
@@ -39,14 +41,14 @@ def build_rerank_spans(
     projection_units: list[SentenceUnit] = []
     parent_ranges: list[_ParentRange] = []
     for unit, parent_range in zip(units, unit_ranges, strict=True):
-        if count(unit.text) <= RERANK_HARD_MAX_TOKENS:
+        if count(unit.text) <= hard_max_tokens:
             projection_units.append(replace(unit, tokens=count(unit.text)))
             parent_ranges.append(parent_range)
             continue
         fallback_ranges = fallback_text_ranges(
             unit.text,
             count=count,
-            hard_max_tokens=RERANK_HARD_MAX_TOKENS,
+            hard_max_tokens=hard_max_tokens,
         )
         for index, (start, end, reason) in enumerate(fallback_ranges):
             text = unit.text[start:end]
@@ -73,8 +75,8 @@ def build_rerank_spans(
 
     ranges = partition_units(
         projection_units,
-        target_tokens=RERANK_TARGET_TOKENS,
-        hard_max_tokens=RERANK_HARD_MAX_TOKENS,
+        target_tokens=target_tokens,
+        hard_max_tokens=hard_max_tokens,
         count=count,
     )
     ranges = _hard_safe_ranges(
@@ -82,14 +84,22 @@ def build_rerank_spans(
         ranges,
         parent_ranges=parent_ranges,
         count=count,
+        hard_max_tokens=hard_max_tokens,
+    )
+    character_ranges = _continuous_character_ranges(
+        chunk,
+        ranges,
+        parent_ranges=parent_ranges,
+        count=count,
+        hard_max_tokens=hard_max_tokens,
     )
     spans: list[RerankSpan] = []
-    for ordinal, (start, end) in enumerate(ranges):
-        character_start = parent_ranges[start].start
-        character_end = parent_ranges[end - 1].end
+    for ordinal, ((start, end), (character_start, character_end)) in enumerate(
+        zip(ranges, character_ranges, strict=True)
+    ):
         scoring_text = chunk.text[character_start:character_end]
         token_count = count(scoring_text)
-        if not scoring_text or token_count > RERANK_HARD_MAX_TOKENS:
+        if not scoring_text or token_count > hard_max_tokens:
             raise ValueError("RerankSpan violates its deterministic hard maximum")
         fallback_reasons = list(
             dict.fromkeys(
@@ -123,12 +133,15 @@ def build_rerank_spans(
 def build_rerank_projection(
     snapshot_id: str,
     spans: list[RerankSpan],
+    *,
+    target_tokens: int = RERANK_TARGET_TOKENS,
+    hard_max_tokens: int = RERANK_HARD_MAX_TOKENS,
 ) -> RerankProjection:
     return RerankProjection(
         snapshot_id=snapshot_id,
         projection_version=RERANK_PROJECTION_VERSION,
-        target_tokens=RERANK_TARGET_TOKENS,
-        hard_max_tokens=RERANK_HARD_MAX_TOKENS,
+        target_tokens=target_tokens,
+        hard_max_tokens=hard_max_tokens,
         overlap_tokens=RERANK_OVERLAP_TOKENS,
         spans=spans,
     )
@@ -167,6 +180,7 @@ def _hard_safe_ranges(
     *,
     parent_ranges: list[_ParentRange],
     count: Any,
+    hard_max_tokens: int,
 ) -> list[tuple[int, int]]:
     """Preserve DP output unless exact parent slicing exceeds the hard maximum."""
 
@@ -176,16 +190,58 @@ def _hard_safe_ranges(
         while cursor < end:
             next_end = cursor + 1
             if _range_tokens(chunk, parent_ranges, cursor, next_end, count) > (
-                RERANK_HARD_MAX_TOKENS
+                hard_max_tokens
             ):
                 raise ValueError("A rerank projection unit exceeds the hard maximum")
             while next_end < end and _range_tokens(
                 chunk, parent_ranges, cursor, next_end + 1, count
-            ) <= RERANK_HARD_MAX_TOKENS:
+            ) <= hard_max_tokens:
                 next_end += 1
             safe.append((cursor, next_end))
             cursor = next_end
     return safe
+
+
+def _continuous_character_ranges(
+    chunk: Chunk,
+    ranges: list[tuple[int, int]],
+    *,
+    parent_ranges: list[_ParentRange],
+    count: Any,
+    hard_max_tokens: int,
+) -> list[tuple[int, int]]:
+    """Assign structural separators to adjacent spans without changing DP ranges."""
+
+    character_ranges = [
+        [parent_ranges[start].start, parent_ranges[end - 1].end]
+        for start, end in ranges
+    ]
+    for index in range(len(character_ranges) - 1):
+        left = character_ranges[index]
+        right = character_ranges[index + 1]
+        gap_start = left[1]
+        gap_end = right[0]
+        if gap_start > gap_end:
+            raise ValueError("RerankProjection parent ranges overlap")
+        if gap_start == gap_end:
+            continue
+        boundary = next(
+            (
+                candidate
+                for candidate in range(gap_end, gap_start - 1, -1)
+                if count(chunk.text[left[0] : candidate]) <= hard_max_tokens
+                and count(chunk.text[candidate : right[1]]) <= hard_max_tokens
+            ),
+            None,
+        )
+        if boundary is None:
+            raise ValueError(
+                "RerankProjection cannot assign a structural separator within "
+                "its hard maximum"
+            )
+        left[1] = boundary
+        right[0] = boundary
+    return [(start, end) for start, end in character_ranges]
 
 
 def _range_tokens(

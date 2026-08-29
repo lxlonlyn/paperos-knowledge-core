@@ -123,9 +123,10 @@ def _source_contract() -> dict[str, object]:
         "Reranker trace still hard-codes truncated=false at result construction",
     )
     _require(
-        "one prebuilt PaperOS RerankSpan" in source
-        and "authoritative canonical parent Chunk" in source,
-        "Structured reranker input boundary is not documented",
+        "prebuilt PaperOS scoring document" in source
+        and "structured MaxP rank" in source
+        and "canonical parent Chunks" in source,
+        "Hybrid reranker input boundary is not documented",
     )
     _require(
         "splitSentences" not in source
@@ -135,7 +136,8 @@ def _source_contract() -> dict[str, object]:
     return {
         "validated_before_rank": True,
         "structured_projection": True,
-        "one_score_per_span": True,
+        "one_score_per_supplied_document": True,
+        "hybrid_parent_and_span_inputs": True,
     }
 
 
