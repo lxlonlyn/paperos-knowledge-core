@@ -18,6 +18,7 @@ export interface RuntimeIdentity {
       file: ModelFileIdentity | null;
     };
     dimensions: number;
+    max_tokens: number;
   };
   reranker: {
     enabled: boolean;
@@ -25,6 +26,7 @@ export interface RuntimeIdentity {
       name: string;
       file: ModelFileIdentity | null;
     };
+    max_tokens: number;
   };
   cuda_visible_devices: string;
 }
@@ -55,6 +57,7 @@ export function buildRuntimeIdentity(config: LocalInferenceConfig): RuntimeIdent
         file: modelFileIdentity(config.embeddingEnabled, config.embeddingModelPath),
       },
       dimensions: config.embeddingDimensions,
+      max_tokens: config.embeddingMaxTokens,
     },
     reranker: {
       enabled: config.rerankerEnabled,
@@ -62,6 +65,7 @@ export function buildRuntimeIdentity(config: LocalInferenceConfig): RuntimeIdent
         name: config.rerankerModelName,
         file: modelFileIdentity(config.rerankerEnabled, config.rerankerModelPath),
       },
+      max_tokens: config.rerankerMaxTokens,
     },
     cuda_visible_devices: config.cudaVisibleDevices,
   };

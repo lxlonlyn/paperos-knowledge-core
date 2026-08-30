@@ -586,10 +586,12 @@ class _RuntimeConfig:
         *,
         embedding_model: str = "embedding-contract",
         embedding_dimensions: int = 768,
+        embedding_max_tokens: int = 2048,
         embedding_enabled: bool = True,
     ) -> None:
         self.embedding_model = embedding_model
         self.embedding_dimensions = embedding_dimensions
+        self.embedding_max_tokens = embedding_max_tokens
         self.embedding_enabled = embedding_enabled
 
     def embedding_targets(self, host: str, port: int) -> bool:
@@ -865,6 +867,11 @@ def local_runtime_identity_contract(root: Path) -> dict[str, object]:
     runtime._validate_reuse_identity(
         {"status": "healthy", "runtime_identity": expected}
     )
+    _require(
+        expected["embedding"]["max_tokens"] == 2048
+        and expected["reranker"]["max_tokens"] == 4096,
+        "Runtime token limits are missing or use inconsistent types",
+    )
 
     rejected: list[str] = []
 
@@ -898,8 +905,16 @@ def local_runtime_identity_contract(root: Path) -> dict[str, object]:
     require_rejected("embedding_dimensions", changed)
 
     changed = changed_identity()
+    changed["embedding"]["max_tokens"] = 4096
+    require_rejected("embedding_max_tokens", changed)
+
+    changed = changed_identity()
     changed["reranker"]["enabled"] = False
     require_rejected("reranker_config", changed)
+
+    changed = changed_identity()
+    changed["reranker"]["max_tokens"] = 8192
+    require_rejected("reranker_max_tokens", changed)
 
     changed = changed_identity()
     changed["cuda_visible_devices"] = "5"
@@ -909,7 +924,7 @@ def local_runtime_identity_contract(root: Path) -> dict[str, object]:
     changed["protocol_version"] = expected["protocol_version"] + 1
     require_rejected("protocol_version", changed)
 
-    _require(len(rejected) == 5, "Not every incompatible runtime was rejected")
+    _require(len(rejected) == 7, "Not every incompatible runtime was rejected")
     return {
         "status": "passed",
         "same_config_reused": True,

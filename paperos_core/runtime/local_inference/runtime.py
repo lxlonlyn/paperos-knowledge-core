@@ -23,6 +23,7 @@ from paperos_core.paths import DataPaths
 from paperos_core.runtime.local_inference.client import LocalInferenceClient
 
 LOCAL_INFERENCE_PROTOCOL_VERSION = 1
+LOCAL_RERANKER_MAX_TOKENS = 4096
 LOCAL_RERANKER_MODEL_NAME = "qwen3-reranker-0.6b"
 
 
@@ -162,7 +163,7 @@ class LocalInferenceRuntime:
                     if reranker_path is not None
                     else {}
                 ),
-                "PAPEROS_RERANKER_MAX_TOKENS": "4096",
+                "PAPEROS_RERANKER_MAX_TOKENS": str(LOCAL_RERANKER_MAX_TOKENS),
                 "PAPEROS_SHUTDOWN_TOKEN": self._shutdown_token,
             }
         )
@@ -285,6 +286,7 @@ class LocalInferenceRuntime:
                     "file": self._model_file_identity(embedding_path),
                 },
                 "dimensions": cognee.embedding_dimensions,
+                "max_tokens": cognee.embedding_max_tokens,
             },
             "reranker": {
                 "enabled": usage.reranker,
@@ -292,6 +294,7 @@ class LocalInferenceRuntime:
                     "name": LOCAL_RERANKER_MODEL_NAME,
                     "file": self._model_file_identity(reranker_path),
                 },
+                "max_tokens": LOCAL_RERANKER_MAX_TOKENS,
             },
             "cuda_visible_devices": ",".join(
                 str(device) for device in local.cuda_devices
