@@ -6,14 +6,14 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPOSITORY_ROOT))
+
 from paperos_core.ingestion.chunk_dp import partition_units
 from paperos_core.ingestion.sentence_units import SentenceUnit
 from tests.validation.chunk import (
     boundaries__synthetic_multi_part_table_contract,
 )
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPOSITORY_ROOT))
 
 
 def _unit(text: str, *, kind: str, tokens: int = 20) -> SentenceUnit:
