@@ -6,6 +6,11 @@ from paperos_core.domain.canonical import Element, Section
 from paperos_core.domain.enums import ElementType
 from paperos_core.ingestion.document_regions import build_document_regions, region_for_element
 
+import sys
+from pathlib import Path
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPOSITORY_ROOT))
 
 def _section(
     order: int,
