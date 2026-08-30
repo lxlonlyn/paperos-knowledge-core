@@ -130,12 +130,11 @@ class DocumentService:
 
     async def reprocess(self, document_id: str) -> dict[str, object]:
         detail = self.inspect(document_id)
-        with self._connect() as connection:
-            connection.execute(
-                "DELETE FROM document_tombstones WHERE document_id = ?",
-                (document_id,),
-            )
-        result = await self.ingestion.ingest_pdf_to_knowledge(detail.raw_pdf_path)
+        active = self.canonical_repository.get_bundle(detail.canonical_snapshot_id)
+        result = await self.ingestion.ingest_pdf_to_knowledge(
+            detail.raw_pdf_path,
+            dataset=active.snapshot.dataset_id,
+        )
         return result.public_dict()
 
     async def delete(self, document_id: str) -> DocumentDeletionReport:

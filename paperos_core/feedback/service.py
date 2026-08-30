@@ -118,8 +118,6 @@ class FeedbackService:
                     supersedes_object_id=supersedes_id or feedback.target_id,
                     version=correction_version,
                 )
-                self._store_correction(correction)
-                corrections.append(correction)
             status = (
                 "user_confirmed"
                 if feedback.feedback_type
@@ -144,7 +142,9 @@ class FeedbackService:
                 correction_id=correction.id if correction else None,
                 version=version,
             )
-            self._store_improvement(improvement)
+            self._store_derived_feedback(correction, improvement)
+            if correction is not None:
+                corrections.append(correction)
             improvements.append(improvement)
         return ImprovementReport(
             processed_feedback_ids=[item.feedback_id for item in improvements],
@@ -181,44 +181,46 @@ class FeedbackService:
             ).fetchone()
         return int(row[0] or 0) + 1
 
-    def _store_correction(self, item: Correction) -> None:
+    def _store_derived_feedback(
+        self,
+        correction: Correction | None,
+        improvement: Improvement,
+    ) -> None:
         with self._connect() as connection:
-            connection.execute(
-                "INSERT INTO corrections VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    item.id,
-                    item.target_id,
-                    item.replacement_or_correction,
-                    item.status,
-                    item.created_at.isoformat(),
-                    item.schema_version,
-                    item.id_version,
-                    item.derived_from_feedback_id,
-                    json.dumps(item.source_chunk_ids),
-                    item.supersedes_object_id,
-                    item.version,
-                ),
-            )
-
-    def _store_improvement(self, item: Improvement) -> None:
-        with self._connect() as connection:
+            if correction is not None:
+                connection.execute(
+                    "INSERT INTO corrections VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        correction.id,
+                        correction.target_id,
+                        correction.replacement_or_correction,
+                        correction.status,
+                        correction.created_at.isoformat(),
+                        correction.schema_version,
+                        correction.id_version,
+                        correction.derived_from_feedback_id,
+                        json.dumps(correction.source_chunk_ids),
+                        correction.supersedes_object_id,
+                        correction.version,
+                    ),
+                )
             connection.execute(
                 "INSERT INTO improvements VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    item.id,
-                    item.feedback_id,
-                    item.target_id,
-                    item.improvement_type,
-                    item.text,
-                    item.status,
-                    json.dumps(item.evidence_ids),
-                    json.dumps(item.source_chunk_ids),
-                    json.dumps(item.derived_from_ids),
-                    item.correction_id,
-                    item.version,
-                    item.created_at.isoformat(),
-                    item.schema_version,
-                    item.id_version,
+                    improvement.id,
+                    improvement.feedback_id,
+                    improvement.target_id,
+                    improvement.improvement_type,
+                    improvement.text,
+                    improvement.status,
+                    json.dumps(improvement.evidence_ids),
+                    json.dumps(improvement.source_chunk_ids),
+                    json.dumps(improvement.derived_from_ids),
+                    improvement.correction_id,
+                    improvement.version,
+                    improvement.created_at.isoformat(),
+                    improvement.schema_version,
+                    improvement.id_version,
                 ),
             )
 

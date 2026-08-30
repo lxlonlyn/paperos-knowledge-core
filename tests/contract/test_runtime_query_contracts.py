@@ -24,8 +24,11 @@ from paperos_core.adapters.cognee.configurator import CogneeConfigurator
 from paperos_core.adapters.cognee.runtime_config import CogneeRuntimeConfigReader
 from paperos_core.application import Application
 from paperos_core.config import RuntimeSettings, load_settings
+from paperos_core.documents import DocumentService
 from paperos_core.domain.enums import IngestionJobStatus, ParseRunStatus
 from paperos_core.errors import ConfigurationError, PaperOSError
+from paperos_core.feedback.models import FeedbackRequest, FeedbackType
+from paperos_core.feedback.service import FeedbackService
 from paperos_core.health import HealthService, local_model_enablement
 from paperos_core.indexes.manager import IndexManager
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
@@ -808,6 +811,176 @@ async def health_contract() -> dict[str, object]:
     }
 
 
+class _ReplayCanonicalProbe:
+    document_id = "document:replay-correctness"
+    chunk_id = "chunk_replay_correctness"
+
+    def __init__(self, dataset_id: str) -> None:
+        self._revision = 1
+        self._set_active(dataset_id)
+
+    def _set_active(self, dataset_id: str | None) -> None:
+        snapshot_id = f"snapshot:replay-correctness:{self._revision}"
+        self.bundle = SimpleNamespace(
+            snapshot=SimpleNamespace(
+                id=snapshot_id,
+                parse_run_id=f"parse:replay-correctness:{self._revision}",
+                dataset_id=dataset_id,
+            ),
+            document=SimpleNamespace(
+                id=self.document_id,
+                title="Replay correctness",
+                source_file_id="source:replay-correctness",
+            ),
+            sections=[],
+            references=[],
+            elements=[],
+        )
+
+    def activate_reprocessed(self, dataset_id: str | None) -> None:
+        self._revision += 1
+        self._set_active(dataset_id)
+
+    def list_active_bundles(self) -> list[object]:
+        return [self.bundle]
+
+    def active_snapshot_id(self, document_id: str) -> str | None:
+        return self.bundle.snapshot.id if document_id == self.document_id else None
+
+    def get_bundle(self, snapshot_id: str) -> object:
+        _require(snapshot_id == self.bundle.snapshot.id, "Replay probe requested stale bundle")
+        return self.bundle
+
+    def get_chunk_projection(self, snapshot_id: str) -> object:
+        _require(snapshot_id == self.bundle.snapshot.id, "Replay probe requested stale projection")
+        return SimpleNamespace(chunks=[SimpleNamespace(id=self.chunk_id)])
+
+
+class _ReplayIngestionProbe:
+    def __init__(self, repository: _ReplayCanonicalProbe, source_path: Path) -> None:
+        self.repository = repository
+        self.source_path = source_path
+        self.reprocess_dataset: str | None = None
+
+    def get_source(self, source_file_id: str) -> object:
+        return SimpleNamespace(
+            id=source_file_id,
+            original_filename="replay-correctness.pdf",
+            storage_path=self.source_path,
+        )
+
+    async def ingest_pdf_to_knowledge(
+        self,
+        path: Path,
+        *,
+        dataset: str | None = None,
+    ) -> object:
+        _require(path == self.source_path, "Reprocess changed the retained source path")
+        self.reprocess_dataset = dataset
+        self.repository.activate_reprocessed(dataset)
+        return SimpleNamespace(public_dict=lambda: {"dataset_id": dataset})
+
+
+async def replay_correctness_contract(root: Path) -> dict[str, object]:
+    paths = build_data_paths(root / "replay-correctness-data")
+    StorageInitializer(paths).initialize()
+    dataset_id = "dataset-replay-preserved"
+    repository = _ReplayCanonicalProbe(dataset_id)
+    ingestion = _ReplayIngestionProbe(
+        repository,
+        paths.raw / "source:replay-correctness" / "source.pdf",
+    )
+    documents = DocumentService(
+        paths,
+        repository,  # type: ignore[arg-type]
+        ingestion,  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+    )
+    old_snapshot_id = repository.bundle.snapshot.id
+    reprocessed = await documents.reprocess(repository.document_id)
+    _require(
+        repository.bundle.snapshot.id != old_snapshot_id,
+        "Reprocess probe did not activate a new revision",
+    )
+    _require(
+        ingestion.reprocess_dataset == dataset_id
+        and repository.bundle.snapshot.dataset_id == dataset_id
+        and reprocessed["dataset_id"] == dataset_id,
+        "Reprocess did not preserve the active snapshot dataset",
+    )
+
+    feedback = FeedbackService(
+        paths,
+        repository,  # type: ignore[arg-type]
+    )
+    recorded = feedback.record(
+        FeedbackRequest(
+            target_id=repository.chunk_id,
+            feedback_type=FeedbackType.CORRECT,
+            evidence_ids=[f"evidence:{repository.chunk_id}"],
+            replacement_text="Corrected replay-safe text",
+        )
+    )
+    with sqlite3.connect(paths.registry_db) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_replay_improvement
+            BEFORE INSERT ON improvements
+            BEGIN
+                SELECT RAISE(ABORT, 'injected improvement failure');
+            END;
+            """
+        )
+    try:
+        feedback.improve()
+    except sqlite3.IntegrityError:
+        pass
+    else:
+        raise RuntimeError("Injected Improvement write failure was swallowed")
+
+    with sqlite3.connect(paths.registry_db) as connection:
+        partial_counts = (
+            int(connection.execute("SELECT COUNT(*) FROM corrections").fetchone()[0]),
+            int(connection.execute("SELECT COUNT(*) FROM improvements").fetchone()[0]),
+        )
+        connection.execute("DROP TRIGGER fail_replay_improvement")
+    _require(
+        partial_counts == (0, 0),
+        f"Improve left partial derived state after failure: {partial_counts}",
+    )
+
+    retry = feedback.improve()
+    _require(
+        retry.processed_feedback_ids == [recorded.id]
+        and len(retry.corrections) == 1
+        and len(retry.improvements) == 1
+        and retry.improvements[0].correction_id == retry.corrections[0].id,
+        "Improve retry did not create one complete derived pair",
+    )
+    repeated = feedback.improve()
+    _require(
+        repeated.processed_feedback_ids == []
+        and repeated.corrections == []
+        and repeated.improvements == [],
+        "Complete Improvement replay was not safely skipped",
+    )
+    with sqlite3.connect(paths.registry_db) as connection:
+        final_counts = (
+            int(connection.execute("SELECT COUNT(*) FROM corrections").fetchone()[0]),
+            int(connection.execute("SELECT COUNT(*) FROM improvements").fetchone()[0]),
+        )
+    _require(final_counts == (1, 1), f"Improve replay created duplicates: {final_counts}")
+    return {
+        "status": "passed",
+        "reprocess_dataset": repository.bundle.snapshot.dataset_id,
+        "improve_partial_counts": partial_counts,
+        "improve_final_counts": final_counts,
+        "complete_replay_skipped": True,
+    }
+
+
 class _LifecycleProbe:
     required = False
 
@@ -1235,6 +1408,7 @@ async def run_contract() -> dict[str, Any]:
             "retrieval": await empty_retrieval_contract(root),
             "api_errors": api_error_contract(),
             "health": await health_contract(),
+            "replay_correctness": await replay_correctness_contract(root),
             "jobs": job_status_contract(root),
             "worker": await worker_loop_contract(root),
             "singleton": await application_singleton_contract(root),
