@@ -90,6 +90,17 @@ class JobQueue:
             )
         return self.get(str(row["id"]))
 
+    def recover_interrupted_jobs(self) -> int:
+        """Fail jobs left running by a previous application process."""
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE operational_jobs SET status='failed', updated_at=?, error=? "
+                "WHERE status='running'",
+                (utc_now().isoformat(), "worker_interrupted"),
+            )
+        return cursor.rowcount
+
     def complete(self, job_id: str, result: dict[str, Any]) -> OperationalJob:
         return self._finish(job_id, "completed", result=result)
 

@@ -85,6 +85,7 @@ class Application:
         try:
             if self.runtime.local_inference.required:
                 await self.runtime.local_inference.start()
+            self.queue.recover_interrupted_jobs()
             await self.runtime.worker.start()
         except BaseException:
             await self.aclose()
@@ -214,6 +215,14 @@ def create_application(settings: RuntimeSettings) -> Application:
         index_manager,
         compat,
     )
+    worker = BackgroundWorker(
+        queue,
+        ingestion,
+        rebuilder,
+        documents,
+        feedback,
+        poll_interval_seconds=1.0,
+    )
     health = HealthService(
         paths,
         registry,
@@ -224,6 +233,7 @@ def create_application(settings: RuntimeSettings) -> Application:
         compat,
         index_manager,
         queue,
+        worker,
     )
     services = ApplicationServices(
         ingestion=ingestion,
@@ -232,14 +242,6 @@ def create_application(settings: RuntimeSettings) -> Application:
         feedback=feedback,
         health=health,
         rebuilder=rebuilder,
-    )
-    worker = BackgroundWorker(
-        queue,
-        ingestion,
-        rebuilder,
-        documents,
-        feedback,
-        poll_interval_seconds=1.0,
     )
     runtime = ManagedRuntime(
         local_inference=local_inference_runtime,

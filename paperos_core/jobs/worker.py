@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from paperos_core.documents import DocumentService
-from paperos_core.feedback.service import FeedbackService
-from paperos_core.indexes.rebuild import DerivedDataRebuilder
-from paperos_core.ingestion.service import IngestionService
-from paperos_core.jobs.queue import JobQueue, OperationalJob
+if TYPE_CHECKING:
+    from paperos_core.documents import DocumentService
+    from paperos_core.feedback.service import FeedbackService
+    from paperos_core.indexes.rebuild import DerivedDataRebuilder
+    from paperos_core.ingestion.service import IngestionService
+    from paperos_core.jobs.queue import JobQueue, OperationalJob
+
+logger = logging.getLogger(__name__)
 
 
 class BackgroundWorker:
@@ -59,7 +64,14 @@ class BackgroundWorker:
     async def run(self) -> None:
         self._record("running")
         while not self._stop_event.is_set():
-            await self.run_once()
+            try:
+                await self.run_once()
+            except Exception:
+                logger.exception("Operational worker loop iteration failed")
+                try:
+                    self._record("loop_error")
+                except Exception:
+                    logger.exception("Unable to record operational worker loop failure")
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(), timeout=self.poll_interval_seconds

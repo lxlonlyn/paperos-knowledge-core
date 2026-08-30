@@ -18,6 +18,7 @@ from typing import Any
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from paperos_core.application import Application
 from paperos_core.config import RuntimeSettings, load_settings
 from paperos_core.errors import ConfigurationError, PaperOSError
 from paperos_core.health import HealthService, local_model_enablement
@@ -26,6 +27,7 @@ from paperos_core.ingestion.canonical_repository import CanonicalRepository
 from paperos_core.ingestion.registry import SourceRegistry
 from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
 from paperos_core.jobs.queue import JobQueue
+from paperos_core.jobs.worker import BackgroundWorker
 from paperos_core.paths import build_data_paths
 from paperos_core.retrieval.candidates import QueryRequest, QueryResponse
 from paperos_core.retrieval.service import (
@@ -437,7 +439,7 @@ class _CogneeProbe:
         return {"secret": _PRIVATE_SECRET}
 
 
-def _health_service(*, fail: bool) -> HealthService:
+def _health_service(*, fail: bool, worker_running: bool = True) -> HealthService:
     settings = RuntimeSettings()
     local_result = {
         "status": "healthy",
@@ -498,6 +500,7 @@ def _health_service(*, fail: bool) -> HealthService:
             )
         ),
         queue=SimpleNamespace(list_jobs=list),
+        worker=SimpleNamespace(running=worker_running),
     )
 
 
@@ -598,12 +601,163 @@ async def health_contract() -> dict[str, object]:
         == {"status": "healthy", "document_count": 1},
         "Graph health response changed",
     )
+    _require(
+        components["worker"] == {"status": "healthy", "running": True},
+        "Running worker health response changed",
+    )
+    _require(healthy["status"] == "healthy", "Live worker degraded overall health")
     _assert_public_json_safe(healthy, "healthy health response")
+
+    dead = await _health_service(fail=False, worker_running=False).report()
+    _require(dead["status"] == "degraded", "Dead worker did not degrade health")
+    _require(
+        dead["components"]["worker"]
+        == {
+            "status": "unavailable",
+            "error": {
+                "code": "worker_unavailable",
+                "message": "The operational worker is unavailable.",
+            },
+            "running": False,
+        },
+        "Dead worker public diagnostic changed",
+    )
+    _assert_public_json_safe(dead, "dead worker health response")
     return {
         "status": "passed",
         **enablement,
         "failure_codes": sorted(code for _, code, _ in expected_errors.values()),
         "healthy_allowlists": True,
+        "worker_liveness": True,
+    }
+
+
+class _LifecycleProbe:
+    required = False
+
+    def cleanup_stale_record(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _RecoveryObservingWorker:
+    def __init__(self, queue: JobQueue, job_id: str) -> None:
+        self.queue = queue
+        self.job_id = job_id
+        self.running = False
+        self.status_at_start: str | None = None
+
+    def cleanup_stale_record(self) -> None:
+        return None
+
+    async def start(self) -> None:
+        self.status_at_start = self.queue.get(self.job_id).status
+        self.running = True
+
+    async def stop(self) -> None:
+        self.running = False
+
+
+async def application_start_recovery_contract(root: Path) -> dict[str, object]:
+    paths = build_data_paths(root / "application-recovery-data")
+    storage = StorageInitializer(paths)
+    storage.initialize()
+    queue = JobQueue(paths)
+    pending = queue.enqueue("rebuild")
+    interrupted = queue.claim_next()
+    _require(
+        interrupted is not None and interrupted.id == pending.id,
+        "Application recovery fixture did not create a running job",
+    )
+    assert interrupted is not None
+    worker = _RecoveryObservingWorker(queue, interrupted.id)
+    lifecycle = _LifecycleProbe()
+    application = Application(
+        settings=RuntimeSettings(),
+        services=SimpleNamespace(),  # type: ignore[arg-type]
+        runtime=SimpleNamespace(
+            local_inference=lifecycle,
+            worker=worker,
+        ),  # type: ignore[arg-type]
+        paths=paths,
+        registry=SimpleNamespace(),  # type: ignore[arg-type]
+        scholarly_registry=SimpleNamespace(),  # type: ignore[arg-type]
+        parser_artifacts=SimpleNamespace(),  # type: ignore[arg-type]
+        canonical_repository=SimpleNamespace(),  # type: ignore[arg-type]
+        canonical_mapper=SimpleNamespace(),  # type: ignore[arg-type]
+        mineru=lifecycle,  # type: ignore[arg-type]
+        local_inference_client=lifecycle,  # type: ignore[arg-type]
+        llm=SimpleNamespace(),  # type: ignore[arg-type]
+        knowledge_pipeline=SimpleNamespace(compat=lifecycle),  # type: ignore[arg-type]
+        queue=queue,
+        storage=storage,
+    )
+    await application.start()
+    try:
+        recovered = queue.get(interrupted.id)
+        _require(
+            worker.status_at_start == "failed",
+            "Application started worker before interrupted-job recovery",
+        )
+        _require(
+            recovered.error == "worker_interrupted",
+            "Application startup recovery reason changed",
+        )
+    finally:
+        await application.aclose()
+    return {
+        "status": "passed",
+        "recovered_before_worker_start": True,
+    }
+
+
+class _TransientClaimQueue:
+    def __init__(self, jobs: Path) -> None:
+        self.paths = SimpleNamespace(jobs=jobs)
+        self.claim_calls = 0
+
+    def claim_next(self) -> None:
+        self.claim_calls += 1
+        if self.claim_calls == 1:
+            raise RuntimeError("transient claim failure")
+
+
+async def worker_loop_contract(root: Path) -> dict[str, object]:
+    jobs = root / "worker-loop"
+    jobs.mkdir(parents=True)
+    queue = _TransientClaimQueue(jobs)
+    dependency = SimpleNamespace()
+    worker = BackgroundWorker(
+        queue,  # type: ignore[arg-type]
+        dependency,  # type: ignore[arg-type]
+        dependency,  # type: ignore[arg-type]
+        dependency,  # type: ignore[arg-type]
+        dependency,  # type: ignore[arg-type]
+        poll_interval_seconds=0.01,
+    )
+    await worker.start()
+    try:
+        for _ in range(100):
+            if queue.claim_calls >= 2:
+                break
+            await asyncio.sleep(0.005)
+        _require(
+            queue.claim_calls >= 2,
+            "Worker did not continue after a transient claim_next failure",
+        )
+        _require(worker.running, "Worker task exited after a queue-level exception")
+    finally:
+        await worker.stop()
+    _require(not worker.running, "Stopped worker still reports running")
+    return {
+        "status": "passed",
+        "claim_calls": queue.claim_calls,
+        "continued_after_error": True,
     }
 
 
@@ -653,11 +807,84 @@ def job_status_contract(root: Path) -> dict[str, object]:
     _require(completed_public["error"] is None, "Completed job has a public error")
     _require(completed_public["result"] == result, "Job result fields changed")
     _assert_public_json_safe(completed_public, "completed job response")
+
+    recovery_paths = build_data_paths(root / "job-recovery-data")
+    StorageInitializer(recovery_paths).initialize()
+    recovery_queue = JobQueue(recovery_paths)
+    interrupted_pending = recovery_queue.enqueue(
+        "ingest",
+        {"path": recovery_paths.tmp / "interrupted.pdf"},
+    )
+    interrupted = recovery_queue.claim_next()
+    _require(
+        interrupted is not None and interrupted.id == interrupted_pending.id,
+        "Recovery fixture did not create a running job",
+    )
+    assert interrupted is not None
+    untouched_pending = recovery_queue.enqueue("rebuild")
+    untouched_completed = recovery_queue.complete(
+        recovery_queue.enqueue("export").id,
+        {"count": 1},
+    )
+    untouched_failed = recovery_queue.fail(
+        recovery_queue.enqueue("improve").id,
+        "already_failed",
+    )
+    untouched_before = {
+        job.id: job.model_dump(mode="json")
+        for job in (untouched_pending, untouched_completed, untouched_failed)
+    }
+
+    recovered_count = recovery_queue.recover_interrupted_jobs()
+    _require(recovered_count == 1, "Recovery did not update exactly one running job")
+    recovered = recovery_queue.get(interrupted.id)
+    _require(recovered.status == "failed", "Interrupted job was not failed")
+    _require(recovered.error == "worker_interrupted", "Recovery reason changed")
+    _require(
+        recovered.updated_at > interrupted.updated_at,
+        "Recovery did not update the job timestamp",
+    )
+    for job_id, before in untouched_before.items():
+        _require(
+            recovery_queue.get(job_id).model_dump(mode="json") == before,
+            f"Recovery modified non-running job: {job_id}",
+        )
+
+    recovered_before_repeat = recovered.model_dump(mode="json")
+    _require(
+        recovery_queue.recover_interrupted_jobs() == 0,
+        "Repeated recovery was not idempotent",
+    )
+    _require(
+        recovery_queue.get(recovered.id).model_dump(mode="json")
+        == recovered_before_repeat,
+        "Repeated recovery modified the failed job",
+    )
+    recovered_public = recovery_queue.public_dict(recovered)
+    _require(
+        recovered_public["error"]
+        == {
+            "code": "operational_job_failed",
+            "message": "The operation could not be completed.",
+        },
+        "Recovered job did not use the generic public diagnostic",
+    )
+    _require(
+        "worker_interrupted" not in json.dumps(recovered_public),
+        "Internal recovery reason leaked through the public job payload",
+    )
+    _assert_public_json_safe(recovered_public, "recovered job response")
     return {
         "status": "passed",
         "internal_error_retained": True,
         "public_error": public["error"],
         "staging_path_hidden": True,
+        "startup_recovery": {
+            "recovered_count": recovered_count,
+            "internal_reason_retained": True,
+            "idempotent": True,
+            "non_running_unchanged": True,
+        },
     }
 
 
@@ -670,6 +897,8 @@ async def run_contract() -> dict[str, Any]:
             "api_errors": api_error_contract(),
             "health": await health_contract(),
             "jobs": job_status_contract(root),
+            "worker": await worker_loop_contract(root),
+            "application_startup": await application_start_recovery_contract(root),
         }
 
 

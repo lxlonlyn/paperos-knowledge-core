@@ -46,6 +46,7 @@ _PUBLIC_MESSAGES = {
     "local_models_unavailable": "Local inference is unavailable.",
     "vector_unavailable": "The vector index is unavailable.",
     "cognee_graph_unavailable": "The knowledge graph is unavailable.",
+    "worker_unavailable": "The operational worker is unavailable.",
     "operational_job_failed": "The operation could not be completed.",
 }
 

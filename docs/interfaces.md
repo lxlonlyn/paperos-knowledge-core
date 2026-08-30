@@ -80,7 +80,7 @@ chunks.
 ### Health
 
 `GET /api/v1/health` reports application and dependency health. MinerU or
-LLM provider failure degrades health. Health is read-only and cannot start a
+LLM provider failure degrades health. A stopped operational worker is reported as unavailable with a stable public diagnostic and also degrades overall health. Health is read-only and cannot start a
 process, download a model, or initialize an external service. Public health,
 status, document, parse, and indexing payloads expose neither credentials nor
 resolved filesystem paths.

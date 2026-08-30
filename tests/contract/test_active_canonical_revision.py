@@ -715,6 +715,7 @@ async def _health_document_count(
         _CogneeHealthProbe(),  # type: ignore[arg-type]
         indexes,
         SimpleNamespace(list_jobs=list),
+        SimpleNamespace(running=True),
     )
     report = await health.report()
     return int(report["components"]["cognee_graph"]["document_count"])

@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from paperos_core.ingestion.canonical_repository import CanonicalRepository
     from paperos_core.ingestion.registry import SourceRegistry
     from paperos_core.jobs.queue import JobQueue
+    from paperos_core.jobs.worker import BackgroundWorker
     from paperos_core.paths import DataPaths
     from paperos_core.runtime.local_inference.runtime import LocalInferenceRuntime
 
@@ -61,6 +62,7 @@ class HealthService:
         cognee: CogneeCompatibilityAdapter,
         indexes: IndexManager,
         queue: JobQueue,
+        worker: BackgroundWorker,
     ) -> None:
         self.paths = paths
         self.registry = registry
@@ -71,6 +73,7 @@ class HealthService:
         self.cognee = cognee
         self.indexes = indexes
         self.queue = queue
+        self.worker = worker
 
     async def report(self) -> dict[str, Any]:
         components: dict[str, Any] = {}
@@ -192,6 +195,14 @@ class HealthService:
             "ingestion_jobs": registry["ingestion_job_count"],
             "operational_jobs": len(self.queue.list_jobs()),
         }
+        components["worker"] = (
+            {"status": "healthy", "running": True}
+            if self.worker.running
+            else {
+                **_component_failure("worker_unavailable"),
+                "running": False,
+            }
+        )
         components["data_paths"] = {
             "status": "healthy",
             "all_within_root": True,
