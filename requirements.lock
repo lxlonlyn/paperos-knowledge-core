@@ -1,6 +1,7 @@
 # Runtime dependencies
 cognee==1.4.0
 fastapi==0.140.8
+filelock==3.32.0
 uvicorn==0.51.0
 httpx==0.28.1
 pydantic==2.13.4

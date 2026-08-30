@@ -32,7 +32,7 @@ from paperos_core.ingestion.registry import SourceRegistry
 from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
 from paperos_core.jobs.queue import JobQueue
 from paperos_core.jobs.worker import BackgroundWorker
-from paperos_core.paths import build_data_paths
+from paperos_core.paths import DataPaths, build_data_paths
 from paperos_core.retrieval.candidates import QueryRequest, QueryResponse
 from paperos_core.retrieval.service import (
     NO_EVIDENCE_ANSWER,
@@ -808,8 +808,15 @@ async def health_contract() -> dict[str, object]:
 class _LifecycleProbe:
     required = False
 
+    def __init__(self, *, fail_start: bool = False) -> None:
+        self.fail_start = fail_start
+
     def cleanup_stale_record(self) -> None:
         return None
+
+    async def start(self) -> None:
+        if self.fail_start:
+            raise RuntimeError("injected application startup failure")
 
     async def stop(self) -> None:
         return None
@@ -836,6 +843,91 @@ class _RecoveryObservingWorker:
         self.running = False
 
 
+def _contract_application(
+    paths: DataPaths,
+    *,
+    queue: JobQueue | None = None,
+    worker: Any | None = None,
+) -> Application:
+    local_inference = _LifecycleProbe()
+    selected_queue = queue or JobQueue(paths)
+    selected_worker = worker or _LifecycleProbe()
+    return Application(
+        settings=RuntimeSettings(),
+        services=SimpleNamespace(),  # type: ignore[arg-type]
+        runtime=SimpleNamespace(
+            local_inference=local_inference,
+            worker=selected_worker,
+        ),  # type: ignore[arg-type]
+        paths=paths,
+        registry=SimpleNamespace(),  # type: ignore[arg-type]
+        scholarly_registry=SimpleNamespace(),  # type: ignore[arg-type]
+        parser_artifacts=SimpleNamespace(),  # type: ignore[arg-type]
+        canonical_repository=SimpleNamespace(),  # type: ignore[arg-type]
+        canonical_mapper=SimpleNamespace(),  # type: ignore[arg-type]
+        mineru=_LifecycleProbe(),  # type: ignore[arg-type]
+        local_inference_client=_LifecycleProbe(),  # type: ignore[arg-type]
+        llm=SimpleNamespace(),  # type: ignore[arg-type]
+        knowledge_pipeline=SimpleNamespace(compat=_LifecycleProbe()),  # type: ignore[arg-type]
+        queue=selected_queue,
+        storage=StorageInitializer(paths),
+    )
+
+
+async def application_singleton_contract(root: Path) -> dict[str, object]:
+    shared_paths = build_data_paths(root / "singleton-shared-data")
+    other_paths = build_data_paths(root / "singleton-other-data")
+    first = _contract_application(shared_paths)
+    second = _contract_application(shared_paths)
+    other = _contract_application(other_paths)
+
+    await first.start()
+    try:
+        try:
+            await second.start()
+        except RuntimeError as exc:
+            _require(
+                "already active" in str(exc),
+                f"Unexpected same-root singleton error: {exc}",
+            )
+        else:
+            raise RuntimeError("A second Application acquired the same data-root lock")
+
+        await other.start()
+        await other.aclose()
+    finally:
+        await first.aclose()
+
+    await second.start()
+    await second.aclose()
+
+    failure_paths = build_data_paths(root / "singleton-startup-failure-data")
+    failing = _contract_application(
+        failure_paths,
+        worker=_LifecycleProbe(fail_start=True),
+    )
+    try:
+        await failing.start()
+    except RuntimeError as exc:
+        _require(
+            "injected application startup failure" in str(exc),
+            f"Unexpected injected startup error: {exc}",
+        )
+    else:
+        raise RuntimeError("Injected Application startup failure did not occur")
+
+    successor = _contract_application(failure_paths)
+    await successor.start()
+    await successor.aclose()
+    return {
+        "status": "passed",
+        "same_root_rejected": True,
+        "released_on_close": True,
+        "different_roots_allowed": True,
+        "released_on_startup_failure": True,
+    }
+
+
 async def application_start_recovery_contract(root: Path) -> dict[str, object]:
     paths = build_data_paths(root / "application-recovery-data")
     storage = StorageInitializer(paths)
@@ -849,32 +941,12 @@ async def application_start_recovery_contract(root: Path) -> dict[str, object]:
     )
     assert interrupted is not None
     worker = _RecoveryObservingWorker(queue, interrupted.id)
-    lifecycle = _LifecycleProbe()
-    application = Application(
-        settings=RuntimeSettings(),
-        services=SimpleNamespace(),  # type: ignore[arg-type]
-        runtime=SimpleNamespace(
-            local_inference=lifecycle,
-            worker=worker,
-        ),  # type: ignore[arg-type]
-        paths=paths,
-        registry=SimpleNamespace(),  # type: ignore[arg-type]
-        scholarly_registry=SimpleNamespace(),  # type: ignore[arg-type]
-        parser_artifacts=SimpleNamespace(),  # type: ignore[arg-type]
-        canonical_repository=SimpleNamespace(),  # type: ignore[arg-type]
-        canonical_mapper=SimpleNamespace(),  # type: ignore[arg-type]
-        mineru=lifecycle,  # type: ignore[arg-type]
-        local_inference_client=lifecycle,  # type: ignore[arg-type]
-        llm=SimpleNamespace(),  # type: ignore[arg-type]
-        knowledge_pipeline=SimpleNamespace(compat=lifecycle),  # type: ignore[arg-type]
-        queue=queue,
-        storage=storage,
-    )
+    application = _contract_application(paths, queue=queue, worker=worker)
     await application.start()
     try:
         recovered = queue.get(interrupted.id)
         _require(
-            worker.status_at_start == "failed",
+            worker.status_at_start == "pending",
             "Application started worker before interrupted-job recovery",
         )
         _require(
@@ -1011,7 +1083,7 @@ def job_status_contract(root: Path) -> dict[str, object]:
     recovered_count = recovery_queue.recover_interrupted_jobs()
     _require(recovered_count == 1, "Recovery did not update exactly one running job")
     recovered = recovery_queue.get(interrupted.id)
-    _require(recovered.status == "failed", "Interrupted job was not failed")
+    _require(recovered.status == "pending", "Interrupted job was not requeued")
     _require(recovered.error == "worker_interrupted", "Recovery reason changed")
     _require(
         recovered.updated_at > interrupted.updated_at,
@@ -1031,16 +1103,12 @@ def job_status_contract(root: Path) -> dict[str, object]:
     _require(
         recovery_queue.get(recovered.id).model_dump(mode="json")
         == recovered_before_repeat,
-        "Repeated recovery modified the failed job",
+        "Repeated recovery modified the requeued job",
     )
     recovered_public = recovery_queue.public_dict(recovered)
     _require(
-        recovered_public["error"]
-        == {
-            "code": "operational_job_failed",
-            "message": "The operation could not be completed.",
-        },
-        "Recovered job did not use the generic public diagnostic",
+        recovered_public["error"] is None,
+        "Recovered pending job exposed a public error",
     )
     _require(
         "worker_interrupted" not in json.dumps(recovered_public),
@@ -1072,6 +1140,7 @@ async def run_contract() -> dict[str, Any]:
             "health": await health_contract(),
             "jobs": job_status_contract(root),
             "worker": await worker_loop_contract(root),
+            "singleton": await application_singleton_contract(root),
             "application_startup": await application_start_recovery_contract(root),
         }
 

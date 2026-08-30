@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from filelock import FileLock, Timeout
+
 from paperos_core.adapters.mineru.client import MinerUClient
 from paperos_core.adapters.mineru.mapper import MinerUCanonicalMapper
 from paperos_core.adapters.mineru.providers import MinerUCloudProvider
@@ -66,6 +68,29 @@ class Application:
     storage: StorageInitializer
     _started: bool = field(default=False, init=False)
     _closed: bool = field(default=False, init=False)
+    _instance_lock: FileLock | None = field(default=None, init=False, repr=False)
+
+    def _acquire_instance_lock(self) -> None:
+        self.paths.root.mkdir(parents=True, exist_ok=True)
+        lock_path = self.paths.root / ".paperos.lock"
+        lock = FileLock(lock_path, fallback_to_soft=False)
+        try:
+            lock.acquire(blocking=False)
+        except Timeout as exc:
+            raise RuntimeError(
+                "Another PaperOS Application is already active for data root: "
+                f"{self.paths.root}"
+            ) from exc
+        self._instance_lock = lock
+
+    def _release_instance_lock(self) -> None:
+        lock = self._instance_lock
+        if lock is None:
+            return
+        try:
+            lock.release()
+        finally:
+            self._instance_lock = None
 
     async def start(self) -> None:
         """Initialize owned resources in dependency order exactly once."""
@@ -74,23 +99,25 @@ class Application:
             raise RuntimeError("A closed PaperOS Application cannot be restarted.")
         if self._started:
             return
-        self.storage.initialize()
-        self.runtime.local_inference.cleanup_stale_record()
-        self.runtime.worker.cleanup_stale_record()
-        status = self.storage.validate()
-        if not status.valid:
-            raise RuntimeError(
-                "PaperOS local schema validation failed: " + ", ".join(status.missing_tables)
-            )
+        self._acquire_instance_lock()
         try:
+            self.storage.initialize()
+            self.runtime.local_inference.cleanup_stale_record()
+            self.runtime.worker.cleanup_stale_record()
+            status = self.storage.validate()
+            if not status.valid:
+                raise RuntimeError(
+                    "PaperOS local schema validation failed: "
+                    + ", ".join(status.missing_tables)
+                )
             if self.runtime.local_inference.required:
                 await self.runtime.local_inference.start()
             self.queue.recover_interrupted_jobs()
             await self.runtime.worker.start()
+            self._started = True
         except BaseException:
             await self.aclose()
             raise
-        self._started = True
 
     async def aclose(self) -> None:
         """Close owned resources in reverse startup order."""
@@ -99,18 +126,24 @@ class Application:
             return
         self._closed = True
         failures: list[Exception] = []
-        for close in (
-            self.runtime.worker.stop,
-            self.knowledge_pipeline.compat.aclose,
-            self.runtime.local_inference.stop,
-            self.local_inference_client.aclose,
-            self.mineru.aclose,
-        ):
+        try:
+            for close in (
+                self.runtime.worker.stop,
+                self.knowledge_pipeline.compat.aclose,
+                self.runtime.local_inference.stop,
+                self.local_inference_client.aclose,
+                self.mineru.aclose,
+            ):
+                try:
+                    await close()
+                except Exception as exc:  # noqa: BLE001 - all owners must still close.
+                    failures.append(exc)
+        finally:
+            self._started = False
             try:
-                await close()
-            except Exception as exc:  # noqa: BLE001 - all owners must still close.
+                self._release_instance_lock()
+            except Exception as exc:  # noqa: BLE001 - report lock release failures.
                 failures.append(exc)
-        self._started = False
         if failures:
             raise RuntimeError(
                 "PaperOS shutdown failed for one or more owned resources: "
