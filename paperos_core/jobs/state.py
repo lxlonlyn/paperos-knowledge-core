@@ -13,6 +13,7 @@ _ALLOWED_TRANSITIONS: dict[IngestionJobStatus, frozenset[IngestionJobStatus]] = 
             IngestionJobStatus.PARSING,
             IngestionJobStatus.FAILED,
             IngestionJobStatus.CANCELLED,
+            IngestionJobStatus.INTERRUPTED,
         }
     ),
     IngestionJobStatus.VALIDATING: frozenset(
@@ -21,30 +22,53 @@ _ALLOWED_TRANSITIONS: dict[IngestionJobStatus, frozenset[IngestionJobStatus]] = 
             IngestionJobStatus.PARSING,
             IngestionJobStatus.FAILED,
             IngestionJobStatus.CANCELLED,
+            IngestionJobStatus.INTERRUPTED,
         }
     ),
     IngestionJobStatus.PARSING: frozenset(
-        {IngestionJobStatus.NORMALIZING, IngestionJobStatus.FAILED, IngestionJobStatus.CANCELLED}
+        {
+            IngestionJobStatus.NORMALIZING,
+            IngestionJobStatus.FAILED,
+            IngestionJobStatus.CANCELLED,
+            IngestionJobStatus.INTERRUPTED,
+        }
     ),
     IngestionJobStatus.NORMALIZING: frozenset(
-        {IngestionJobStatus.WRITING, IngestionJobStatus.FAILED, IngestionJobStatus.CANCELLED}
+        {
+            IngestionJobStatus.WRITING,
+            IngestionJobStatus.FAILED,
+            IngestionJobStatus.CANCELLED,
+            IngestionJobStatus.INTERRUPTED,
+        }
     ),
     IngestionJobStatus.WRITING: frozenset(
-        {IngestionJobStatus.INDEXING, IngestionJobStatus.FAILED, IngestionJobStatus.CANCELLED}
+        {
+            IngestionJobStatus.INDEXING,
+            IngestionJobStatus.FAILED,
+            IngestionJobStatus.CANCELLED,
+            IngestionJobStatus.INTERRUPTED,
+        }
     ),
     IngestionJobStatus.INDEXING: frozenset(
         {
             IngestionJobStatus.POSTPROCESSING,
             IngestionJobStatus.FAILED,
             IngestionJobStatus.CANCELLED,
+            IngestionJobStatus.INTERRUPTED,
         }
     ),
     IngestionJobStatus.POSTPROCESSING: frozenset(
-        {IngestionJobStatus.COMPLETED, IngestionJobStatus.FAILED, IngestionJobStatus.CANCELLED}
+        {
+            IngestionJobStatus.COMPLETED,
+            IngestionJobStatus.FAILED,
+            IngestionJobStatus.CANCELLED,
+            IngestionJobStatus.INTERRUPTED,
+        }
     ),
     IngestionJobStatus.COMPLETED: frozenset(),
     IngestionJobStatus.FAILED: frozenset({IngestionJobStatus.PENDING}),
     IngestionJobStatus.CANCELLED: frozenset(),
+    IngestionJobStatus.INTERRUPTED: frozenset(),
 }
 
 

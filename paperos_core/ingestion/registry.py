@@ -28,6 +28,16 @@ from paperos_core.storage.immutable import (
 )
 from paperos_core.storage.path_refs import DataPathCodec
 
+_RECOVERABLE_INGESTION_JOB_STATUSES = (
+    IngestionJobStatus.PENDING,
+    IngestionJobStatus.VALIDATING,
+    IngestionJobStatus.PARSING,
+    IngestionJobStatus.NORMALIZING,
+    IngestionJobStatus.WRITING,
+    IngestionJobStatus.INDEXING,
+    IngestionJobStatus.POSTPROCESSING,
+)
+
 
 class SourceRegistry:
     """Own SourceFile records, ingestion jobs, and immutable source bytes."""
@@ -272,6 +282,23 @@ class SourceRegistry:
         if row is None:
             raise JobNotFoundError(f"IngestionJob '{job_id}' does not exist.", affected=job_id)
         return self._job_from_row(row)
+
+    def recover_interrupted_jobs(self) -> int:
+        """Mark non-terminal ingestion attempts left by a prior process as interrupted."""
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE ingestion_jobs "
+                "SET status = ?, current_operation = ?, updated_at = ? "
+                "WHERE status IN (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    IngestionJobStatus.INTERRUPTED.value,
+                    "interrupted",
+                    utc_now().isoformat(),
+                    *(status.value for status in _RECOVERABLE_INGESTION_JOB_STATUSES),
+                ),
+            )
+        return cursor.rowcount
 
     def update_job(
         self,

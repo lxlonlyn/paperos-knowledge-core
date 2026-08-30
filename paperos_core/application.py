@@ -112,6 +112,8 @@ class Application:
                 )
             if self.runtime.local_inference.required:
                 await self.runtime.local_inference.start()
+            self.registry.recover_interrupted_jobs()
+            self.parser_artifacts.recover_interrupted_runs()
             self.queue.recover_interrupted_jobs()
             await self.runtime.worker.start()
             self._started = True

@@ -24,12 +24,15 @@ from paperos_core.adapters.cognee.configurator import CogneeConfigurator
 from paperos_core.adapters.cognee.runtime_config import CogneeRuntimeConfigReader
 from paperos_core.application import Application
 from paperos_core.config import RuntimeSettings, load_settings
+from paperos_core.domain.enums import IngestionJobStatus, ParseRunStatus
 from paperos_core.errors import ConfigurationError, PaperOSError
 from paperos_core.health import HealthService, local_model_enablement
 from paperos_core.indexes.manager import IndexManager
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
+from paperos_core.ingestion.parser_artifacts import ParserArtifactRepository
 from paperos_core.ingestion.registry import SourceRegistry
 from paperos_core.ingestion.scholarly_registry import ScholarlyRegistry
+from paperos_core.ingestion.validation import validate_pdf
 from paperos_core.jobs.queue import JobQueue
 from paperos_core.jobs.worker import BackgroundWorker
 from paperos_core.paths import DataPaths, build_data_paths
@@ -826,17 +829,33 @@ class _LifecycleProbe:
 
 
 class _RecoveryObservingWorker:
-    def __init__(self, queue: JobQueue, job_id: str) -> None:
+    def __init__(
+        self,
+        queue: JobQueue,
+        operational_job_id: str,
+        registry: SourceRegistry,
+        ingestion_job_id: str,
+        parser_artifacts: ParserArtifactRepository,
+        parse_run_id: str,
+    ) -> None:
         self.queue = queue
-        self.job_id = job_id
+        self.operational_job_id = operational_job_id
+        self.registry = registry
+        self.ingestion_job_id = ingestion_job_id
+        self.parser_artifacts = parser_artifacts
+        self.parse_run_id = parse_run_id
         self.running = False
-        self.status_at_start: str | None = None
+        self.operational_status_at_start: str | None = None
+        self.ingestion_status_at_start: IngestionJobStatus | None = None
+        self.parse_status_at_start: ParseRunStatus | None = None
 
     def cleanup_stale_record(self) -> None:
         return None
 
     async def start(self) -> None:
-        self.status_at_start = self.queue.get(self.job_id).status
+        self.operational_status_at_start = self.queue.get(self.operational_job_id).status
+        self.ingestion_status_at_start = self.registry.get_job(self.ingestion_job_id).status
+        self.parse_status_at_start = self.parser_artifacts.get_parse_run(self.parse_run_id).status
         self.running = True
 
     async def stop(self) -> None:
@@ -860,9 +879,9 @@ def _contract_application(
             worker=selected_worker,
         ),  # type: ignore[arg-type]
         paths=paths,
-        registry=SimpleNamespace(),  # type: ignore[arg-type]
+        registry=SourceRegistry(paths),
         scholarly_registry=SimpleNamespace(),  # type: ignore[arg-type]
-        parser_artifacts=SimpleNamespace(),  # type: ignore[arg-type]
+        parser_artifacts=ParserArtifactRepository(paths),
         canonical_repository=SimpleNamespace(),  # type: ignore[arg-type]
         canonical_mapper=SimpleNamespace(),  # type: ignore[arg-type]
         mineru=_LifecycleProbe(),  # type: ignore[arg-type]
@@ -932,32 +951,110 @@ async def application_start_recovery_contract(root: Path) -> dict[str, object]:
     paths = build_data_paths(root / "application-recovery-data")
     storage = StorageInitializer(paths)
     storage.initialize()
+
+    registry = SourceRegistry(paths)
+    source_path = root / "application-recovery-source.pdf"
+    source_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    source, _ = registry.register_source(
+        validate_pdf(source_path, max_file_mb=1),
+        dataset_id="recovery-contract",
+    )
+    ingestion_job = registry.create_job(source.id, dataset_id="recovery-contract")
+    ingestion_job = registry.update_job(
+        ingestion_job.id,
+        status=IngestionJobStatus.PARSING,
+        current_operation="waiting_for_mineru",
+    )
+
+    parser_artifacts = ParserArtifactRepository(paths)
+    parse_run = parser_artifacts.create_parse_run(
+        source,
+        provider="contract",
+        backend="contract",
+        request_options={},
+    )
+    parse_run = parser_artifacts.update_parse_run(
+        parse_run.id,
+        status=ParseRunStatus.RUNNING,
+        provider_task_id="stale-mineru-task",
+    )
+
     queue = JobQueue(paths)
     pending = queue.enqueue("rebuild")
     interrupted = queue.claim_next()
     _require(
         interrupted is not None and interrupted.id == pending.id,
-        "Application recovery fixture did not create a running job",
+        "Application recovery fixture did not create a running operational job",
     )
     assert interrupted is not None
-    worker = _RecoveryObservingWorker(queue, interrupted.id)
+    worker = _RecoveryObservingWorker(
+        queue,
+        interrupted.id,
+        registry,
+        ingestion_job.id,
+        parser_artifacts,
+        parse_run.id,
+    )
     application = _contract_application(paths, queue=queue, worker=worker)
     await application.start()
     try:
-        recovered = queue.get(interrupted.id)
+        recovered_operational = queue.get(interrupted.id)
+        recovered_ingestion = registry.get_job(ingestion_job.id)
+        recovered_parse = parser_artifacts.get_parse_run(parse_run.id)
         _require(
-            worker.status_at_start == "pending",
-            "Application started worker before interrupted-job recovery",
+            worker.operational_status_at_start == "pending",
+            "Application started worker before operational-job recovery",
         )
         _require(
-            recovered.error == "worker_interrupted",
+            worker.ingestion_status_at_start == IngestionJobStatus.INTERRUPTED,
+            "Application started worker before ingestion-attempt recovery",
+        )
+        _require(
+            worker.parse_status_at_start == ParseRunStatus.INTERRUPTED,
+            "Application started worker before parse-attempt recovery",
+        )
+        _require(
+            recovered_operational.error == "worker_interrupted",
             "Application startup recovery reason changed",
+        )
+        _require(
+            recovered_ingestion.status == IngestionJobStatus.INTERRUPTED,
+            "Non-terminal IngestionJob was not marked interrupted",
+        )
+        _require(
+            recovered_parse.status == ParseRunStatus.INTERRUPTED,
+            "Running ParseRun was not marked interrupted",
+        )
+
+        ingestion_before_repeat = recovered_ingestion.model_dump(mode="json")
+        parse_before_repeat = recovered_parse.model_dump(mode="json")
+        _require(
+            registry.recover_interrupted_jobs() == 0,
+            "Repeated ingestion-attempt recovery was not idempotent",
+        )
+        _require(
+            parser_artifacts.recover_interrupted_runs() == 0,
+            "Repeated parse-attempt recovery was not idempotent",
+        )
+        _require(
+            registry.get_job(ingestion_job.id).model_dump(mode="json")
+            == ingestion_before_repeat,
+            "Repeated recovery modified the interrupted IngestionJob",
+        )
+        _require(
+            parser_artifacts.get_parse_run(parse_run.id).model_dump(mode="json")
+            == parse_before_repeat,
+            "Repeated recovery modified the interrupted ParseRun",
         )
     finally:
         await application.aclose()
     return {
         "status": "passed",
         "recovered_before_worker_start": True,
+        "ingestion_attempt_interrupted": True,
+        "parse_attempt_interrupted": True,
+        "attempt_recovery_idempotent": True,
+        "operational_job_requeued": True,
     }
 
 

@@ -30,6 +30,11 @@ _WINDOWS_RESERVED_NAMES = frozenset(
     | {f"com{number}" for number in range(1, 10)}
     | {f"lpt{number}" for number in range(1, 10)}
 )
+_RECOVERABLE_PARSE_RUN_STATUSES = (
+    ParseRunStatus.PENDING,
+    ParseRunStatus.SUBMITTED,
+    ParseRunStatus.RUNNING,
+)
 
 
 class ParserArtifactRepository:
@@ -155,6 +160,21 @@ class ParserArtifactRepository:
             raise SourceRegistryError(f"ParseRun '{run_id}' does not exist.", affected=run_id)
         return self._run_from_row(row)
 
+    def recover_interrupted_runs(self) -> int:
+        """Mark non-terminal parse attempts left by a prior process as interrupted."""
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE parse_runs SET status = ?, completed_at = ? "
+                "WHERE status IN (?, ?, ?)",
+                (
+                    ParseRunStatus.INTERRUPTED.value,
+                    utc_now().isoformat(),
+                    *(status.value for status in _RECOVERABLE_PARSE_RUN_STATUSES),
+                ),
+            )
+        return cursor.rowcount
+
     def update_parse_run(
         self,
         run_id: str,
@@ -168,7 +188,10 @@ class ParserArtifactRepository:
     ) -> ParseRun:
         current = self.get_parse_run(run_id)
         completed_at = (
-            utc_now() if status in {ParseRunStatus.COMPLETED, ParseRunStatus.FAILED} else None
+            utc_now()
+            if status
+            in {ParseRunStatus.COMPLETED, ParseRunStatus.FAILED, ParseRunStatus.INTERRUPTED}
+            else None
         )
         with self._connect() as connection:
             connection.execute(

@@ -14,6 +14,7 @@ class IngestionJobStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
 
 
 class ParseRunStatus(StrEnum):
@@ -22,6 +23,7 @@ class ParseRunStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    INTERRUPTED = "interrupted"
 
 
 class ParserArtifactType(StrEnum):
