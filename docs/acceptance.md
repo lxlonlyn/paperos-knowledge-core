@@ -118,17 +118,19 @@ ablation matrix, unique-rescue benchmark, or graph/Claim cost-benefit benchmark.
 Those measurements are separate from proving that the one production
 Chunk-first architecture is structurally correct and operational end to end.
 
-## Structured reranking and provisional quality
+## Structured reranking
 
 Reranking scores rebuildable, snapshot-scoped `RerankSpan` ranges generated
 from the canonical `SentenceUnit` structure during ChunkProjection construction.
-The local model does not split strings at query time. Task 6A aggregates span
-scores to parent Chunks with MaxP. The authoritative indexed and Evidence unit
-remains the canonical Chunk; reranking does not rewrite Chunk text, retrieval
-text, embeddings, or Evidence provenance.
+The local model does not split strings at query time. Production ranking combines
+the Full Chunk score with MaxP scores over structured spans targeting 256 tokens
+with a 384-token hard maximum, using reciprocal rank fusion with `k = 60`.
+The fused result resolves to the canonical parent Chunk. The authoritative
+indexed and Evidence unit remains that canonical Chunk; reranking does not
+rewrite Chunk text, retrieval text, embeddings, or Evidence provenance.
 
-Until Task 6B compares aggregation and sizing policies, semantic benchmark
-quality remains provisional and is not a release
-engineering blocker. Reports retain every historical query and gate result with
-its actual validation origin, validated commit, and whether it executed in the
-current run.
+The retained Task 6B benchmark in
+`data/validation/rerank_quality/output/benchmark.json` records the production
+policy as `hybrid_full_structured_256_384_rrf` with `overall_status = PASS`.
+Its historical `validated_head` remains the commit on which that benchmark
+actually ran; release closure does not relabel it as current validation.

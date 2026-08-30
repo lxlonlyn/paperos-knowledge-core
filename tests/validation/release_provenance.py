@@ -11,11 +11,6 @@ VALIDATION_ORIGIN_MIXED_REUSED = "mixed_reused"
 VALIDATION_HEAD_ATTRIBUTED = "attributed"
 VALIDATION_HEAD_LEGACY_UNATTRIBUTED = "legacy_unattributed"
 VALIDATION_HEAD_MIXED = "mixed_children"
-SEARCH_QUALITY_PENDING = "PENDING_RERANK_OPTIMIZATION"
-RERANK_PROVISIONAL_NOTICE = (
-    "Rerank quality is provisional and will be revalidated after the dedicated "
-    "rerank optimization task."
-)
 ENGINEERING_GATE_NAMES = (
     "contracts",
     "ci_local_equivalent",
@@ -37,8 +32,16 @@ ENGINEERING_GATE_NAMES = (
 )
 
 
+def _drop_legacy_quality_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    normalized.pop("search_quality_status", None)
+    normalized.pop("rerank_quality_notice", None)
+    normalized.pop("quality_status", None)
+    return normalized
+
+
 def _drop_legacy_gate_fields(report: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(report)
+    normalized = _drop_legacy_quality_fields(report)
     normalized.pop("gates", None)
     normalized.pop("reranker_blocker", None)
     return normalized

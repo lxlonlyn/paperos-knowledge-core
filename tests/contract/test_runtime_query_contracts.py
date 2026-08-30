@@ -26,7 +26,11 @@ from paperos_core.application import Application
 from paperos_core.config import RuntimeSettings, load_settings
 from paperos_core.documents import DocumentService
 from paperos_core.domain.enums import IngestionJobStatus, ParseRunStatus
-from paperos_core.errors import ConfigurationError, PaperOSError
+from paperos_core.errors import (
+    ConfigurationError,
+    LocalInferenceRuntimeIncompatibleError,
+    PaperOSError,
+)
 from paperos_core.feedback.models import FeedbackRequest, FeedbackType
 from paperos_core.feedback.service import FeedbackService
 from paperos_core.health import HealthService, local_model_enablement
@@ -46,7 +50,10 @@ from paperos_core.retrieval.service import (
     RetrievalService,
     effective_candidate_pool_size,
 )
-from paperos_core.runtime.local_inference.runtime import LocalRuntimeUsage
+from paperos_core.runtime.local_inference.runtime import (
+    LocalInferenceRuntime,
+    LocalRuntimeUsage,
+)
 from paperos_core.storage.initializer import (
     LEXICAL_SCHEMA_VERSION,
     REGISTRY_SCHEMA_VERSION,
@@ -574,15 +581,27 @@ class _Probe:
 
 
 class _RuntimeConfig:
-    embedding_dimensions = 768
+    def __init__(
+        self,
+        *,
+        embedding_model: str = "embedding-contract",
+        embedding_dimensions: int = 768,
+        embedding_enabled: bool = True,
+    ) -> None:
+        self.embedding_model = embedding_model
+        self.embedding_dimensions = embedding_dimensions
+        self.embedding_enabled = embedding_enabled
 
     def embedding_targets(self, host: str, port: int) -> bool:
-        return True
+        return self.embedding_enabled
 
 
 class _RuntimeConfigReader:
+    def __init__(self, config: _RuntimeConfig | None = None) -> None:
+        self.config = config or _RuntimeConfig()
+
     def read(self) -> _RuntimeConfig:
-        return _RuntimeConfig()
+        return self.config
 
 
 class _CogneeProbe:
@@ -808,6 +827,93 @@ async def health_contract() -> dict[str, object]:
         "failure_codes": sorted(code for _, code, _ in expected_errors.values()),
         "healthy_allowlists": True,
         "worker_liveness": True,
+    }
+
+
+def local_runtime_identity_contract(root: Path) -> dict[str, object]:
+    embedding_path = root / "embedding-contract.gguf"
+    reranker_path = root / "reranker-contract.gguf"
+    embedding_path.write_bytes(b"embedding-contract")
+    reranker_path.write_bytes(b"reranker-contract")
+    settings = RuntimeSettings.model_validate(
+        {
+            "local_inference": {
+                "embedding_model_path": embedding_path,
+                "reranker_model_path": reranker_path,
+                "cuda_devices": [2, 5],
+            },
+            "retrieval": {"rerank_enabled": True},
+        }
+    )
+    runtime = LocalInferenceRuntime(
+        settings,
+        build_data_paths(root / "runtime-identity-data"),
+        _Probe(),
+        _RuntimeConfigReader(),
+    )
+    expected = runtime._expected_runtime_identity()
+    expected_embedding_file = expected["embedding"]["model"]["file"]
+    _require(
+        expected_embedding_file
+        == {
+            "resolved_path": str(embedding_path.resolve()),
+            "file_size": str(embedding_path.stat().st_size),
+            "mtime_ns": str(embedding_path.stat().st_mtime_ns),
+        },
+        "Embedding file identity is not deterministic",
+    )
+    runtime._validate_reuse_identity(
+        {"status": "healthy", "runtime_identity": expected}
+    )
+
+    rejected: list[str] = []
+
+    def changed_identity() -> dict[str, Any]:
+        return json.loads(json.dumps(expected))
+
+    def require_rejected(label: str, identity: dict[str, Any]) -> None:
+        try:
+            runtime._validate_reuse_identity(
+                {"status": "healthy", "runtime_identity": identity}
+            )
+        except LocalInferenceRuntimeIncompatibleError as exc:
+            _require(
+                exc.code == "local_runtime_incompatible" and not exc.retryable,
+                f"{label} used the wrong compatibility error",
+            )
+            _require(
+                exc.details == {"reason": "runtime_identity_mismatch"},
+                f"{label} exposed unstable mismatch details",
+            )
+            rejected.append(label)
+        else:
+            raise RuntimeError(f"{label} unexpectedly reused the local runtime")
+
+    changed = changed_identity()
+    changed["embedding"]["model"]["name"] = "embedding-contract-v2"
+    require_rejected("embedding_model", changed)
+
+    changed = changed_identity()
+    changed["embedding"]["dimensions"] = 1024
+    require_rejected("embedding_dimensions", changed)
+
+    changed = changed_identity()
+    changed["reranker"]["enabled"] = False
+    require_rejected("reranker_config", changed)
+
+    changed = changed_identity()
+    changed["cuda_visible_devices"] = "5"
+    require_rejected("cuda_visible_devices", changed)
+
+    changed = changed_identity()
+    changed["protocol_version"] = expected["protocol_version"] + 1
+    require_rejected("protocol_version", changed)
+
+    _require(len(rejected) == 5, "Not every incompatible runtime was rejected")
+    return {
+        "status": "passed",
+        "same_config_reused": True,
+        "rejected": rejected,
     }
 
 
@@ -1408,6 +1514,7 @@ async def run_contract() -> dict[str, Any]:
             "retrieval": await empty_retrieval_contract(root),
             "api_errors": api_error_contract(),
             "health": await health_contract(),
+            "local_runtime_identity": local_runtime_identity_contract(root),
             "replay_correctness": await replay_correctness_contract(root),
             "jobs": job_status_contract(root),
             "worker": await worker_loop_contract(root),

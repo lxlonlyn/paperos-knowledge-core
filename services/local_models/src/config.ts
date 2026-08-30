@@ -1,6 +1,34 @@
 import {accessSync, constants, statSync} from "node:fs";
 import {resolve} from "node:path";
 
+export const LOCAL_INFERENCE_PROTOCOL_VERSION = 1;
+
+export interface ModelFileIdentity {
+  resolved_path: string;
+  file_size: string;
+  mtime_ns: string;
+}
+
+export interface RuntimeIdentity {
+  protocol_version: number;
+  embedding: {
+    enabled: boolean;
+    model: {
+      name: string;
+      file: ModelFileIdentity | null;
+    };
+    dimensions: number;
+  };
+  reranker: {
+    enabled: boolean;
+    model: {
+      name: string;
+      file: ModelFileIdentity | null;
+    };
+  };
+  cuda_visible_devices: string;
+}
+
 export interface LocalInferenceConfig {
   host: string;
   port: number;
@@ -15,6 +43,38 @@ export interface LocalInferenceConfig {
   rerankerMaxTokens: number;
   cudaVisibleDevices: string;
   shutdownToken: string;
+}
+
+export function buildRuntimeIdentity(config: LocalInferenceConfig): RuntimeIdentity {
+  return {
+    protocol_version: LOCAL_INFERENCE_PROTOCOL_VERSION,
+    embedding: {
+      enabled: config.embeddingEnabled,
+      model: {
+        name: config.embeddingModelName,
+        file: modelFileIdentity(config.embeddingEnabled, config.embeddingModelPath),
+      },
+      dimensions: config.embeddingDimensions,
+    },
+    reranker: {
+      enabled: config.rerankerEnabled,
+      model: {
+        name: config.rerankerModelName,
+        file: modelFileIdentity(config.rerankerEnabled, config.rerankerModelPath),
+      },
+    },
+    cuda_visible_devices: config.cudaVisibleDevices,
+  };
+}
+
+function modelFileIdentity(enabled: boolean, path: string): ModelFileIdentity | null {
+  if (!enabled) return null;
+  const metadata = statSync(path, {bigint: true});
+  return {
+    resolved_path: path,
+    file_size: metadata.size.toString(),
+    mtime_ns: metadata.mtimeNs.toString(),
+  };
 }
 
 function positiveInteger(name: string, fallback: number): number {

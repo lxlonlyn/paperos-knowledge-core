@@ -1,7 +1,7 @@
 import {timingSafeEqual} from "node:crypto";
 import {createServer, type IncomingMessage, type ServerResponse} from "node:http";
 
-import {loadConfig} from "./config.js";
+import {buildRuntimeIdentity, loadConfig} from "./config.js";
 import {EmbeddingService} from "./embedding.js";
 import {errorPayload, RequestError} from "./errors.js";
 import {RerankerService} from "./reranker.js";
@@ -20,6 +20,7 @@ interface RerankRequest {
 }
 
 const config = loadConfig();
+const runtimeIdentity = buildRuntimeIdentity(config);
 const embeddings = config.embeddingEnabled ? new EmbeddingService(config) : null;
 const reranker = new RerankerService(config);
 if (embeddings) {
@@ -87,6 +88,7 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/health") {
       send(response, 200, {
         status: "healthy",
+        runtime_identity: runtimeIdentity,
         cuda_visible_devices: config.cudaVisibleDevices,
         embedding: {
           model: config.embeddingModelName,

@@ -15,11 +15,15 @@ from paperos_core.adapters.cognee.runtime_config import CogneeRuntimeConfigReade
 from paperos_core.config import RuntimeSettings, resolve_local_model_path
 from paperos_core.errors import (
     LocalInferenceConfigurationError,
+    LocalInferenceRuntimeIncompatibleError,
     LocalInferenceUnavailableError,
 )
 from paperos_core.locations import SERVICES_ROOT
 from paperos_core.paths import DataPaths
 from paperos_core.runtime.local_inference.client import LocalInferenceClient
+
+LOCAL_INFERENCE_PROTOCOL_VERSION = 1
+LOCAL_RERANKER_MODEL_NAME = "qwen3-reranker-0.6b"
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +151,7 @@ class LocalInferenceRuntime:
                 "PAPEROS_EMBEDDING_DIMENSIONS": str(cognee.embedding_dimensions),
                 "PAPEROS_EMBEDDING_MAX_TOKENS": str(cognee.embedding_max_tokens),
                 "PAPEROS_RERANKER_ENABLED": "true" if reranker_enabled else "false",
+                "PAPEROS_RERANKER_MODEL_NAME": LOCAL_RERANKER_MODEL_NAME,
                 **(
                     {"PAPEROS_EMBEDDING_MODEL_PATH": str(model_path)}
                     if model_path is not None
@@ -248,22 +253,71 @@ class LocalInferenceRuntime:
                 retryable=False,
             ) from exc
         if health.get("status") == "healthy":
-            expected_cuda = ",".join(
-                str(device) for device in self.settings.local_inference.cuda_devices
-            )
-            if health.get("cuda_visible_devices") != expected_cuda:
-                raise LocalInferenceUnavailableError(
-                    "Existing local inference runtime has incompatible CUDA visibility.",
-                    affected=f"{host}:{port}",
-                    details={"cuda_visibility_matches": False},
-                    retryable=False,
-                )
+            self._validate_reuse_identity(health, affected=f"{host}:{port}")
             self._owned = False
             return health
         raise LocalInferenceUnavailableError(
             f"Cannot start local inference because {host}:{port} is already in use.",
             affected=f"{host}:{port}",
             retryable=False,
+        )
+
+    def _expected_runtime_identity(self) -> dict[str, Any]:
+        local = self.settings.local_inference
+        cognee = self.cognee_config.read()
+        usage = local_runtime_usage(self.settings, self.cognee_config)
+        embedding_path = (
+            self._model_path(local.embedding_model_path, label="embedding")
+            if usage.embedding
+            else None
+        )
+        reranker_path = (
+            self._model_path(local.reranker_model_path, label="reranker")
+            if usage.reranker
+            else None
+        )
+        return {
+            "protocol_version": LOCAL_INFERENCE_PROTOCOL_VERSION,
+            "embedding": {
+                "enabled": usage.embedding,
+                "model": {
+                    "name": cognee.embedding_model,
+                    "file": self._model_file_identity(embedding_path),
+                },
+                "dimensions": cognee.embedding_dimensions,
+            },
+            "reranker": {
+                "enabled": usage.reranker,
+                "model": {
+                    "name": LOCAL_RERANKER_MODEL_NAME,
+                    "file": self._model_file_identity(reranker_path),
+                },
+            },
+            "cuda_visible_devices": ",".join(
+                str(device) for device in local.cuda_devices
+            ),
+        }
+
+    @staticmethod
+    def _model_file_identity(path: Path | None) -> dict[str, str] | None:
+        if path is None:
+            return None
+        metadata = path.stat()
+        return {
+            "resolved_path": str(path.resolve()),
+            "file_size": str(metadata.st_size),
+            "mtime_ns": str(metadata.st_mtime_ns),
+        }
+
+    def _validate_reuse_identity(
+        self, health: dict[str, Any], *, affected: str | None = None
+    ) -> None:
+        if health.get("runtime_identity") == self._expected_runtime_identity():
+            return
+        raise LocalInferenceRuntimeIncompatibleError(
+            "Existing local inference runtime does not match the current configuration.",
+            affected=affected or self.endpoint,
+            details={"reason": "runtime_identity_mismatch"},
         )
 
     async def stop(self) -> None:

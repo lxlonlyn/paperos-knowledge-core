@@ -1,6 +1,6 @@
 # Architecture
 
-## Binding decisions for 0.1.0
+## Binding decisions for 1.0.0
 
 ### A1: Product form
 

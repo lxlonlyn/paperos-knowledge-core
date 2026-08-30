@@ -31,6 +31,7 @@ _PUBLIC_MESSAGES = {
     "canonical_validation_error": "Canonical document validation failed.",
     "canonical_storage_error": "Canonical document storage failed.",
     "local_inference_configuration_error": "Local inference configuration is invalid.",
+    "local_runtime_incompatible": "The existing local inference runtime is incompatible.",
     "local_inference_unavailable": "Local inference is unavailable.",
     "local_inference_response_error": "Local inference returned an invalid response.",
     "cognee_configuration_error": "Knowledge engine configuration is invalid.",
@@ -288,6 +289,10 @@ class CanonicalStorageError(PaperOSError):
 
 class LocalInferenceConfigurationError(PaperOSError):
     code = "local_inference_configuration_error"
+
+
+class LocalInferenceRuntimeIncompatibleError(PaperOSError):
+    code = "local_runtime_incompatible"
 
 
 class LocalInferenceUnavailableError(PaperOSError):

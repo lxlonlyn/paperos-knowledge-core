@@ -33,14 +33,13 @@ from tests.validation import retrieval as retrieval_validation
 from tests.validation.chunk import review___projection_metrics
 from tests.validation.release_provenance import (
     PROVENANCE_SCHEMA_VERSION,
-    RERANK_PROVISIONAL_NOTICE,
-    SEARCH_QUALITY_PENDING,
     VALIDATION_HEAD_MIXED,
     VALIDATION_ORIGIN_CURRENT,
     VALIDATION_ORIGIN_MIXED_REUSED,
     _annotate_validation,
     _composite_reused_validation,
     _drop_legacy_gate_fields,
+    _drop_legacy_quality_fields,
     _engineering_decision,
     _gate_record,
     _legacy_engineering_evidence,
@@ -493,17 +492,15 @@ def _finalize_existing(args: argparse.Namespace) -> dict[str, Any]:
         "github_hosted_ci": "UNVERIFIED",
         "external_boundaries": "REUSED_PREVIOUS_RUN",
     }
-    report["search_quality_status"] = SEARCH_QUALITY_PENDING
-    report["rerank_quality_notice"] = RERANK_PROVISIONAL_NOTICE
     diagnostic = previous_report.get(
         "reranker_diagnostic",
         previous_report.get("reranker_blocker"),
     )
     if isinstance(diagnostic, dict):
-        report["reranker_diagnostic"] = {
-            **_reused_validation(diagnostic, force_unattributed=not provenance_trusted),
-            "quality_status": SEARCH_QUALITY_PENDING,
-        }
+        report["reranker_diagnostic"] = _reused_validation(
+            _drop_legacy_quality_fields(diagnostic),
+            force_unattributed=not provenance_trusted,
+        )
     report["commands"] = list(command_results.values())
     report["decision"] = _engineering_decision(engineering_gates)
 
@@ -735,13 +732,12 @@ async def _resume_existing(args: argparse.Namespace) -> dict[str, Any]:
         "github_hosted_ci": "UNVERIFIED",
         "external_boundaries": "REUSED_PREVIOUS_RUN",
     }
-    report["search_quality_status"] = SEARCH_QUALITY_PENDING
-    report["rerank_quality_notice"] = RERANK_PROVISIONAL_NOTICE
     diagnostic = blocker_trace or previous_report.get(
         "reranker_diagnostic",
         previous_report.get("reranker_blocker"),
     )
     if isinstance(diagnostic, dict):
+        diagnostic = _drop_legacy_quality_fields(diagnostic)
         diagnostic_record = (
             _annotate_validation(
                 diagnostic,
@@ -755,10 +751,7 @@ async def _resume_existing(args: argparse.Namespace) -> dict[str, Any]:
                 force_unattributed=not provenance_trusted,
             )
         )
-        report["reranker_diagnostic"] = {
-            **diagnostic_record,
-            "quality_status": SEARCH_QUALITY_PENDING,
-        }
+        report["reranker_diagnostic"] = diagnostic_record
     report["decision"] = _engineering_decision(engineering_gates)
     _write_json(acceptance_path, clean_room)
     _write_json(work / "search" / "review" / "queries.json", updated_reviews)
@@ -777,7 +770,6 @@ def _markdown(report: dict[str, Any]) -> str:
         "# PaperOS Production Readiness",
         "",
         f"Release engineering decision: **{report['decision']}**",
-        f"Search quality: **{report.get('search_quality_status', 'UNAVAILABLE')}**",
         "",
         f"HEAD: `{report['head']}`",
         f"Dirty at start: `{report.get('dirty_at_start', True)}`",
@@ -829,7 +821,6 @@ def _markdown(report: dict[str, Any]) -> str:
             "",
             "## Known limitations",
             "",
-            f"- {report.get('rerank_quality_notice', RERANK_PROVISIONAL_NOTICE)}",
             f"- GitHub-hosted CI: {report.get('ci', {}).get('github_hosted_ci', 'UNVERIFIED')}",
             (
                 "- Cognee may emit its own informational/deprecation logs; PaperOS "
@@ -1005,8 +996,6 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "external_boundaries": "executed locally with the release commands below",
         },
         "engineering_gates": engineering_gates,
-        "search_quality_status": SEARCH_QUALITY_PENDING,
-        "rerank_quality_notice": RERANK_PROVISIONAL_NOTICE,
         "clean_room": clean_room,
         "runtime_audit": runtime_audit,
         "commands": commands,

@@ -13,5 +13,10 @@
   killing are timeout/error fallbacks only.
 - Startup readiness is verified internally through `GET /health` before the
   PaperOS API begins accepting requests.
-- A bound port is an actionable startup error; PaperOS never attaches to or
-  terminates a local inference process it did not start.
+- A healthy runtime left across a PaperOS restart may be reused only when the
+  `runtime_identity` reported by `GET /health` exactly matches the identity
+  expected from the current protocol, model configuration, lightweight model
+  file metadata, and CUDA visibility.
+- An occupied endpoint with an absent or mismatched identity is an actionable
+  compatibility error. PaperOS does not shut down or terminate a process it did
+  not start.

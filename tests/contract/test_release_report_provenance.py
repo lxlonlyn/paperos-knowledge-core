@@ -11,7 +11,6 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from tests.validation.release_provenance import (
     ENGINEERING_GATE_NAMES,
-    SEARCH_QUALITY_PENDING,
     VALIDATION_HEAD_ATTRIBUTED,
     VALIDATION_HEAD_LEGACY_UNATTRIBUTED,
     VALIDATION_HEAD_MIXED,
@@ -40,12 +39,19 @@ def _legacy_field_contract() -> dict[str, object]:
             "head": "1" * 40,
             "gates": {"reranker_blocker": True},
             "reranker_blocker": {"status": "PASS"},
+            "search_quality_status": "legacy",
+            "rerank_quality_notice": "legacy",
         }
     )
     _require("gates" not in normalized, "Legacy blocking gates remain public")
     _require(
         "reranker_blocker" not in normalized,
         "Provisional reranker quality remains a blocking gate",
+    )
+    _require(
+        "search_quality_status" not in normalized
+        and "rerank_quality_notice" not in normalized,
+        "Legacy provisional quality fields remain in the release report",
     )
     return normalized
 
@@ -203,11 +209,11 @@ def _gate_provenance_contract() -> dict[str, dict[str, object]]:
     )
     _require(
         _engineering_decision(gates) == "GO",
-        "Pending semantic quality incorrectly blocks engineering release",
+        "Complete engineering evidence did not produce GO",
     )
     _require(
-        SEARCH_QUALITY_PENDING not in gates,
-        "Search quality was accidentally made an engineering gate",
+        all("quality" not in name for name in gates),
+        "Rerank quality was accidentally made an engineering gate",
     )
     for name, gate in gates.items():
         _require(
@@ -252,7 +258,6 @@ def main() -> None:
         "mixed_composite": _composite_provenance_contract(),
         "gates": _gate_provenance_contract(),
         "ci": _ci_contract(),
-        "search_quality_status": SEARCH_QUALITY_PENDING,
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
