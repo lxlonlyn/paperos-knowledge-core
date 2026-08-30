@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -266,6 +267,48 @@ def storage_baseline_contract(root: Path) -> dict[str, object]:
         path.write_text(content, encoding="utf-8")
         _require_configuration_error(path, "storage names must be safe relative names")
 
+    backfill_config = root / "backfill-storage.toml"
+    backfill_config.write_text(
+        "[data]\n"
+        'directory = "backfill-data"\n'
+        "\n"
+        "[storage]\n"
+        'registry_filename = "custom-registry.sqlite3"\n'
+        'lexical_filename = "custom-lexical.sqlite3"\n',
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.backfill_scholarly_works",
+            "--config",
+            str(backfill_config),
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    _require(completed.returncode == 0, f"Scholarly backfill failed: {completed.stderr}")
+    backfill_data = root / "backfill-data"
+    _require(
+        (backfill_data / "jobs" / "custom-registry.sqlite3").is_file(),
+        "Scholarly backfill ignored the configured registry filename",
+    )
+    _require(
+        not (backfill_data / "jobs" / "registry.sqlite3").exists(),
+        "Scholarly backfill created the default registry",
+    )
+    _require(
+        (backfill_data / "indexes" / "custom-lexical.sqlite3").is_file(),
+        "Scholarly backfill ignored the configured lexical filename",
+    )
+    _require(
+        not (backfill_data / "indexes" / "lexical.sqlite3").exists(),
+        "Scholarly backfill created the default lexical database",
+    )
+
     return {
         "status": "passed",
         "registry_schema_version": REGISTRY_SCHEMA_VERSION,
@@ -277,6 +320,7 @@ def storage_baseline_contract(root: Path) -> dict[str, object]:
         "custom_lexical": custom_paths.lexical_db.name,
         "custom_cognee": "paperos_cognee",
         "unsafe_names_rejected": sorted(unsafe_configs),
+        "backfill_registry": "custom-registry.sqlite3",
     }
 
 
