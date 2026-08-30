@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import replace
+from pathlib import Path
 
 from paperos_core.ingestion.chunk_dp import partition_units
 from paperos_core.ingestion.sentence_units import SentenceUnit
 from tests.validation.chunk import (
     boundaries__synthetic_multi_part_table_contract,
 )
-
-import sys
-from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
