@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -44,6 +44,30 @@ class DataSettings(StrictSettings):
         if not selected:
             raise ValueError("data.dataset must not be blank")
         return selected
+
+
+def _safe_storage_name(value: str) -> str:
+    selected = value.strip()
+    if (
+        not selected
+        or ".." in selected
+        or "/" in selected
+        or "\\" in selected
+        or Path(selected).is_absolute()
+        or PureWindowsPath(selected).is_absolute()
+    ):
+        raise ValueError("storage names must be safe relative names without path separators or '..'")
+    return selected
+
+
+class StorageSettings(StrictSettings):
+    registry_filename: str = "registry.sqlite3"
+    lexical_filename: str = "lexical.sqlite3"
+
+    @field_validator("registry_filename", "lexical_filename")
+    @classmethod
+    def filenames_must_be_safe(cls, value: str) -> str:
+        return _safe_storage_name(value)
 
 
 class APISettings(StrictSettings):
@@ -107,6 +131,7 @@ class CogneeEmbeddingSettings(StrictSettings):
 
 class CogneeStorageSettings(StrictSettings):
     relational_provider: str = "sqlite"
+    database_name: str = "cognee_db"
     vector_provider: str = "lancedb"
     graph_provider: str = "kuzu"
     vector_subprocess_enabled: bool = True
@@ -119,6 +144,11 @@ class CogneeStorageSettings(StrictSettings):
         if not selected:
             raise ValueError("Cognee storage providers must not be blank")
         return selected
+
+    @field_validator("database_name")
+    @classmethod
+    def database_name_must_be_safe(cls, value: str) -> str:
+        return _safe_storage_name(value)
 
 
 class CogneeSettings(StrictSettings):
@@ -165,6 +195,7 @@ class RetrievalSettings(StrictSettings):
 
 class RuntimeSettings(StrictSettings):
     data: DataSettings = Field(default_factory=DataSettings)
+    storage: StorageSettings = Field(default_factory=StorageSettings)
     cognee: CogneeSettings = Field(default_factory=CogneeSettings)
     mineru: MinerUSettings = Field(default_factory=MinerUSettings)
     local_inference: LocalInferenceSettings = Field(default_factory=LocalInferenceSettings)

@@ -21,7 +21,11 @@ from paperos_core.storage import StorageInitializer
 
 def main() -> None:
     settings = load_settings()
-    paths = build_data_paths(settings.data_dir)
+    paths = build_data_paths(
+        settings.data_dir,
+        registry_filename=settings.storage.registry_filename,
+        lexical_filename=settings.storage.lexical_filename,
+    )
     CogneeConfigurator().apply(settings, paths)
     storage = StorageInitializer(paths)
     storage.initialize()

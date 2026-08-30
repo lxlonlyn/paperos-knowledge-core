@@ -22,7 +22,7 @@ class IndexManager:
     ) -> None:
         self.paths = paths
         self.path_codec = DataPathCodec(paths.root)
-        self.lexical = LexicalStore(paths.indexes / "lexical.sqlite3")
+        self.lexical = LexicalStore(paths.lexical_db)
 
     async def index_bundle(
         self,

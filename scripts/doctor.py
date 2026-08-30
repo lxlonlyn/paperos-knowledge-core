@@ -30,7 +30,11 @@ class _RuntimeNotRequired(Exception):
 
 async def diagnose() -> dict[str, object]:
     settings = load_settings()
-    paths = build_data_paths(settings.data_dir)
+    paths = build_data_paths(
+        settings.data_dir,
+        registry_filename=settings.storage.registry_filename,
+        lexical_filename=settings.storage.lexical_filename,
+    )
     CogneeConfigurator().apply(settings, paths)
     cognee_reader = CogneeRuntimeConfigReader()
     cognee = cognee_reader.read()
@@ -109,6 +113,7 @@ async def diagnose() -> dict[str, object]:
     checks["cognee"] = {
         "db_provider": cognee.db_provider,
         "db_path": cognee.db_path,
+        "db_name": cognee.db_name,
         "vector_provider": cognee.vector_db_provider,
         "vector_url": cognee.vector_db_url,
         "graph_provider": cognee.graph_database_provider,

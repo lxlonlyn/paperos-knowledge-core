@@ -2,6 +2,12 @@
 directory = "../data"
 dataset = "papers"
 
+[storage]
+# These names identify independent stores. Changing one after first use selects
+# a new store; PaperOS does not discover, migrate, copy, merge, or delete the old one.
+registry_filename = "registry.sqlite3"
+lexical_filename = "lexical.sqlite3"
+
 [mineru]
 provider = "cloud"
 endpoint = ""
@@ -31,6 +37,7 @@ batch_size = 5
 
 [cognee.storage]
 relational_provider = "sqlite"
+database_name = "cognee_db"
 vector_provider = "lancedb"
 graph_provider = "kuzu"
 vector_subprocess_enabled = true

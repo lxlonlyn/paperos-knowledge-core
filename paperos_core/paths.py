@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from pathlib import Path
 
 from paperos_core.errors import ConfigurationError
@@ -22,13 +22,31 @@ class DataPaths:
     exports: Path
     logs: Path
     tmp: Path
+    registry_filename: str = "registry.sqlite3"
+    lexical_filename: str = "lexical.sqlite3"
 
     @property
     def registry_db(self) -> Path:
-        return self.jobs / "registry.sqlite3"
+        return self.jobs / self.registry_filename
+
+    @property
+    def lexical_db(self) -> Path:
+        return self.indexes / self.lexical_filename
 
     def runtime_directories(self) -> tuple[Path, ...]:
-        return tuple(getattr(self, field.name) for field in fields(self) if field.name != "root")
+        return (
+            self.raw,
+            self.parsed,
+            self.canonical,
+            self.cognee,
+            self.indexes,
+            self.models,
+            self.jobs,
+            self.cache,
+            self.exports,
+            self.logs,
+            self.tmp,
+        )
 
     def initialize(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -48,7 +66,12 @@ class DataPaths:
             ) from exc
 
 
-def build_data_paths(root: Path) -> DataPaths:
+def build_data_paths(
+    root: Path,
+    *,
+    registry_filename: str = "registry.sqlite3",
+    lexical_filename: str = "lexical.sqlite3",
+) -> DataPaths:
     resolved = root.expanduser().resolve(strict=False)
     paths = DataPaths(
         root=resolved,
@@ -63,9 +86,20 @@ def build_data_paths(root: Path) -> DataPaths:
         exports=resolved / "exports",
         logs=resolved / "logs",
         tmp=resolved / "tmp",
+        registry_filename=registry_filename,
+        lexical_filename=lexical_filename,
     )
     for child in paths.runtime_directories():
         paths.assert_within_root(child)
+    for database, directory in (
+        (paths.registry_db, paths.jobs),
+        (paths.lexical_db, paths.indexes),
+    ):
+        if database.parent != directory:
+            raise ConfigurationError(
+                "Configured database filename must stay within its storage directory.",
+                affected=database,
+            )
     return paths
 
 

@@ -130,6 +130,15 @@ doctor, local-runtime activation, and provider/model metadata.
 `StorageInitializer` is the sole owner of PaperOS SQLite and FTS schema
 creation. Application startup and `scripts/setup_runtime.py` use the same
 initializer. Repository constructors only retain paths or connections.
+The registry and lexical databases use SQLite `PRAGMA user_version = 1`.
+Existing PaperOS tables without that version and versions newer than this
+release fail closed; there is no pre-1.0 migration.
+
+`storage.registry_filename`, `storage.lexical_filename`, and
+`cognee.storage.database_name` are store identities, restricted to safe names
+under their assigned data directories. Changing an identity after first use
+selects the newly named store; PaperOS does not locate, migrate, copy, rename,
+merge, or delete the previous store.
 
 All runtime data stays under `data.directory`:
 

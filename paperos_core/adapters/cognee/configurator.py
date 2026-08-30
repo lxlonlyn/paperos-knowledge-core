@@ -86,7 +86,7 @@ class CogneeConfigurator:
             {
                 "db_provider": storage.relational_provider,
                 "db_path": str(relational_root),
-                "db_name": "cognee_db",
+                "db_name": storage.database_name,
             }
         )
         cognee.config.set_vector_db_config(

@@ -121,7 +121,11 @@ class Application:
 def create_application(settings: RuntimeSettings) -> Application:
     """Assemble the object graph without starting a process or background task."""
 
-    paths = build_data_paths(settings.data_dir)
+    paths = build_data_paths(
+        settings.data_dir,
+        registry_filename=settings.storage.registry_filename,
+        lexical_filename=settings.storage.lexical_filename,
+    )
     from paperos_core.adapters.cognee.configurator import CogneeConfigurator
 
     CogneeConfigurator().apply(settings, paths)

@@ -265,6 +265,7 @@ class CogneeCompatibilityAdapter:
             "embedding_max_tokens": embedding.embedding_max_completion_tokens,
             "db_provider": relational.db_provider,
             "db_path": relational.db_path,
+            "db_name": relational.db_name,
             "vector_db_provider": vector.vector_db_provider,
             "vector_db_url": vector.vector_db_url,
             "graph_database_provider": graph.graph_database_provider,

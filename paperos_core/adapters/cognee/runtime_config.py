@@ -18,6 +18,7 @@ class CogneeRuntimeConfig:
     embedding_max_tokens: int
     db_provider: str
     db_path: str
+    db_name: str
     vector_db_provider: str
     vector_db_url: str
     graph_database_provider: str
@@ -53,6 +54,7 @@ class CogneeRuntimeConfigReader:
             embedding_max_tokens=int(values["embedding_max_tokens"] or 0),
             db_provider=str(values["db_provider"] or ""),
             db_path=str(values["db_path"] or ""),
+            db_name=str(values["db_name"] or ""),
             vector_db_provider=str(values["vector_db_provider"] or ""),
             vector_db_url=str(values["vector_db_url"] or ""),
             graph_database_provider=str(values["graph_database_provider"] or ""),

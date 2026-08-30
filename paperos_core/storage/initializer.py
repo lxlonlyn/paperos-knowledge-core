@@ -9,6 +9,9 @@ from pathlib import Path
 from paperos_core.errors import ConfigurationError
 from paperos_core.paths import DataPaths
 
+REGISTRY_SCHEMA_VERSION = 1
+LEXICAL_SCHEMA_VERSION = 1
+
 REGISTRY_TABLES = frozenset(
     {
         "source_files",
@@ -29,6 +32,7 @@ REGISTRY_TABLES = frozenset(
         "work_redirects",
     }
 )
+LEXICAL_TABLES = frozenset({"lexical_records", "lexical_fts"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,14 +47,21 @@ class StorageStatus:
 class StorageInitializer:
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
-        self.lexical_database = paths.indexes / "lexical.sqlite3"
+        self.lexical_database = paths.lexical_db
 
     def initialize(self) -> None:
         self.paths.initialize()
         try:
             with sqlite3.connect(self.paths.registry_db, timeout=30) as connection:
                 connection.execute("PRAGMA foreign_keys = ON")
-                connection.executescript(_REGISTRY_SCHEMA)
+                self._initialize_database(
+                    connection,
+                    database=self.paths.registry_db,
+                    label="registry",
+                    known_tables=REGISTRY_TABLES,
+                    schema=_REGISTRY_SCHEMA,
+                    supported_version=REGISTRY_SCHEMA_VERSION,
+                )
             self.initialize_lexical()
         except sqlite3.Error as exc:
             raise ConfigurationError(
@@ -62,12 +73,52 @@ class StorageInitializer:
         self.lexical_database.parent.mkdir(parents=True, exist_ok=True)
         try:
             with sqlite3.connect(self.lexical_database, timeout=30) as connection:
-                connection.executescript(_LEXICAL_SCHEMA)
+                self._initialize_database(
+                    connection,
+                    database=self.lexical_database,
+                    label="lexical",
+                    known_tables=LEXICAL_TABLES,
+                    schema=_LEXICAL_SCHEMA,
+                    supported_version=LEXICAL_SCHEMA_VERSION,
+                )
         except sqlite3.Error as exc:
             raise ConfigurationError(
                 f"Unable to initialize PaperOS FTS schema: {exc}",
                 affected=self.lexical_database,
             ) from exc
+
+    @staticmethod
+    def _initialize_database(
+        connection: sqlite3.Connection,
+        *,
+        database: Path,
+        label: str,
+        known_tables: frozenset[str],
+        schema: str,
+        supported_version: int,
+    ) -> None:
+        current_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        present_tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if current_version == 0 and known_tables.intersection(present_tables):
+            raise ConfigurationError(
+                f"PaperOS {label} database contains pre-1.0 tables without a schema version; "
+                "reinitialize the development database instead of migrating it.",
+                affected=database,
+            )
+        if current_version not in {0, supported_version}:
+            raise ConfigurationError(
+                f"PaperOS {label} schema version {current_version} is unsupported; "
+                f"this release supports version {supported_version}.",
+                affected=database,
+            )
+        connection.executescript(
+            f"BEGIN;\n{schema}\nPRAGMA user_version = {supported_version};\nCOMMIT;"
+        )
 
     def validate(self) -> StorageStatus:
         missing = set(REGISTRY_TABLES)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -18,6 +19,8 @@ from typing import Any
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from paperos_core.adapters.cognee.configurator import CogneeConfigurator
+from paperos_core.adapters.cognee.runtime_config import CogneeRuntimeConfigReader
 from paperos_core.application import Application
 from paperos_core.config import RuntimeSettings, load_settings
 from paperos_core.errors import ConfigurationError, PaperOSError
@@ -37,7 +40,11 @@ from paperos_core.retrieval.service import (
     effective_candidate_pool_size,
 )
 from paperos_core.runtime.local_inference.runtime import LocalRuntimeUsage
-from paperos_core.storage.initializer import StorageInitializer
+from paperos_core.storage.initializer import (
+    LEXICAL_SCHEMA_VERSION,
+    REGISTRY_SCHEMA_VERSION,
+    StorageInitializer,
+)
 
 
 def _require(condition: object, message: str) -> None:
@@ -148,6 +155,128 @@ def configuration_contract(root: Path) -> dict[str, object]:
         "invalid_claim_without_semantic": True,
         "semantic_enrichment_default": False,
         "example_consistent": True,
+    }
+
+
+def _database_user_version(path: Path) -> int:
+    with sqlite3.connect(path) as connection:
+        return int(connection.execute("PRAGMA user_version").fetchone()[0])
+
+
+def _require_storage_failure(initializer: StorageInitializer, label: str) -> None:
+    try:
+        initializer.initialize()
+    except ConfigurationError:
+        return
+    raise RuntimeError(f"{label} database unexpectedly initialized")
+
+
+def storage_baseline_contract(root: Path) -> dict[str, object]:
+    fresh_paths = build_data_paths(root / "storage-fresh")
+    fresh = StorageInitializer(fresh_paths)
+    fresh.initialize()
+    _require(
+        _database_user_version(fresh_paths.registry_db) == REGISTRY_SCHEMA_VERSION,
+        "Fresh registry schema version is not 1",
+    )
+    _require(
+        _database_user_version(fresh_paths.lexical_db) == LEXICAL_SCHEMA_VERSION,
+        "Fresh lexical schema version is not 1",
+    )
+    fresh.initialize()
+    _require(fresh.validate().valid, "Version 1 databases did not reopen")
+
+    legacy_registry_paths = build_data_paths(root / "storage-legacy-registry")
+    legacy_registry_paths.initialize()
+    with sqlite3.connect(legacy_registry_paths.registry_db) as connection:
+        connection.execute("CREATE TABLE source_files (id TEXT PRIMARY KEY)")
+    _require_storage_failure(
+        StorageInitializer(legacy_registry_paths),
+        "Pre-1.0 registry",
+    )
+
+    legacy_lexical_paths = build_data_paths(root / "storage-legacy-lexical")
+    legacy_lexical_paths.initialize()
+    with sqlite3.connect(legacy_lexical_paths.lexical_db) as connection:
+        connection.execute("CREATE TABLE lexical_records (object_id TEXT PRIMARY KEY)")
+    _require_storage_failure(
+        StorageInitializer(legacy_lexical_paths),
+        "Pre-1.0 lexical",
+    )
+
+    future_registry_paths = build_data_paths(root / "storage-future-registry")
+    future_registry_paths.initialize()
+    with sqlite3.connect(future_registry_paths.registry_db) as connection:
+        connection.execute(f"PRAGMA user_version = {REGISTRY_SCHEMA_VERSION + 1}")
+    _require_storage_failure(
+        StorageInitializer(future_registry_paths),
+        "Future registry",
+    )
+
+    future_lexical_paths = build_data_paths(root / "storage-future-lexical")
+    future_lexical = StorageInitializer(future_lexical_paths)
+    future_lexical.initialize()
+    with sqlite3.connect(future_lexical_paths.lexical_db) as connection:
+        connection.execute(f"PRAGMA user_version = {LEXICAL_SCHEMA_VERSION + 1}")
+    _require_storage_failure(future_lexical, "Future lexical")
+
+    custom_config = root / "custom-storage.toml"
+    custom_config.write_text(
+        "[data]\n"
+        'directory = "custom-storage-data"\n'
+        "\n"
+        "[storage]\n"
+        'registry_filename = "paperos-registry.db"\n'
+        'lexical_filename = "paperos-search.db"\n'
+        "\n"
+        "[cognee.storage]\n"
+        'database_name = "paperos_cognee"\n',
+        encoding="utf-8",
+    )
+    custom = load_settings(custom_config)
+    custom_paths = build_data_paths(
+        custom.data_dir,
+        registry_filename=custom.storage.registry_filename,
+        lexical_filename=custom.storage.lexical_filename,
+    )
+    StorageInitializer(custom_paths).initialize()
+    _require(custom_paths.registry_db.is_file(), "Custom registry filename was not used")
+    _require(custom_paths.lexical_db.is_file(), "Custom lexical filename was not used")
+    _require(
+        not (custom_paths.jobs / "registry.sqlite3").exists(),
+        "Default registry was created beside the configured database",
+    )
+    _require(
+        not (custom_paths.indexes / "lexical.sqlite3").exists(),
+        "Default lexical database was created beside the configured database",
+    )
+    CogneeConfigurator().apply(custom, custom_paths)
+    _require(
+        CogneeRuntimeConfigReader().read().db_name == "paperos_cognee",
+        "Custom Cognee database name was not applied",
+    )
+
+    unsafe_configs = {
+        "parent": '[storage]\nregistry_filename = "../registry.sqlite3"\n',
+        "absolute": '[storage]\nlexical_filename = "/tmp/lexical.sqlite3"\n',
+        "nested": '[cognee.storage]\ndatabase_name = "nested/name"\n',
+    }
+    for name, content in unsafe_configs.items():
+        path = root / f"unsafe-storage-{name}.toml"
+        path.write_text(content, encoding="utf-8")
+        _require_configuration_error(path, "storage names must be safe relative names")
+
+    return {
+        "status": "passed",
+        "registry_schema_version": REGISTRY_SCHEMA_VERSION,
+        "lexical_schema_version": LEXICAL_SCHEMA_VERSION,
+        "version_1_reopen": True,
+        "legacy_version_0_rejected": ["registry", "lexical"],
+        "unsupported_version_rejected": ["registry", "lexical"],
+        "custom_registry": custom_paths.registry_db.name,
+        "custom_lexical": custom_paths.lexical_db.name,
+        "custom_cognee": "paperos_cognee",
+        "unsafe_names_rejected": sorted(unsafe_configs),
     }
 
 
@@ -893,6 +1022,7 @@ async def run_contract() -> dict[str, Any]:
         root = Path(temporary)
         return {
             "configuration": configuration_contract(root),
+            "storage": storage_baseline_contract(root),
             "retrieval": await empty_retrieval_contract(root),
             "api_errors": api_error_contract(),
             "health": await health_contract(),
