@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -173,7 +174,7 @@ def configuration_contract(root: Path) -> dict[str, object]:
 
 
 def _database_user_version(path: Path) -> int:
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         return int(connection.execute("PRAGMA user_version").fetchone()[0])
 
 
@@ -200,9 +201,32 @@ def storage_baseline_contract(root: Path) -> dict[str, object]:
     fresh.initialize()
     _require(fresh.validate().valid, "Version 1 databases did not reopen")
 
+    source_registry = SourceRegistry(fresh_paths)
+    with source_registry._connect() as owned_connection:
+        owned_connection.execute("SELECT 1").fetchone()
+    try:
+        owned_connection.execute("SELECT 1")
+    except sqlite3.ProgrammingError:
+        pass
+    else:
+        raise RuntimeError("Repository-owned SQLite connection remained open")
+
+    scholarly_registry = ScholarlyRegistry(fresh_paths)
+    with closing(
+        sqlite3.connect(fresh_paths.registry_db)
+    ) as external_connection, external_connection:
+        external_connection.row_factory = sqlite3.Row
+        scholarly_registry.canonicalize_work_id(
+            "work_missing_connection_contract",
+            external_connection,
+        )
+        external_connection.execute("SELECT 1").fetchone()
+
     legacy_registry_paths = build_data_paths(root / "storage-legacy-registry")
     legacy_registry_paths.initialize()
-    with sqlite3.connect(legacy_registry_paths.registry_db) as connection:
+    with closing(
+        sqlite3.connect(legacy_registry_paths.registry_db)
+    ) as connection, connection:
         connection.execute("CREATE TABLE source_files (id TEXT PRIMARY KEY)")
     _require_storage_failure(
         StorageInitializer(legacy_registry_paths),
@@ -211,7 +235,9 @@ def storage_baseline_contract(root: Path) -> dict[str, object]:
 
     legacy_lexical_paths = build_data_paths(root / "storage-legacy-lexical")
     legacy_lexical_paths.initialize()
-    with sqlite3.connect(legacy_lexical_paths.lexical_db) as connection:
+    with closing(
+        sqlite3.connect(legacy_lexical_paths.lexical_db)
+    ) as connection, connection:
         connection.execute("CREATE TABLE lexical_records (object_id TEXT PRIMARY KEY)")
     _require_storage_failure(
         StorageInitializer(legacy_lexical_paths),
@@ -220,7 +246,9 @@ def storage_baseline_contract(root: Path) -> dict[str, object]:
 
     future_registry_paths = build_data_paths(root / "storage-future-registry")
     future_registry_paths.initialize()
-    with sqlite3.connect(future_registry_paths.registry_db) as connection:
+    with closing(
+        sqlite3.connect(future_registry_paths.registry_db)
+    ) as connection, connection:
         connection.execute(f"PRAGMA user_version = {REGISTRY_SCHEMA_VERSION + 1}")
     _require_storage_failure(
         StorageInitializer(future_registry_paths),
@@ -230,7 +258,9 @@ def storage_baseline_contract(root: Path) -> dict[str, object]:
     future_lexical_paths = build_data_paths(root / "storage-future-lexical")
     future_lexical = StorageInitializer(future_lexical_paths)
     future_lexical.initialize()
-    with sqlite3.connect(future_lexical_paths.lexical_db) as connection:
+    with closing(
+        sqlite3.connect(future_lexical_paths.lexical_db)
+    ) as connection, connection:
         connection.execute(f"PRAGMA user_version = {LEXICAL_SCHEMA_VERSION + 1}")
     _require_storage_failure(future_lexical, "Future lexical")
 
@@ -327,6 +357,8 @@ def storage_baseline_contract(root: Path) -> dict[str, object]:
         "registry_schema_version": REGISTRY_SCHEMA_VERSION,
         "lexical_schema_version": LEXICAL_SCHEMA_VERSION,
         "version_1_reopen": True,
+        "owned_connection_closed": True,
+        "external_connection_retained": True,
         "legacy_version_0_rejected": ["registry", "lexical"],
         "unsupported_version_rejected": ["registry", "lexical"],
         "custom_registry": custom_paths.registry_db.name,
@@ -1044,7 +1076,7 @@ async def replay_correctness_contract(root: Path) -> dict[str, object]:
             replacement_text="Corrected replay-safe text",
         )
     )
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         connection.execute(
             """
             CREATE TRIGGER fail_replay_improvement
@@ -1061,7 +1093,7 @@ async def replay_correctness_contract(root: Path) -> dict[str, object]:
     else:
         raise RuntimeError("Injected Improvement write failure was swallowed")
 
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         partial_counts = (
             int(connection.execute("SELECT COUNT(*) FROM corrections").fetchone()[0]),
             int(connection.execute("SELECT COUNT(*) FROM improvements").fetchone()[0]),
@@ -1087,7 +1119,7 @@ async def replay_correctness_contract(root: Path) -> dict[str, object]:
         and repeated.improvements == [],
         "Complete Improvement replay was not safely skipped",
     )
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         final_counts = (
             int(connection.execute("SELECT COUNT(*) FROM corrections").fetchone()[0]),
             int(connection.execute("SELECT COUNT(*) FROM improvements").fetchone()[0]),

@@ -11,6 +11,7 @@ import asyncio
 import sqlite3
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -59,7 +60,7 @@ def _repository_fixture(root: Path, text: str, case_name: str) -> tuple[
     parse_id = f"parse_{case_name}"
     created_at = utc_now().isoformat()
     codec = DataPathCodec(paths.root)
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
             """

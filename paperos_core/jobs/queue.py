@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -35,10 +37,15 @@ class JobQueue:
         self.paths = paths
         self.path_codec = DataPathCodec(paths.root)
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.paths.registry_db, timeout=30)
-        connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def public_dict(self, job: OperationalJob) -> dict[str, Any]:
         payload = job.model_dump(mode="json")
@@ -99,7 +106,8 @@ class JobQueue:
                 "WHERE status='running'",
                 (utc_now().isoformat(), "worker_interrupted"),
             )
-        return cursor.rowcount
+            updated_count = cursor.rowcount
+        return updated_count
 
     def complete(self, job_id: str, result: dict[str, Any]) -> OperationalJob:
         return self._finish(job_id, "completed", result=result)

@@ -8,7 +8,8 @@ import os
 import shutil
 import sqlite3
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from itertools import pairwise
 from pathlib import Path
 from typing import Any, TypeVar
@@ -147,11 +148,16 @@ class CanonicalRepository:
                 Path(temporary_name).unlink(missing_ok=True)
         return path
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.paths.registry_db, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def snapshot_manifest_path(
         self,

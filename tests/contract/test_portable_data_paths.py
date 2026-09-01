@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, cast
 from urllib.parse import urlsplit
@@ -138,7 +139,7 @@ def sqlite_contract(data_root: Path) -> dict[str, object]:
     paths = build_data_paths(data_root)
     codec = DataPathCodec(paths.root)
     checked = 0
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         connection.row_factory = sqlite3.Row
         for table, column in PATH_COLUMNS:
             rows = connection.execute(f"SELECT {column} FROM {table}").fetchall()

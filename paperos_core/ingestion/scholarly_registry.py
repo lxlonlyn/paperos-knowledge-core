@@ -9,6 +9,8 @@ import re
 import sqlite3
 import tempfile
 import unicodedata
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -77,11 +79,16 @@ class ScholarlyRegistry:
         self.paths = paths
         self.database_path = database_path or paths.registry_db
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.database_path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def candidate_database_path(self, snapshot_id: str) -> Path:
         path = (
@@ -110,7 +117,9 @@ class ScholarlyRegistry:
                 source.execute("BEGIN")
                 active_pointers = self._active_pointers(source)
                 base_digest = self._state_digest(source)
-                with sqlite3.connect(database_path, timeout=30) as candidate:
+                with closing(
+                    sqlite3.connect(database_path, timeout=30)
+                ) as candidate, candidate:
                     source.backup(candidate)
             _write_json(
                 manifest_path,
@@ -644,25 +653,28 @@ class ScholarlyRegistry:
     def canonicalize_work_id(
         self, work_id: str, connection: sqlite3.Connection | None = None
     ) -> str:
-        owns_connection = connection is None
-        db = connection or self._connect()
-        try:
-            current = work_id
-            seen: set[str] = set()
-            while current not in seen:
-                seen.add(current)
-                row = db.execute(
-                    "SELECT survivor_work_id FROM work_redirects "
-                    "WHERE loser_work_id = ?",
-                    (current,),
-                ).fetchone()
-                if row is None:
-                    return current
-                current = str(row["survivor_work_id"])
-            raise RuntimeError(f"Work redirect cycle detected at {current}")
-        finally:
-            if owns_connection:
-                db.close()
+        if connection is not None:
+            return self._canonicalize_work_id(work_id, connection)
+        with self._connect() as owned_connection:
+            return self._canonicalize_work_id(work_id, owned_connection)
+
+    @staticmethod
+    def _canonicalize_work_id(
+        work_id: str, connection: sqlite3.Connection
+    ) -> str:
+        current = work_id
+        seen: set[str] = set()
+        while current not in seen:
+            seen.add(current)
+            row = connection.execute(
+                "SELECT survivor_work_id FROM work_redirects "
+                "WHERE loser_work_id = ?",
+                (current,),
+            ).fetchone()
+            if row is None:
+                return current
+            current = str(row["survivor_work_id"])
+        raise RuntimeError(f"Work redirect cycle detected at {current}")
 
     def get_work(self, work_id: str) -> ScholarlyWork:
         with self._connect() as connection:

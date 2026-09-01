@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 
 from paperos_core.domain.ids import stable_id
@@ -30,10 +32,15 @@ class FeedbackService:
         self.paths = paths
         self.canonical_repository = canonical_repository
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.paths.registry_db, timeout=30)
-        connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def record(self, request: FeedbackRequest) -> FeedbackRecord:
         validate_feedback(request, self.canonical_repository)

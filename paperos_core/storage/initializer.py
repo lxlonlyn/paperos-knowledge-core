@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,7 +53,9 @@ class StorageInitializer:
     def initialize(self) -> None:
         self.paths.initialize()
         try:
-            with sqlite3.connect(self.paths.registry_db, timeout=30) as connection:
+            with closing(
+                sqlite3.connect(self.paths.registry_db, timeout=30)
+            ) as connection, connection:
                 connection.execute("PRAGMA foreign_keys = ON")
                 self._initialize_database(
                     connection,
@@ -72,7 +75,9 @@ class StorageInitializer:
     def initialize_lexical(self) -> None:
         self.lexical_database.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with sqlite3.connect(self.lexical_database, timeout=30) as connection:
+            with closing(
+                sqlite3.connect(self.lexical_database, timeout=30)
+            ) as connection, connection:
                 self._initialize_database(
                     connection,
                     database=self.lexical_database,
@@ -124,7 +129,9 @@ class StorageInitializer:
         missing = set(REGISTRY_TABLES)
         fts5 = False
         if self.paths.registry_db.is_file():
-            with sqlite3.connect(self.paths.registry_db, timeout=30) as connection:
+            with closing(
+                sqlite3.connect(self.paths.registry_db, timeout=30)
+            ) as connection, connection:
                 present = {
                     str(row[0])
                     for row in connection.execute(
@@ -133,7 +140,9 @@ class StorageInitializer:
                 }
             missing -= present
         if self.lexical_database.is_file():
-            with sqlite3.connect(self.lexical_database, timeout=30) as connection:
+            with closing(
+                sqlite3.connect(self.lexical_database, timeout=30)
+            ) as connection, connection:
                 fts5 = bool(
                     connection.execute(
                         "SELECT sqlite_compileoption_used('ENABLE_FTS5')"

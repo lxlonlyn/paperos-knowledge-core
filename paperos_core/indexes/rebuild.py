@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
@@ -83,7 +84,7 @@ class DerivedDataRebuilder:
         all_snapshot_ids = self.canonical_repository.list_all_snapshot_ids()
         active_snapshot_ids = self.canonical_repository.list_active_snapshot_ids()
         selected = self.select_snapshot_ids(snapshot_id)
-        with sqlite3.connect(self.paths.registry_db) as connection:
+        with closing(sqlite3.connect(self.paths.registry_db)) as connection, connection:
             exists = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_tombstones'"
             ).fetchone()

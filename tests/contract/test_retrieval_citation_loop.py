@@ -14,6 +14,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -149,7 +150,7 @@ def _insert_source_and_parse(paths: DataPaths, bundle: CanonicalBundle) -> None:
         / snapshot.parse_run_id
         / "manifest.json"
     )
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
             """
@@ -426,7 +427,7 @@ def _validate_index_inputs(
     expected = {
         chunk.id: effective_index_text(chunk) for chunk in projection.chunks
     }
-    with sqlite3.connect(manager.lexical.path) as connection:
+    with closing(sqlite3.connect(manager.lexical.path)) as connection, connection:
         lexical = {
             str(row[0]): str(row[1])
             for row in connection.execute(
@@ -480,7 +481,7 @@ def _insert_synthetic_source(
     codec = DataPathCodec(paths.root)
     snapshot = bundle.snapshot
     created_at = snapshot.created_at.isoformat()
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
             """
@@ -682,7 +683,7 @@ async def _index_bound_projection(
 
 
 def _lexical_texts(manager: IndexManager, snapshot_id: str) -> dict[str, str]:
-    with sqlite3.connect(manager.lexical.path) as connection:
+    with closing(sqlite3.connect(manager.lexical.path)) as connection, connection:
         return {
             str(row[0]): str(row[1])
             for row in connection.execute(
@@ -942,7 +943,7 @@ async def _cross_document_reconciliation_contract(root: Path) -> dict[str, objec
     )
 
     trigger_name = "fail_task3_multi_document_activation"
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         connection.execute(
             f"""
             CREATE TRIGGER {trigger_name}
@@ -975,7 +976,7 @@ async def _cross_document_reconciliation_contract(root: Path) -> dict[str, objec
         and repository.active_snapshot_id(bundle_b.document.id) is None,
         "Failed multi-document publication changed an active pointer",
     )
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         connection.execute(f"DROP TRIGGER {trigger_name}")
 
     previous = registry.publish_candidate_set(

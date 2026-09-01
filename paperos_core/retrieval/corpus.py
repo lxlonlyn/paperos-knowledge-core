@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -39,7 +40,7 @@ class CorpusView:
     ) -> CorpusView:
         retained_bundles = canonical_repository.list_active_bundles()
         bundles = {bundle.document.id: bundle for bundle in retained_bundles}
-        with sqlite3.connect(paths.registry_db) as connection:
+        with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
             exists = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_tombstones'"
             ).fetchone()

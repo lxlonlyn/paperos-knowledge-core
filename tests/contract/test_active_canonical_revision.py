@@ -13,6 +13,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -158,7 +159,7 @@ def _insert_source_and_parse_runs(paths: DataPaths, parse_ids: list[str]) -> Non
     codec = DataPathCodec(paths.root)
     created_at = utc_now().isoformat()
     source_path = paths.raw / _SOURCE_ID / "source.pdf"
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
             """
@@ -361,7 +362,7 @@ async def scholarly_isolation_contract(root: Path) -> dict[str, object]:
     )
     repository.save_snapshot(second)
     repository.save_chunks(second.snapshot.id, [second_chunk])
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         connection.execute(
             """
             CREATE TRIGGER fail_staged_scholarly_update
@@ -385,7 +386,7 @@ async def scholarly_isolation_contract(root: Path) -> dict[str, object]:
         not registry.candidate_database_path(second.snapshot.id).exists(),
         "Failed scholarly resolution retained staging state",
     )
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         connection.execute("DROP TRIGGER fail_staged_scholarly_update")
 
     candidate_context = registry.resolve_candidate_bundle(second, [second_chunk])
@@ -732,7 +733,7 @@ async def local_revision_contract(root: Path) -> dict[str, object]:
     parse_ids = ["parse_active_revision_1", "parse_active_revision_2"]
     _insert_source_and_parse_runs(paths, parse_ids)
 
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         columns = [
             str(row[1])
             for row in connection.execute(
@@ -778,7 +779,7 @@ async def local_revision_contract(root: Path) -> dict[str, object]:
         repository.active_snapshot_id(_DOCUMENT_ID) == first.snapshot.id,
         "Saving/indexing the second candidate changed active",
     )
-    with sqlite3.connect(indexes.lexical.path) as connection:
+    with closing(sqlite3.connect(indexes.lexical.path)) as connection, connection:
         same_object_rows = int(
             connection.execute(
                 "SELECT COUNT(*) FROM lexical_records WHERE object_id = ?",
@@ -804,7 +805,7 @@ async def local_revision_contract(root: Path) -> dict[str, object]:
         "Canonical-backed DataPoint storage identity is not snapshot-scoped",
     )
 
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         connection.execute(
             f"""
             CREATE TRIGGER block_second_activation
@@ -825,7 +826,7 @@ async def local_revision_contract(root: Path) -> dict[str, object]:
         repository.active_snapshot_id(_DOCUMENT_ID) == first.snapshot.id,
         "Activation transaction changed pointer on failure",
     )
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         connection.execute("DROP TRIGGER block_second_activation")
 
     rebuilder = DerivedDataRebuilder(
@@ -921,7 +922,7 @@ async def local_revision_contract(root: Path) -> dict[str, object]:
         repository.list_active_snapshot_ids() == [second.snapshot.id],
         "Document has more than one active pointer",
     )
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         pointer_count = int(
             connection.execute(
                 "SELECT COUNT(*) FROM active_canonical_snapshots WHERE document_id = ?",
@@ -994,7 +995,7 @@ async def local_revision_contract(root: Path) -> dict[str, object]:
         repository.active_snapshot_id(_DOCUMENT_ID) is None,
         "Delete left a public active pointer",
     )
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         raw_pointer_count = int(
             connection.execute(
                 "SELECT COUNT(*) FROM active_canonical_snapshots WHERE document_id = ?",
@@ -1182,7 +1183,7 @@ def _register_live_rebuild_source(
 ) -> None:
     codec = DataPathCodec(paths.root)
     created_at = utc_now().isoformat()
-    with sqlite3.connect(paths.registry_db) as connection:
+    with closing(sqlite3.connect(paths.registry_db)) as connection, connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
             """

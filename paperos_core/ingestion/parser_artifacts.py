@@ -8,6 +8,8 @@ import mimetypes
 import sqlite3
 import stat
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -42,11 +44,16 @@ class ParserArtifactRepository:
         self.paths = paths
         self.path_codec = DataPathCodec(paths.root)
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.paths.registry_db, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _json(value: Any) -> str | None:
@@ -173,7 +180,8 @@ class ParserArtifactRepository:
                     *(status.value for status in _RECOVERABLE_PARSE_RUN_STATUSES),
                 ),
             )
-        return cursor.rowcount
+            updated_count = cursor.rowcount
+        return updated_count
 
     def update_parse_run(
         self,
