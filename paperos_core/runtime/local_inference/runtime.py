@@ -109,6 +109,17 @@ class LocalInferenceRuntime:
             )
         return root
 
+    def _process_environment(self) -> dict[str, str]:
+        """Build the child environment without overriding ambient CUDA by default."""
+
+        environment = dict(os.environ)
+        configured = self.settings.local_inference.cuda_devices
+        if configured:
+            environment["CUDA_VISIBLE_DEVICES"] = ",".join(
+                str(device) for device in configured
+            )
+        return environment
+
     async def start(self) -> dict[str, Any]:
         if self.running and self._owned:
             return await self.client.health()
@@ -138,12 +149,9 @@ class LocalInferenceRuntime:
         process_path = self.paths.jobs / "local-inference-process.json"
         self._log_stream = log_path.open("ab", buffering=0)
         self._shutdown_token = secrets.token_urlsafe(32)
-        environment = dict(os.environ)
+        environment = self._process_environment()
         environment.update(
             {
-                "CUDA_VISIBLE_DEVICES": ",".join(
-                    str(device) for device in local.cuda_devices
-                ),
                 "NODE_LLAMA_CPP_SKIP_DOWNLOAD": "true",
                 "PAPEROS_LOCAL_INFERENCE_HOST": local.host,
                 "PAPEROS_LOCAL_INFERENCE_PORT": str(local.port),
@@ -296,8 +304,8 @@ class LocalInferenceRuntime:
                 },
                 "max_tokens": LOCAL_RERANKER_MAX_TOKENS,
             },
-            "cuda_visible_devices": ",".join(
-                str(device) for device in local.cuda_devices
+            "cuda_visible_devices": self._process_environment().get(
+                "CUDA_VISIBLE_DEVICES", ""
             ),
         }
 

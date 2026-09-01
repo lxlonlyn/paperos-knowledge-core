@@ -81,6 +81,10 @@ Ingest, reprocess, improve, and rebuild enqueue work and return HTTP 202 with a
 job ID. Agents should use [scripts/agent_client.py](scripts/agent_client.py)
 rather than importing repositories or database files.
 
+The API listens on `127.0.0.1` by default. PaperOS does not currently provide
+an authentication layer designed for public-network deployment; changing the
+bind host is an explicit operator decision.
+
 ## Data ownership
 
 All runtime state is beneath `data.directory`:
@@ -131,6 +135,11 @@ only the GGUF models actually used. A remote embedding plus local reranker
 therefore starts the child with only the reranker; fully remote retrieval skips
 Node and all GGUF checks. Application services receive only a `LocalInferenceClient`; only the
 Application lifecycle can start or stop the child process.
+
+An empty `local_inference.cuda_devices` preserves the process's existing
+`CUDA_VISIBLE_DEVICES` instead of selecting machine-specific GPU IDs. Operators
+can explicitly configure device visibility, for example `cuda_devices = [6, 7]`,
+when the host requires it.
 
 ## Operational scripts
 

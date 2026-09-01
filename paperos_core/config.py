@@ -172,7 +172,7 @@ class LocalInferenceSettings(StrictSettings):
     port: int = Field(default=8081, ge=1, le=65535)
     embedding_model_path: Path = Path("../data/models/embedding/embeddinggemma-300M-Q8_0.gguf")
     reranker_model_path: Path = Path("../data/models/reranker/qwen3-reranker-0.6b-q8_0.gguf")
-    cuda_devices: list[int] = Field(default_factory=lambda: [6, 7], min_length=1)
+    cuda_devices: list[int] = Field(default_factory=list)
     startup_timeout: int = Field(default=180, gt=0)
     request_timeout: int = Field(default=120, gt=0)
 
