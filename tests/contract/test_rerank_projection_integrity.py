@@ -1,8 +1,8 @@
 """Direct contracts for persisted rerank projections and reranker IDs.
 
-Run from the repository root without pytest:
+Run from the repository root with pytest:
 
-    python tests/contract/test_rerank_projection_integrity.py
+    python -m pytest tests/contract/test_rerank_projection_integrity.py
 """
 
 from __future__ import annotations
@@ -543,6 +543,10 @@ def main() -> None:
     _projection_contracts()
     asyncio.run(_reranker_response_contracts())
     print("PASS: rerank projection integrity and response ID contracts")
+
+
+def test_rerank_projection_integrity_contract() -> None:
+    main()
 
 
 if __name__ == "__main__":

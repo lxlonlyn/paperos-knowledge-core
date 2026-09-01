@@ -46,22 +46,16 @@ jobs:
       - name: Mypy
         run: mypy paperos_core
 
-      - name: Example config and portable import/path smoke
-        run: python tests/contract/test_portable_data_paths.py
-
-      - name: Direct contracts without external services
-        run: |
-          python tests/contract/test_runtime_query_contracts.py
-          python tests/contract/test_citation_resolution.py
-          python tests/contract/test_document_regions.py
-          python tests/contract/test_chunk_boundaries.py
-          python tests/contract/test_cognee_retrieval_boundary.py
+      - name: Fast contracts
+        run: python -m pytest tests/contract -m "not external and not gpu"
 
   external-boundaries:
     name: Linux external Cognee/GPU boundaries
     if: ${{ github.event_name == 'workflow_dispatch' && vars.PAPEROS_RUN_EXTERNAL_BOUNDARIES == 'true' }}
     needs: quality
     runs-on: [self-hosted, linux, x64, paperos-external]
+    env:
+      CUDA_VISIBLE_DEVICES: "6,7"
 
     steps:
       - uses: actions/checkout@v5
@@ -84,7 +78,5 @@ jobs:
           npm ci
           npm run build
 
-      - name: Real Cognee/vector contracts
-        run: |
-          python tests/contract/test_active_canonical_revision.py
-          python tests/contract/test_query_filter_contracts.py
+      - name: External and GPU contracts
+        run: python -m pytest tests/contract -m "external or gpu"

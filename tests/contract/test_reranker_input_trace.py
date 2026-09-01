@@ -152,5 +152,9 @@ def main() -> None:
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
+def test_reranker_input_trace_contract() -> None:
+    main()
+
+
 if __name__ == "__main__":
     main()

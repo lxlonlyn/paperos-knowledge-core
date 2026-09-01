@@ -141,10 +141,10 @@ Application lifecycle can start or stop the child process.
 - `tests/validation/retrieval.py`: real-PDF Chunk-first validation using live
   MinerU/Cognee/LLM providers, with JSON and Markdown review artifacts.
 - `tests/contract/test_portable_data_paths.py`: permanent portable-path and real
-  retained-data relocation contract, run directly without pytest.
+  retained-data relocation contract.
 - `tests/contract/test_cognee_retrieval_boundary.py`: permanent static/live
   Cognee search, dataset-scope, and provenance boundary contract.
-- `tests/contract/test_scholarly_identity.py`: fast retained-canonical contract
+- `tests/contract/test_scholarly_identity.py`: retained-canonical contract
   for repeated Work resolution, reconciliation, redirects, external provenance,
   and citation-backbone reprojection; it is not a PDF reprocess test.
 - `tests/validation/scholarly_work_reference.py`: resumable four-PDF
@@ -154,10 +154,19 @@ Application lifecycle can start or stop the child process.
   retained canonical snapshots without invoking MinerU, LLM, or Cognee rebuild.
 - `scripts/agent_client.py`: HTTP client example for agents and integrations.
 
-Release and acceptance entry points run directly with Python; they do not use
-pytest, fabricated papers, mock vector hits, or prerecorded downstream results.
-Acceptance exercises production behavior, while permanent contracts protect
-the corresponding boundaries.
+Permanent contracts use pytest. Fast contracts do not use fabricated papers,
+mock vector hits, or prerecorded downstream results; external acceptance
+exercises production behavior against the configured services and retained
+real-paper data.
+
+Run every fast contract with:
+
+```bash
+python -m pytest tests/contract -m "not external and not gpu"
+```
+
+Contracts marked `external` or `gpu` are run by the explicit validation
+workflow on a suitably provisioned host.
 
 Run the complete acceptance path with the authoritative validation corpus:
 
@@ -165,11 +174,11 @@ Run the complete acceptance path with the authoritative validation corpus:
 python tests/validation/retrieval.py --rebuild
 ```
 
-Cross-platform base gates use the same direct commands as
+Cross-platform base gates use the same commands as
 `.github/workflows/cross-platform.yml`: compileall, full-repository Ruff,
-`mypy paperos_core`, the example-config/portable-path smoke contract, and the
-contracts that do not require external services. Real Cognee/vector contracts
-run only in the explicit Linux external-boundary job.
+`mypy paperos_core`, and the complete fast pytest contract suite. Real
+Cognee/vector and GPU contracts run only in the explicit Linux
+external-boundary job.
 See [docs/architecture.md](docs/architecture.md),
 [docs/data_model.md](docs/data_model.md), and
 [docs/interfaces.md](docs/interfaces.md) for the binding internal contracts.

@@ -1,9 +1,8 @@
 """Direct contract for current-Snapshot selection and enrichment reuse.
 
-This project intentionally does not use pytest. Run:
+Run the contracts through pytest; the retained-data case is marked external:
 
-    python tests/contract/test_rebuild_enrichment_lifecycle.py \
-      --live-data-dir data/validation/scholarly_work_reference/output
+    python -m pytest tests/contract/test_rebuild_enrichment_lifecycle.py
 """
 
 from __future__ import annotations
@@ -16,6 +15,8 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
@@ -189,6 +190,24 @@ def main() -> None:
     if args.live_data_dir is not None:
         report["current_snapshots"] = current_snapshot_contract(args.live_data_dir)
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def test_rebuild_enrichment_lifecycle_contract() -> None:
+    asyncio.run(enrichment_reuse_contract())
+
+
+@pytest.mark.external
+def test_current_snapshot_retained_data_contract() -> None:
+    data_root = (
+        REPOSITORY_ROOT
+        / "data"
+        / "validation"
+        / "scholarly_work_reference"
+        / "output"
+    )
+    if not data_root.is_dir():
+        pytest.fail(f"BLOCKED: retained scholarly data is missing: {data_root}")
+    current_snapshot_contract(data_root)
 
 
 if __name__ == "__main__":

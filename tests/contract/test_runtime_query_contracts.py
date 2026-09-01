@@ -1,8 +1,8 @@
-"""Direct runtime contracts for configuration, empty retrieval, health, and API errors.
+"""Runtime contracts for configuration, empty retrieval, health, and API errors.
 
 Run from the repository root:
 
-    python tests/contract/test_runtime_query_contracts.py
+    python -m pytest tests/contract/test_runtime_query_contracts.py
 """
 
 from __future__ import annotations
@@ -1541,6 +1541,10 @@ async def run_contract() -> dict[str, Any]:
 def main() -> None:
     report = asyncio.run(run_contract())
     print(json.dumps({"status": "passed", **report}, ensure_ascii=False, indent=2))
+
+
+def test_runtime_query_contracts() -> None:
+    main()
 
 
 if __name__ == "__main__":

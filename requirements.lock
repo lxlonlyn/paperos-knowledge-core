@@ -10,3 +10,4 @@ python-multipart==0.0.32
 # Development and validation tools
 ruff==0.16.0
 mypy==2.3.0
+pytest==9.1.1

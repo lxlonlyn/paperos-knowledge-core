@@ -1,8 +1,9 @@
 """Direct Task 2B contracts for pre-truncation query filters.
 
-Run from the repository root without pytest:
+Run the external contract from the repository root with pytest:
 
-    conda run -n paperos python tests/contract/test_query_filter_contracts.py
+    conda run -n paperos python -m pytest \
+        tests/contract/test_query_filter_contracts.py
 """
 
 from __future__ import annotations
@@ -16,20 +17,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import pytest
 from pydantic import SecretStr
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
-
-from test_active_canonical_revision import (
-    _current_chunks,
-    _ForbiddenDependency,
-    _manifest_index,
-    _register_live_rebuild_source,
-    _start_embedding_service,
-    _stop_embedding_service,
-    _store_real_vector_revision,
-)
 
 from paperos_core.adapters.cognee.compat import CogneeCompatibilityAdapter
 from paperos_core.adapters.cognee.configurator import CogneeConfigurator
@@ -49,6 +41,15 @@ from paperos_core.retrieval.lexical import lexical_retrieve
 from paperos_core.retrieval.semantic import semantic_retrieve
 from paperos_core.retrieval.service import NO_EVIDENCE_MODEL, RetrievalService
 from paperos_core.storage.initializer import StorageInitializer
+from tests.contract.test_active_canonical_revision import (
+    _current_chunks,
+    _ForbiddenDependency,
+    _manifest_index,
+    _register_live_rebuild_source,
+    _start_embedding_service,
+    _stop_embedding_service,
+    _store_real_vector_revision,
+)
 
 _VALIDATION_DATA = REPOSITORY_ROOT / "data" / "validation" / "retrieval" / "output"
 _VECTOR_QUERY = "Explicit flows for implicit surfaces shape morphing deformation"
@@ -724,6 +725,12 @@ def main() -> None:
             print(json.dumps({"status": "BLOCKED", "reason": str(exc)}, indent=2))
         raise
     print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+@pytest.mark.external
+@pytest.mark.gpu
+def test_query_filter_contracts() -> None:
+    asyncio.run(run_contract())
 
 
 if __name__ == "__main__":

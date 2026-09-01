@@ -1,9 +1,8 @@
 """Direct ScholarlyWork identity and citation-backbone contract using real papers.
 
-This project intentionally does not use pytest. Run:
+Run the retained-data contract through pytest:
 
-    python tests/contract/test_scholarly_identity.py \
-        --live-data-dir data/validation/scholarly_work_reference/output
+    python -m pytest tests/contract/test_scholarly_identity.py
 """
 
 from __future__ import annotations
@@ -15,6 +14,8 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
@@ -428,6 +429,20 @@ def main() -> None:
             sort_keys=True,
         )
     )
+
+
+@pytest.mark.external
+def test_scholarly_identity_contract() -> None:
+    data_root = (
+        REPOSITORY_ROOT
+        / "data"
+        / "validation"
+        / "scholarly_work_reference"
+        / "output"
+    )
+    if not data_root.is_dir():
+        pytest.fail(f"BLOCKED: retained scholarly data is missing: {data_root}")
+    run_contract(data_root)
 
 
 if __name__ == "__main__":

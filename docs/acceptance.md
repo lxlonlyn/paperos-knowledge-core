@@ -89,25 +89,16 @@ cleanup.
 
 ## Permanent Chunk-first contracts
 
-Run the release base contracts independently of external services and without
-pytest:
+Run every fast contract independently of external services with pytest:
 
 ```bash
-python tests/contract/test_runtime_query_contracts.py
-python tests/contract/test_portable_data_paths.py
-python tests/contract/test_citation_resolution.py
-python tests/contract/test_document_regions.py
-python tests/contract/test_chunk_boundaries.py
-conda run -n paperos python tests/contract/test_cognee_retrieval_boundary.py
+python -m pytest tests/contract -m "not external and not gpu"
 ```
 
-The real active-revision and pre-truncation vector-filter contracts additionally
-require the Linux external Cognee/local-model boundary:
-
-```bash
-conda run -n paperos python tests/contract/test_active_canonical_revision.py
-conda run -n paperos python tests/contract/test_query_filter_contracts.py
-```
+The real active-revision, pre-truncation vector-filter, retained-data, and local
+inference contracts are marked `external` and/or `gpu`. They run through the
+explicit validation workflow on the provisioned Linux host rather than the
+ordinary push gate.
 
 Together they enforce the production retrieval boundary, active-only lifecycle,
 mandatory dedup, explicit hard filters, canonical evidence rehydration, trace

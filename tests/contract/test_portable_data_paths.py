@@ -1,4 +1,4 @@
-"""Permanent portable-data contract, executed directly without pytest."""
+"""Permanent portable-data pytest contract."""
 
 from __future__ import annotations
 
@@ -304,6 +304,11 @@ def main() -> None:
         if args.relocate:
             report["relocation"] = relocation_contract(root)
     print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+def test_portable_data_paths_contract() -> None:
+    codec_contract()
+    cross_platform_smoke_contract()
 
 
 if __name__ == "__main__":

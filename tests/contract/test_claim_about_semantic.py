@@ -1,8 +1,8 @@
 """Deterministic Task 02 Claim→ABOUT→ScholarlyWork schema and mapper contracts.
 
-This project intentionally does not use pytest. Run:
+Run from the repository root with pytest:
 
-    python tests/contract/test_claim_about_semantic.py
+    python -m pytest tests/contract/test_claim_about_semantic.py
 """
 
 from __future__ import annotations
@@ -369,6 +369,10 @@ def main() -> None:
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     if any(section.get("status") != "passed" for section in report.values()):
         raise SystemExit(1)
+
+
+def test_claim_about_semantic_contract() -> None:
+    main()
 
 
 if __name__ == "__main__":

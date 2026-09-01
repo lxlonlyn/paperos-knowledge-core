@@ -235,17 +235,20 @@ def _ci_contract() -> dict[str, object]:
         "python -m compileall",
         "ruff check",
         "mypy paperos_core",
-        "test_portable_data_paths.py",
-        "test_runtime_query_contracts.py",
+        'python -m pytest tests/contract -m "not external and not gpu"',
         "external-boundaries:",
-        "test_active_canonical_revision.py",
-        "test_query_filter_contracts.py",
+        'python -m pytest tests/contract -m "external or gpu"',
+        'CUDA_VISIBLE_DEVICES: "6,7"',
     )
     missing = [item for item in required if item not in workflow]
     _require(not missing, f"Cross-platform CI is missing required gates: {missing}")
     _require(
         "runs-on: [self-hosted, linux, x64, paperos-external]" in workflow,
         "Real Cognee/vector contracts are not isolated to the Linux external job",
+    )
+    _require(
+        "python tests/contract/" not in workflow,
+        "Cross-platform CI still executes a contract module outside pytest",
     )
     return {"status": "passed", "required_entries": list(required)}
 
@@ -260,6 +263,10 @@ def main() -> None:
         "ci": _ci_contract(),
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+def test_release_report_provenance_contract() -> None:
+    main()
 
 
 if __name__ == "__main__":

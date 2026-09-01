@@ -1,8 +1,8 @@
 """Direct Task 2A contracts for active canonical revision isolation.
 
-Run from the repository root without pytest:
+Run the external contract from the repository root with pytest:
 
-    python tests/contract/test_active_canonical_revision.py
+    python -m pytest tests/contract/test_active_canonical_revision.py
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
+import pytest
 from pydantic import SecretStr
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -1590,6 +1591,12 @@ def main() -> None:
             print(json.dumps({"status": "BLOCKED", "reason": str(exc)}, indent=2))
         raise
     print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+@pytest.mark.external
+@pytest.mark.gpu
+def test_active_canonical_revision_contract() -> None:
+    asyncio.run(run_contract())
 
 
 if __name__ == "__main__":

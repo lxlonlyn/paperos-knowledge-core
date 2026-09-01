@@ -1,14 +1,15 @@
 """Permanent Cognee retrieval boundary contract.
 
-Run directly; this project intentionally does not use pytest.
+Run the static contract through the fast pytest suite. The live retained-data
+contract is marked external and gpu.
 
 Static:
-    python tests/contract/test_cognee_retrieval_boundary.py
+    python -m pytest tests/contract/test_cognee_retrieval_boundary.py \
+        -m "not external and not gpu"
 
 Live retained dataset:
-    python tests/contract/test_cognee_retrieval_boundary.py
-        --live-data-dir data/validation/scholarly_work_reference/output
-        --dataset <dataset-name>
+    python -m pytest tests/contract/test_cognee_retrieval_boundary.py \
+        -m "external or gpu"
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ import json
 import sys
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
@@ -194,6 +197,25 @@ def main() -> None:
             )
         )
     print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+def test_cognee_retrieval_static_contract() -> None:
+    static_contract()
+
+
+@pytest.mark.external
+@pytest.mark.gpu
+def test_cognee_retrieval_live_contract() -> None:
+    data_root = (
+        REPOSITORY_ROOT
+        / "data"
+        / "validation"
+        / "scholarly_work_reference"
+        / "output"
+    )
+    if not data_root.is_dir():
+        pytest.fail(f"BLOCKED: retained Cognee data is missing: {data_root}")
+    asyncio.run(live_contract(data_root, dataset=None, query=None))
 
 
 if __name__ == "__main__":

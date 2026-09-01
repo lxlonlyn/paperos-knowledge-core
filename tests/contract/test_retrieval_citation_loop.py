@@ -1,8 +1,9 @@
 """Task 3 retained-canonical retrieval text and CitationMention contracts.
 
-Run from the repository root without pytest or MinerU:
+Run the external contract from the repository root with pytest:
 
-    conda run -n paperos python tests/contract/test_retrieval_citation_loop.py
+    conda run -n paperos python -m pytest \
+        tests/contract/test_retrieval_citation_loop.py
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
@@ -1270,6 +1273,11 @@ def main() -> int:
     report = asyncio.run(run_contract(args.output_dir))
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
+
+
+@pytest.mark.external
+def test_retrieval_citation_loop_contract(tmp_path: Path) -> None:
+    asyncio.run(run_contract(tmp_path))
 
 
 if __name__ == "__main__":
