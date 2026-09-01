@@ -100,10 +100,20 @@ class _MinerUResumeProbe:
             update={
                 "state": "done",
                 "result_archive_url": "memory://result.zip",
-                "raw_metadata": {**task.raw_metadata, "state": "done"},
+                "raw_metadata": {
+                    **task.raw_metadata,
+                    "state": "done",
+                    "poll_attempt": len(self.poll_task_ids),
+                },
             }
         )
-        return completed, [{"state": "done", "task_id": task.task_id}]
+        return completed, [
+            {
+                "state": "done",
+                "task_id": task.task_id,
+                "poll_attempt": len(self.poll_task_ids),
+            }
+        ]
 
     async def fetch_result(
         self,
@@ -310,6 +320,89 @@ def test_durable_result_resumes_canonical_without_submission(tmp_path: Path) -> 
         assert mapper.calls == 2
         assert mineru.submit_count == 1
         assert mineru.fetch_task_ids == ["remote_task_1"]
+
+    asyncio.run(scenario())
+
+
+def test_partial_result_is_cleaned_before_resuming_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        mineru = _MinerUResumeProbe()
+        service, registry, parser_artifacts, canonical, source = _service(
+            tmp_path,
+            mineru,
+        )
+        operation_id = "op_partial_result_before_manifest"
+        original_write = parser_artifacts._write_immutable
+
+        def interrupt_manifest(path: Path, content: bytes) -> None:
+            if path.name == "manifest.json":
+                raise _InjectedProcessExit
+            original_write(path, content)
+
+        monkeypatch.setattr(parser_artifacts, "_write_immutable", interrupt_manifest)
+        with pytest.raises(_InjectedProcessExit):
+            await service.ingest_pdf_to_canonical(source, operation_id=operation_id)
+
+        source_record = _registered_source(registry, source)
+        checkpoint = parser_artifacts.find_replay_run(
+            source_record.id,
+            operation_id=operation_id,
+        )
+        assert checkpoint is not None
+        assert checkpoint.provider_task_id == "remote_task_1"
+        assert not checkpoint.artifact_manifest_path.exists()
+        partial_artifacts = parser_artifacts.list_artifacts(checkpoint.id)
+        assert partial_artifacts
+        partial_ids = {artifact.id for artifact in partial_artifacts}
+        partial_response = (
+            checkpoint.artifact_manifest_path.parent / "provider_response.json"
+        ).read_bytes()
+        orphan = checkpoint.artifact_manifest_path.parent / "orphan-partial.bin"
+        orphan.write_bytes(b"unregistered partial state")
+
+        _recover_attempts(registry, parser_artifacts)
+        monkeypatch.setattr(parser_artifacts, "_write_immutable", original_write)
+        original_cleanup = parser_artifacts.cleanup_uncommitted_result
+        cleanup_results: list[bool] = []
+
+        def observe_cleanup(parse_run: ParseRun) -> bool:
+            cleaned = original_cleanup(parse_run)
+            if cleaned:
+                assert parser_artifacts.list_artifacts(parse_run.id) == []
+                assert tuple(parse_run.artifact_manifest_path.parent.iterdir()) == ()
+                assert original_cleanup(parse_run) is False
+            cleanup_results.append(cleaned)
+            return cleaned
+
+        monkeypatch.setattr(
+            parser_artifacts,
+            "cleanup_uncommitted_result",
+            observe_cleanup,
+        )
+        result = await service.ingest_pdf_to_canonical(
+            source,
+            operation_id=operation_id,
+        )
+
+        final_run = result.parsed.parse_run
+        final_artifacts = parser_artifacts.durable_result_artifacts(final_run)
+        assert final_artifacts
+        assert final_run.id == checkpoint.id
+        assert final_run.provider_task_id == "remote_task_1"
+        assert canonical.get_snapshot(result.canonical.snapshot.id).id == result.canonical.snapshot.id
+        assert mineru.submit_count == 1
+        assert mineru.poll_task_ids == ["remote_task_1", "remote_task_1"]
+        assert mineru.fetch_task_ids == ["remote_task_1", "remote_task_1"]
+        assert cleanup_results == [True]
+        assert not orphan.exists()
+        assert (
+            checkpoint.artifact_manifest_path.parent / "provider_response.json"
+        ).read_bytes() != partial_response
+        final_ids = {artifact.id for artifact in final_artifacts}
+        assert partial_ids - final_ids
 
     asyncio.run(scenario())
 

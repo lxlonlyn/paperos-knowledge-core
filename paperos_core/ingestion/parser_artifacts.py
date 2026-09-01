@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import mimetypes
+import shutil
 import sqlite3
 import stat
 import zipfile
@@ -226,6 +227,58 @@ class ParserArtifactRepository:
             )
         self.verify_artifact_checksums(parse_run.id)
         return artifacts
+
+    def cleanup_uncommitted_result(self, parse_run: ParseRun) -> bool:
+        """Remove partial local result state before resuming a retained task."""
+
+        manifest_path = parse_run.artifact_manifest_path
+        root = manifest_path.parent
+        self.paths.assert_within_root(root)
+        if manifest_path.exists() or manifest_path.is_symlink():
+            raise ParserArtifactValidationError(
+                "Cannot clean parser artifacts after the manifest commit marker exists.",
+                affected=manifest_path,
+            )
+        if root.exists() and not root.is_dir():
+            raise ParserArtifactValidationError(
+                "ParseRun artifact root is not a directory.",
+                affected=root,
+            )
+
+        try:
+            entries = tuple(root.iterdir()) if root.is_dir() else ()
+        except OSError as exc:
+            raise ParserArtifactValidationError(
+                "Unable to inspect uncommitted parser artifacts.",
+                affected=root,
+            ) from exc
+
+        with self._connect() as connection:
+            has_registered_artifacts = (
+                connection.execute(
+                    "SELECT 1 FROM parser_artifacts WHERE parse_run_id = ? LIMIT 1",
+                    (parse_run.id,),
+                ).fetchone()
+                is not None
+            )
+            if not has_registered_artifacts and not entries:
+                return False
+            connection.execute(
+                "DELETE FROM parser_artifacts WHERE parse_run_id = ?",
+                (parse_run.id,),
+            )
+            try:
+                for entry in entries:
+                    if entry.is_dir() and not entry.is_symlink():
+                        shutil.rmtree(entry)
+                    else:
+                        entry.unlink(missing_ok=True)
+            except OSError as exc:
+                raise ParserArtifactValidationError(
+                    "Unable to clean uncommitted parser artifacts.",
+                    affected=root,
+                ) from exc
+        return True
 
     def recover_interrupted_runs(self) -> int:
         """Mark non-terminal parse attempts left by a prior process as interrupted."""

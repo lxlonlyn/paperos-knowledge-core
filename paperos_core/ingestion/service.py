@@ -155,6 +155,8 @@ class IngestionService:
                     artifacts=durable_artifacts,
                 )
 
+            self.parser_artifacts.cleanup_uncommitted_result(parse_run)
+
             if parse_run.provider_task_id is None:
                 task = await self.mineru.submit_pdf(
                     source,
