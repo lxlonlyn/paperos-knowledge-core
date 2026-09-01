@@ -301,7 +301,7 @@ Each business module owns a real `APIRouter`. `api/app.py` only creates
 FastAPI, owns lifespan and exception handling, and includes routers. Business
 operations are HTTP-only. Long-running ingest, reprocess, rebuild, and improve
 operations enter the internal queue and expose status through
-`GET /api/v1/jobs/{job_id}`.
+`GET /api/v1/jobs/{id}` or the bounded `GET /api/v1/jobs` collection.
 
 PaperOS is intentionally single-user. Authentication, multi-user authorization,
 and a second authoritative knowledge store are outside scope.

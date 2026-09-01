@@ -42,6 +42,7 @@ _PUBLIC_MESSAGES = {
     "feedback_storage_error": "Feedback storage failed.",
     "document_not_found": "The requested document was not found.",
     "job_queue_error": "The job queue operation failed.",
+    "operational_job_not_found": "The requested operational job was not found.",
     "mineru_unavailable": "The document parser is unavailable.",
     "llm_unavailable": "The language model is unavailable.",
     "local_models_unavailable": "Local inference is unavailable.",
@@ -342,3 +343,7 @@ class DocumentNotFoundError(PaperOSError):
 
 class JobQueueError(PaperOSError):
     code = "job_queue_error"
+
+
+class OperationalJobNotFoundError(JobQueueError):
+    code = "operational_job_not_found"

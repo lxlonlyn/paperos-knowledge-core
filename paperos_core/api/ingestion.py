@@ -52,4 +52,4 @@ async def ingest(
         raise
     finally:
         await file.close()
-    return {"job_id": job.id, "status": job.status}
+    return {"id": job.id, "status": job.status}

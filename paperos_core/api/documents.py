@@ -34,5 +34,6 @@ async def delete_document(
 async def reprocess_document(
     document_id: str, application: ApplicationDep
 ) -> dict[str, object]:
+    application.services.documents.inspect(document_id)
     job = application.queue.enqueue("reprocess", {"document_id": document_id})
-    return {"job_id": job.id, "status": job.status}
+    return {"id": job.id, "status": job.status}

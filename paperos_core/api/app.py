@@ -17,7 +17,12 @@ from paperos_core.api.query import router as query_router
 from paperos_core.api.visualize import router as visualize_router
 from paperos_core.application import Application, create_application
 from paperos_core.config import RuntimeSettings
-from paperos_core.errors import FileTooLargeError, PaperOSError
+from paperos_core.errors import (
+    DocumentNotFoundError,
+    FileTooLargeError,
+    OperationalJobNotFoundError,
+    PaperOSError,
+)
 
 
 def create_app(settings: RuntimeSettings) -> FastAPI:
@@ -42,6 +47,8 @@ def create_app(settings: RuntimeSettings) -> FastAPI:
     async def paperos_error(_request: Request, error: PaperOSError) -> JSONResponse:
         if isinstance(error, FileTooLargeError):
             status_code = 413
+        elif isinstance(error, (DocumentNotFoundError, OperationalJobNotFoundError)):
+            status_code = 404
         else:
             status_code = 503 if error.retryable else 400
         return JSONResponse(

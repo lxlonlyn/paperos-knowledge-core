@@ -64,7 +64,8 @@ Normal business operations use HTTP only:
 
 ```text
 POST   /api/v1/ingest
-GET    /api/v1/jobs/{job_id}
+GET    /api/v1/jobs
+GET    /api/v1/jobs/{id}
 POST   /api/v1/query
 GET    /api/v1/documents
 GET    /api/v1/documents/{document_id}
@@ -77,8 +78,9 @@ GET    /api/v1/health
 GET    /api/v1/visualize
 ```
 
-Ingest, reprocess, improve, and rebuild enqueue work and return HTTP 202 with a
-job ID. Agents should use [scripts/agent_client.py](scripts/agent_client.py)
+Ingest, reprocess, improve, and rebuild enqueue work and return HTTP 202 with
+`{"id": "opjob_...", "status": "pending"}`. Agents should use
+[scripts/agent_client.py](scripts/agent_client.py)
 rather than importing repositories or database files.
 
 The API listens on `127.0.0.1` by default. PaperOS does not currently provide

@@ -14,7 +14,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from paperos_core.domain.documents import utc_now
-from paperos_core.errors import JobQueueError, public_diagnostic
+from paperos_core.errors import (
+    JobQueueError,
+    OperationalJobNotFoundError,
+    public_diagnostic,
+)
 from paperos_core.paths import DataPaths
 from paperos_core.storage.path_refs import DataPathCodec
 
@@ -143,7 +147,7 @@ class JobQueue:
                 "SELECT * FROM operational_jobs WHERE id=?", (job_id,)
             ).fetchone()
         if row is None:
-            raise JobQueueError(
+            raise OperationalJobNotFoundError(
                 f"Operational job '{job_id}' does not exist.", affected=job_id
             )
         return self._from_row(row)
@@ -167,6 +171,7 @@ class JobQueue:
             error=row["error"],
             result=json.loads(row["result"]) if row["result"] else None,
         )
+
     def _persistent_payload(self, job: OperationalJob) -> dict[str, Any]:
         payload = dict(job.payload)
         if job.job_type == "ingest" and "path" in payload:

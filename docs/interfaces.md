@@ -20,7 +20,7 @@ The upload is staged under the configured data directory, an operational job is
 created, and the route returns HTTP 202:
 
 ```json
-{"job_id": "opjob_...", "status": "pending"}
+{"id": "opjob_...", "status": "pending"}
 ```
 
 The Worker validates the real PDF, creates SourceFile and IngestionJob records,
@@ -29,9 +29,12 @@ FTS projections. Staged bytes are removed after the job finishes.
 
 ### Job status
 
-`GET /api/v1/jobs/{job_id}` returns the operational job, payload, status,
+`GET /api/v1/jobs/{id}` returns the operational job, payload, status,
 error, and result. Status is one of `pending`, `running`, `completed`, or
 `failed`.
+
+`GET /api/v1/jobs?limit=100` returns the newest operational jobs in the same
+public, path-redacted representation. `limit` must be between 1 and 1000.
 
 ### Query
 
@@ -63,6 +66,9 @@ evidence. Deleted documents are absent from list, inspect, query, health, and
 visualization responses. Document list/inspect expose only the singular current
 `canonical_snapshot_id`; no history or deleted-document query parameter exists.
 Reprocess and rebuild execute through the internal queue.
+Ingest, reprocess, rebuild, and improve all return the same HTTP 202 creation
+resource: `{"id": "opjob_...", "status": "pending"}`. Reprocess rejects an
+unknown document before enqueueing it.
 
 `GET /api/v1/visualize` returns graph projections for current active revisions
 only. Its `active_snapshot_ids` field names that scope explicitly; candidate,
@@ -127,3 +133,27 @@ and readiness timeout are startup errors.
 
 Agents and external programs must not import repositories. They use HTTP or
 `scripts/agent_client.py`.
+
+## Agent client
+
+The client reads `api.host`, `api.port`, and `data.directory` from the existing
+`config/paperos.toml`. An explicit `--base-url` takes precedence. Useful job
+commands include:
+
+```bash
+python scripts/agent_client.py jobs
+python scripts/agent_client.py jobs --limit 50
+python scripts/agent_client.py ingest paper.pdf --no-wait
+python scripts/agent_client.py job opjob_...
+```
+
+Ingest prints the operational job ID to stderr as soon as the server accepts
+the upload. Waiting ingest exits nonzero if the job fails; `job` remains a
+read-only status command.
+
+Query prints only the answer by default. `--json` prints the complete
+`QueryResponse`, while the mutually exclusive `--replay` prints only
+`replay.replay_text`. Every successful query is appended to
+`<data.directory>/query_history/queries.jsonl`; non-empty replay text is stored
+under `<data.directory>/query_history/replay/`. History write failures are
+warnings and do not turn a successful query into a failure.

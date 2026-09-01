@@ -18,4 +18,4 @@ async def feedback(
 @router.post("/improve", status_code=status.HTTP_202_ACCEPTED)
 async def improve(application: ApplicationDep) -> dict[str, object]:
     job = application.queue.enqueue("improve")
-    return {"job_id": job.id, "status": job.status}
+    return {"id": job.id, "status": job.status}
