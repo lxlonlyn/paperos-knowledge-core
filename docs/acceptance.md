@@ -120,8 +120,10 @@ The fused result resolves to the canonical parent Chunk. The authoritative
 indexed and Evidence unit remains that canonical Chunk; reranking does not
 rewrite Chunk text, retrieval text, embeddings, or Evidence provenance.
 
-The retained Task 6B benchmark in
-`data/validation/rerank_quality/output/benchmark.json` records the production
-policy as `hybrid_full_structured_256_384_rrf` with `overall_status = PASS`.
-Its historical `validated_head` remains the commit on which that benchmark
-actually ran; release closure does not relabel it as current validation.
+Task 6B rerank inputs are tracked under
+`tests/validation/fixtures/rerank_quality/`. A benchmark run writes its generated
+report to `data/validation/rerank_quality/output/benchmark.json`; runtime data and
+generated reports are intentionally not version-controlled. The retained 1.0
+result selected `hybrid_full_structured_256_384_rrf` with `overall_status = PASS`
+at historical HEAD `af2cc26d5ae36c7c75d89c36ea4b0a1300f748f1`; later release work must not
+relabel that result as current validation.

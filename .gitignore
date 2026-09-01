@@ -1,3 +1,10 @@
+# Editor and OS metadata
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
 # Secrets and machine-local configuration
 .env
 .env.*

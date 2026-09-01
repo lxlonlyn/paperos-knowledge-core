@@ -38,7 +38,8 @@ from paperos_core.retrieval.fusion import deduplicate_candidates_by_chunk, weigh
 from paperos_core.retrieval.lexical import lexical_retrieve
 from paperos_core.retrieval.semantic import semantic_retrieve
 
-_VALIDATION_ROOT = Path("data/validation/rerank_quality")
+_DEFAULT_CONFIG_ROOT = Path("tests/validation/fixtures/rerank_quality")
+_DEFAULT_OUTPUT_ROOT = Path("data/validation/rerank_quality/output")
 _RETAINED_ROOT = Path(
     "data/validation/rerank_projection_acceptance/output/runtime"
 )
@@ -1066,15 +1067,21 @@ def _markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _validation_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    if args.validation_root is not None:
+        validation_root = args.validation_root.resolve()
+        return validation_root / "config", validation_root / "output"
+    return args.config_root.resolve(), args.output_root.resolve()
+
+
 async def run(args: argparse.Namespace) -> dict[str, Any]:
-    validation_root = args.validation_root.resolve()
-    output_root = validation_root / "output"
+    config_root, output_root = _validation_paths(args)
     runtime_root = args.retained_runtime.resolve()
     _require(runtime_root.is_dir(), "BLOCKED: retained Task 6A runtime is unavailable")
     _require(os.environ.get("CUDA_VISIBLE_DEVICES") == _ALLOWED_CUDA_DEVICES, "Task 6B requires CUDA_VISIBLE_DEVICES=6")
 
-    query_payload = _read_json(validation_root / "config" / "queries.json")
-    truth_payload = _read_json(validation_root / "config" / "ground_truth.json")
+    query_payload = _read_json(config_root / "queries.json")
+    truth_payload = _read_json(config_root / "ground_truth.json")
     papers_payload = _read_json(args.papers_config.resolve())
     cases = list(query_payload["cases"])
     gold_by_case = {str(item["case_id"]): item for item in truth_payload["gold"]}
@@ -1317,7 +1324,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         }
         _require(report["pipeline_invariants_passed"], "A benchmark strategy violated parent/Evidence/filter invariants")
         _write_json(output_root / "benchmark.json", report)
-        (validation_root / "README.md").write_text(
+        (output_root / "README.md").write_text(
             _markdown(report),
             encoding="utf-8",
         )
@@ -1345,7 +1352,14 @@ def _external_boundary_failure(exc: BaseException) -> bool:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=Path("config/paperos.toml"))
-    parser.add_argument("--validation-root", type=Path, default=_VALIDATION_ROOT)
+    parser.add_argument("--config-root", type=Path, default=_DEFAULT_CONFIG_ROOT)
+    parser.add_argument("--output-root", type=Path, default=_DEFAULT_OUTPUT_ROOT)
+    parser.add_argument(
+        "--validation-root",
+        type=Path,
+        default=None,
+        help="Legacy combined root containing config/ and output/.",
+    )
     parser.add_argument("--retained-runtime", type=Path, default=_RETAINED_ROOT)
     parser.add_argument("--papers-config", type=Path, default=_PAPERS_CONFIG)
     args = parser.parse_args()
@@ -1358,7 +1372,7 @@ def main() -> None:
             "error_type": type(exc).__name__,
             "error": str(exc),
         }
-        output = args.validation_root.resolve() / "output" / "benchmark.json"
+        output = _validation_paths(args)[1] / "benchmark.json"
         _write_json(output, report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["overall_status"] != "PASS":

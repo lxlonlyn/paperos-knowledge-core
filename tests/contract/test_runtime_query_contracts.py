@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -163,12 +164,19 @@ def configuration_contract(root: Path) -> dict[str, object]:
         and not defaults.ingestion.claim_enrichment_enabled,
         "Semantic and Claim enrichment defaults must both be disabled",
     )
+    _require(defaults.api.host == "127.0.0.1", "API default must remain loopback-only")
+    _require(
+        defaults.local_inference.cuda_devices == [],
+        "Local inference default must preserve ambient CUDA visibility",
+    )
     return {
         "status": "passed",
         "invalid_local_embedding": True,
         "invalid_local_reranker": True,
         "invalid_claim_without_semantic": True,
         "semantic_enrichment_default": False,
+        "api_loopback_default": True,
+        "cuda_visibility_default": "ambient",
         "example_consistent": True,
     }
 
@@ -904,6 +912,10 @@ def local_runtime_identity_contract(root: Path) -> dict[str, object]:
         and expected["reranker"]["max_tokens"] == 4096,
         "Runtime token limits are missing or use inconsistent types",
     )
+    _require(
+        expected["cuda_visible_devices"] == "2,5",
+        "Explicit CUDA devices did not override the runtime identity",
+    )
 
     rejected: list[str] = []
 
@@ -956,10 +968,45 @@ def local_runtime_identity_contract(root: Path) -> dict[str, object]:
     changed["protocol_version"] = expected["protocol_version"] + 1
     require_rejected("protocol_version", changed)
 
+    default_settings = settings.model_copy(
+        update={
+            "local_inference": settings.local_inference.model_copy(
+                update={"cuda_devices": []}
+            )
+        }
+    )
+    default_runtime = LocalInferenceRuntime(
+        default_settings,
+        build_data_paths(root / "runtime-default-cuda-data"),
+        _Probe(),
+        _RuntimeConfigReader(),
+    )
+    previous_cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
+    try:
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        _require(
+            "CUDA_VISIBLE_DEVICES" not in default_runtime._process_environment(),
+            "Empty CUDA config introduced a visibility override",
+        )
+        os.environ["CUDA_VISIBLE_DEVICES"] = "4,5"
+        _require(
+            default_runtime._process_environment()["CUDA_VISIBLE_DEVICES"] == "4,5"
+            and default_runtime._expected_runtime_identity()["cuda_visible_devices"]
+            == "4,5",
+            "Empty CUDA config did not preserve the effective environment identity",
+        )
+    finally:
+        if previous_cuda is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = previous_cuda
+
     _require(len(rejected) == 7, "Not every incompatible runtime was rejected")
     return {
         "status": "passed",
         "same_config_reused": True,
+        "ambient_cuda_preserved": True,
+        "explicit_cuda_overridden": True,
         "rejected": rejected,
     }
 
