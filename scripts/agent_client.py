@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 import time
+import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -99,11 +99,6 @@ def _handle_http_status(error: httpx.HTTPStatusError) -> None:
         _print_public_error(None)
 
 
-def _safe_history_filename(query_id: str) -> str:
-    selected = re.sub(r"[^A-Za-z0-9_.-]", "_", query_id).strip("._")
-    return selected or "query"
-
-
 def _save_query_history(
     settings: RuntimeSettings,
     payload: dict[str, Any],
@@ -115,13 +110,13 @@ def _save_query_history(
     expand_graph: bool,
 ) -> None:
     history_root = settings.data_dir / "query_history"
+    history_id = f"history_{uuid.uuid4().hex}"
     replay = payload.get("replay")
     replay_text = replay.get("replay_text") if isinstance(replay, dict) else None
     query_id_value = payload.get("id")
-    query_id = str(query_id_value) if query_id_value is not None else "query"
     replay_file: str | None = None
     if isinstance(replay_text, str) and replay_text:
-        replay_name = f"{_safe_history_filename(query_id)}.md"
+        replay_name = f"{history_id}.md"
         replay_path = history_root / "replay" / replay_name
         replay_path.parent.mkdir(parents=True, exist_ok=True)
         replay_path.write_text(replay_text, encoding="utf-8")
@@ -129,6 +124,7 @@ def _save_query_history(
 
     history_root.mkdir(parents=True, exist_ok=True)
     entry = {
+        "history_id": history_id,
         "timestamp": datetime.now(UTC).isoformat(),
         "query_response_id": query_id_value,
         "original_query": original_query,

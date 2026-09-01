@@ -306,16 +306,20 @@ def test_no_wait_jobs_and_configured_base_url(
     assert jobs.calls[0][2]["params"] == {"limit": 50}
 
 
-def _query_payload() -> dict[str, object]:
+def _query_payload(
+    *,
+    query_id: str = "query:history/1",
+    replay_text: str = "# Replay\n\nUse this evidence.",
+) -> dict[str, object]:
     return {
-        "id": "query:history/1",
+        "id": query_id,
         "query": "normalized query",
         "dataset": "papers-a",
         "answer": "Evidence-bound answer.",
         "answer_model": "test/model",
         "replay": {
             "original_query": "server copy",
-            "replay_text": "# Replay\n\nUse this evidence.",
+            "replay_text": replay_text,
         },
         "candidates": [],
         "evidence": [],
@@ -374,9 +378,57 @@ def test_query_text_modes_and_history(
     assert entry["document_ids"] == ["doc_1"]
     assert entry["work_ids"] == ["work_1"]
     assert entry["expand_context"] is True
-    assert entry["replay_file"] == "replay/query_history_1.md"
+    assert entry["history_id"].startswith("history_")
+    assert entry["query_response_id"] == "query:history/1"
+    assert entry["replay_file"] == f"replay/{entry['history_id']}.md"
     replay_path = settings.data_dir / "query_history" / entry["replay_file"]
     assert replay_path.read_text(encoding="utf-8") == "# Replay\n\nUse this evidence."
+
+
+def test_repeated_query_response_identity_keeps_distinct_replays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = RuntimeSettings.model_validate(
+        {"data": {"directory": tmp_path / "data"}}
+    )
+    monkeypatch.setattr(agent_client, "load_settings", lambda: settings)
+
+    for replay_text in ("Replay A", "Replay B"):
+        fake = _FakeClient(
+            [
+                (
+                    "POST",
+                    "/api/v1/query",
+                    _response(
+                        "POST",
+                        "/api/v1/query",
+                        _query_payload(query_id="query_same", replay_text=replay_text),
+                    ),
+                )
+            ]
+        )
+        _install_client(monkeypatch, fake)
+        assert agent_client.run(["query", "Same request"]) == 0
+        capsys.readouterr()
+
+    history_path = settings.data_dir / "query_history" / "queries.jsonl"
+    records = [
+        json.loads(line)
+        for line in history_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(records) == 2
+    first, second = records
+    assert first["query_response_id"] == "query_same"
+    assert second["query_response_id"] == "query_same"
+    assert first["history_id"] != second["history_id"]
+    assert first["replay_file"] != second["replay_file"]
+
+    first_replay = settings.data_dir / "query_history" / first["replay_file"]
+    second_replay = settings.data_dir / "query_history" / second["replay_file"]
+    assert first_replay.read_text(encoding="utf-8") == "Replay A"
+    assert second_replay.read_text(encoding="utf-8") == "Replay B"
 
 
 def test_query_json_and_typed_http_error(
