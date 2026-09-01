@@ -257,9 +257,11 @@ Query
 -> whole-Chunk synthesis budget selection
 -> final canonical source-grounded Evidence
 -> FinalSynthesisContext
--> one rendered Markdown synthesis prompt
-   |-> LLM synthesis -> answer
-   `-> QueryReplay.replay_text
+|-> render_synthesis_prompt()
+|  |-> LLM synthesis -> answer
+|  `-> QueryReplay.replay_text
+`-> render_research_replay_prompt()
+   `-> QueryReplay.research_replay_text
 ```
 
 Only caller-provided document/work IDs are hard filters. There is no QueryScope
@@ -274,8 +276,10 @@ expansion path. Derived text can aid discovery/provenance but never becomes pape
 evidence. Evidence is always rehydrated from the current ChunkProjection.
 The final synthesis renderer preserves the caller's original query, Evidence
 ordering, canonical `Chunk.text`, and available paper provenance. Its rendered
-prompt is both the exact LLM user input and the production Query Replay; Replay
-does not rerender, persist queries, or trigger another search or model call.
+prompt remains both the exact LLM user input and the auditable internal Replay.
+The separate research replay renderer receives the same selected Evidence and
+creates a broader external-research prompt without triggering another search or
+model call and without changing the internal prompt or answer.
 Before rendering, `retrieval.synthesis_max_input_tokens` selects the longest
 ranked Evidence prefix whose complete Markdown prompt fits the deterministic
 token estimate. Selected Chunks remain complete; source text is never substring
@@ -290,8 +294,9 @@ does not add a Query-to-Claim search channel.
 
 Versioned provider-level and enrichment prompts live under `prompts/`;
 `PromptRepository` validates their names and records version and SHA-256.
-`render_synthesis_prompt()` is the single owner of the query-dependent final
-synthesis user prompt shared with Query Replay. Semantic enrichment manifests
+`render_synthesis_prompt()` remains the single owner of the query-dependent
+internal synthesis user prompt. `render_research_replay_prompt()` separately
+owns the external-research replay form. Semantic enrichment manifests
 contain coverage IDs/ratio, prompt name/version/SHA-256, and Cognee's actual
 provider/model.
 

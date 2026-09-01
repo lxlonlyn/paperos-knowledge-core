@@ -41,18 +41,19 @@ SourceFile
 ## Query Replay
 
 `QueryResponse` contains the final canonical `evidence` once and a `replay`
-object with `original_query` and `replay_text`. The latter is the exact rendered
-Markdown user prompt used for final synthesis. It contains the question,
-ordered evidence and available paper provenance, but not the current answer or
-retrieval-engine scores. Replay is returned with the query response and has no
-independent persistence lifecycle. The final Evidence list is the longest
-ranked whole-Chunk prefix admitted by `retrieval.synthesis_max_input_tokens`;
-the response Evidence, Replay blocks, and actual synthesis input are therefore
-identical, and selected `Chunk.text` values are never partially truncated.
+object with `original_query`, `replay_text`, and `research_replay_text`.
+`replay_text` is the exact rendered Markdown user prompt used for internal final
+synthesis. `research_replay_text` uses the same ordered Evidence and provenance
+but asks an external research-capable model to verify and extend the answer with
+reliable sources. Neither replay includes the current answer or retrieval-engine
+scores. The final Evidence list is the longest ranked whole-Chunk prefix admitted
+by `retrieval.synthesis_max_input_tokens`; both replay forms use that same
+selection, and selected `Chunk.text` values are never partially truncated.
 
 If no usable Evidence exists, PaperOS does not invoke final synthesis and stores
-an empty `replay_text`; the response uses `paperos/no-evidence` as its
-deterministic `answer_model`.
+an empty `replay_text`; `research_replay_text` still preserves the original
+question and explains that an empty PaperOS retrieval is not negative evidence.
+The response uses `paperos/no-evidence` as its deterministic `answer_model`.
 
 ## Common persistence fields
 

@@ -19,7 +19,7 @@ from paperos_core.adapters.cognee.llm import _SectionExtractionWithoutClaims
 from paperos_core.domain.canonical import Chunk
 from paperos_core.domain.provenance import SEMANTIC_RELATION_TYPES, RelationType
 from paperos_core.errors import ConfigurationError
-from paperos_core.retrieval.candidates import Candidate, QueryRequest
+from paperos_core.retrieval.candidates import Candidate, Evidence, QueryRequest
 from paperos_core.retrieval.evidence import format_evidence
 from paperos_core.retrieval.expansion import (
     local_neighbor_expand,
@@ -28,6 +28,11 @@ from paperos_core.retrieval.expansion import (
 from paperos_core.retrieval.fusion import weighted_rrf
 from paperos_core.retrieval.rerank import RerankPass
 from paperos_core.retrieval.service import RetrievalService
+from paperos_core.retrieval.synthesis import (
+    FinalSynthesisContext,
+    render_research_replay_prompt,
+    render_synthesis_prompt,
+)
 
 
 def _candidate(chunk_id: str, channel: str, *, candidate_id: str) -> Candidate:
@@ -427,7 +432,10 @@ def _pipeline_corpus() -> SimpleNamespace:
 
 
 def _run_expansion_pipeline(
-    monkeypatch: pytest.MonkeyPatch, expanded: list[Candidate]
+    monkeypatch: pytest.MonkeyPatch,
+    expanded: list[Candidate],
+    *,
+    formatted_evidence: list[Evidence] | None = None,
 ) -> tuple[object, list[list[str]], list[str]]:
     import paperos_core.retrieval.service as service_module
 
@@ -465,7 +473,11 @@ def _run_expansion_pipeline(
     monkeypatch.setattr(
         service_module, "local_neighbor_expand", lambda *_args, **_kwargs: expanded
     )
-    monkeypatch.setattr(service_module, "format_evidence", lambda *_args: [])
+    monkeypatch.setattr(
+        service_module,
+        "format_evidence",
+        lambda *_args: formatted_evidence if formatted_evidence is not None else [],
+    )
     monkeypatch.setattr(service_module, "synthesize_answer", answer)
     response = asyncio.run(
         service.query(QueryRequest(query="test", expand_context=True, top_k=2))
@@ -492,8 +504,47 @@ def test_new_expanded_chunk_enters_second_rerank_input(
     assert response.provenance_complete is False
     assert response.answer_model == "paperos/no-evidence"
     assert response.replay.replay_text == ""
+    assert "PaperOS did not retrieve supporting evidence." in (
+        response.replay.research_replay_text
+    )
     assert "no_evidence" in response.stages
     assert "synthesis" not in response.stages
+
+
+def test_research_replay_does_not_change_synthesis_or_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = Evidence(
+        evidence_id="evidence:chunk_seed",
+        chunk_id="chunk_seed",
+        document_id="document_1",
+        source_file_id="source_1",
+        source_filename="paper.pdf",
+        title="Contract Paper",
+        text="canonical chunk_seed",
+        channels=["lexical"],
+        knowledge_kind="source_fact",
+        derived_from_ids=[],
+    )
+    response, rerank_inputs, synthesis_prompts = _run_expansion_pipeline(
+        monkeypatch,
+        [],
+        formatted_evidence=[evidence],
+    )
+    context = FinalSynthesisContext(original_query="test", evidence=[evidence])
+    internal = render_synthesis_prompt(context)
+
+    assert rerank_inputs == [["chunk_seed"]]
+    assert response.trace.final_selected_chunk_ids == ["chunk_seed"]
+    assert response.evidence == [evidence]
+    assert response.candidates[0].chunk_id == "chunk_seed"
+    assert synthesis_prompts == [internal]
+    assert response.replay.replay_text == internal
+    assert response.replay.research_replay_text == render_research_replay_prompt(
+        context
+    )
+    assert response.answer == "grounded answer"
+    assert response.answer_model != "paperos/no-evidence"
 
 
 def test_duplicate_only_expansion_skips_second_rerank(

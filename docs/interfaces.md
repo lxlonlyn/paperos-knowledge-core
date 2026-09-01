@@ -42,14 +42,17 @@ public, path-redacted representation. `limit` must be between 1 and 1000.
 `QueryResponse` with answer, candidates, canonical evidence, channel usage,
 provenance, the retrieval trace, and `replay`. `replay.original_query` preserves
 the caller's exact question, while `replay.replay_text` is the same standalone
-Markdown user prompt sent to final synthesis. A caller can paste that text into
-a new web LLM conversation without rerunning retrieval. The returned Evidence
-is limited by the total `retrieval.synthesis_max_input_tokens` budget, but every
-selected canonical Chunk remains complete.
+Markdown user prompt sent to internal final synthesis.
+`replay.research_replay_text` uses the same selected Evidence but is specialized
+for pasting into a web or research-capable model that can verify and supplement
+it with external sources. The returned Evidence is limited by the total
+`retrieval.synthesis_max_input_tokens` budget, but every selected canonical
+Chunk remains complete.
 
 When retrieval yields no usable Evidence, final synthesis is not called:
 `answer_model` is `paperos/no-evidence` and `replay.replay_text` is the empty
-string. An empty Replay therefore means that no user prompt was sent to an LLM.
+string. `replay.research_replay_text` remains non-empty and explains that a
+retrieval absence is not a negative answer.
 
 ### Documents and maintenance
 
@@ -152,8 +155,10 @@ the upload. Waiting ingest exits nonzero if the job fails; `job` remains a
 read-only status command.
 
 Query prints only the answer by default. `--json` prints the complete
-`QueryResponse`, while the mutually exclusive `--replay` prints only
-`replay.replay_text`. Every successful query is appended to
+`QueryResponse`, `--replay` prints `replay.research_replay_text`, and
+`--synthesis-replay` prints the exact internal `replay.replay_text`; the three
+options are mutually exclusive. Every successful query is appended to
 `<data.directory>/query_history/queries.jsonl`; non-empty replay text is stored
-under `<data.directory>/query_history/replay/`. History write failures are
-warnings and do not turn a successful query into a failure.
+under `<data.directory>/query_history/replay/` using the research replay form.
+History write failures are warnings and do not turn a successful query into a
+failure.

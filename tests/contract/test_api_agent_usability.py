@@ -310,6 +310,7 @@ def _query_payload(
     *,
     query_id: str = "query:history/1",
     replay_text: str = "# Replay\n\nUse this evidence.",
+    research_replay_text: str = "# Research Replay\n\nContinue the research.",
 ) -> dict[str, object]:
     return {
         "id": query_id,
@@ -320,6 +321,7 @@ def _query_payload(
         "replay": {
             "original_query": "server copy",
             "replay_text": replay_text,
+            "research_replay_text": research_replay_text,
         },
         "candidates": [],
         "evidence": [],
@@ -330,7 +332,8 @@ def _query_payload(
     ("output_flag", "expected"),
     [
         ([], "Evidence-bound answer.\n"),
-        (["--replay"], "# Replay\n\nUse this evidence.\n"),
+        (["--replay"], "# Research Replay\n\nContinue the research.\n"),
+        (["--synthesis-replay"], "# Replay\n\nUse this evidence.\n"),
     ],
 )
 def test_query_text_modes_and_history(
@@ -382,7 +385,9 @@ def test_query_text_modes_and_history(
     assert entry["query_response_id"] == "query:history/1"
     assert entry["replay_file"] == f"replay/{entry['history_id']}.md"
     replay_path = settings.data_dir / "query_history" / entry["replay_file"]
-    assert replay_path.read_text(encoding="utf-8") == "# Replay\n\nUse this evidence."
+    assert replay_path.read_text(encoding="utf-8") == (
+        "# Research Replay\n\nContinue the research."
+    )
 
 
 def test_repeated_query_response_identity_keeps_distinct_replays(
@@ -395,7 +400,7 @@ def test_repeated_query_response_identity_keeps_distinct_replays(
     )
     monkeypatch.setattr(agent_client, "load_settings", lambda: settings)
 
-    for replay_text in ("Replay A", "Replay B"):
+    for research_replay_text in ("Replay A", "Replay B"):
         fake = _FakeClient(
             [
                 (
@@ -404,7 +409,10 @@ def test_repeated_query_response_identity_keeps_distinct_replays(
                     _response(
                         "POST",
                         "/api/v1/query",
-                        _query_payload(query_id="query_same", replay_text=replay_text),
+                        _query_payload(
+                            query_id="query_same",
+                            research_replay_text=research_replay_text,
+                        ),
                     ),
                 )
             ]

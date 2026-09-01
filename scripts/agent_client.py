@@ -49,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     output = query.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true")
     output.add_argument("--replay", action="store_true")
+    output.add_argument("--synthesis-replay", action="store_true")
 
     job = subcommands.add_parser("job")
     job.add_argument("job_id")
@@ -115,14 +116,16 @@ def _save_query_history(
     history_root = settings.data_dir / "query_history"
     history_id = f"history_{uuid.uuid4().hex}"
     replay = payload.get("replay")
-    replay_text = replay.get("replay_text") if isinstance(replay, dict) else None
+    research_replay_text = (
+        replay.get("research_replay_text") if isinstance(replay, dict) else None
+    )
     query_id_value = payload.get("id")
     replay_file: str | None = None
-    if isinstance(replay_text, str) and replay_text:
+    if isinstance(research_replay_text, str) and research_replay_text:
         replay_name = f"{history_id}.md"
         replay_path = history_root / "replay" / replay_name
         replay_path.parent.mkdir(parents=True, exist_ok=True)
-        replay_path.write_text(replay_text, encoding="utf-8")
+        replay_path.write_text(research_replay_text, encoding="utf-8")
         replay_file = (Path("replay") / replay_name).as_posix()
 
     history_root.mkdir(parents=True, exist_ok=True)
@@ -144,13 +147,20 @@ def _save_query_history(
         stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def _query_output(payload: dict[str, Any], *, full_json: bool, replay_only: bool) -> None:
+def _query_output(
+    payload: dict[str, Any],
+    *,
+    full_json: bool,
+    research_replay_only: bool,
+    synthesis_replay_only: bool,
+) -> None:
     if full_json:
         _print_json(payload)
         return
-    if replay_only:
+    if research_replay_only or synthesis_replay_only:
         replay = payload.get("replay")
-        replay_text = replay.get("replay_text") if isinstance(replay, dict) else ""
+        replay_field = "replay_text" if synthesis_replay_only else "research_replay_text"
+        replay_text = replay.get(replay_field) if isinstance(replay, dict) else ""
         print(replay_text if isinstance(replay_text, str) else "")
         return
     answer = payload.get("answer")
@@ -221,7 +231,12 @@ def run(argv: Sequence[str] | None = None) -> int:
                         f"paperos warning: query history was not saved ({type(error).__name__}).",
                         file=sys.stderr,
                     )
-                _query_output(payload, full_json=args.json, replay_only=args.replay)
+                _query_output(
+                    payload,
+                    full_json=args.json,
+                    research_replay_only=args.replay,
+                    synthesis_replay_only=args.synthesis_replay,
+                )
                 return 0
 
             output_payload: object

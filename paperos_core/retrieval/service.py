@@ -30,6 +30,7 @@ from paperos_core.retrieval.rerank import RerankPass, rerank_candidates
 from paperos_core.retrieval.semantic import semantic_retrieve
 from paperos_core.retrieval.synthesis import (
     FinalSynthesisContext,
+    render_research_replay_prompt,
     render_synthesis_prompt,
     select_synthesis_evidence,
     synthesize_answer,
@@ -271,6 +272,13 @@ class RetrievalService:
             answer_model = NO_EVIDENCE_MODEL
             stages.append("no_evidence")
 
+        research_replay_prompt = render_research_replay_prompt(
+            FinalSynthesisContext(
+                original_query=request.query,
+                evidence=evidence,
+            )
+        )
+
         trace = RetrievalTrace(
             requested_document_ids=requested_document_ids,
             requested_work_ids=requested_work_ids,
@@ -340,6 +348,7 @@ class RetrievalService:
             replay=QueryReplay(
                 original_query=request.query,
                 replay_text=synthesis_prompt,
+                research_replay_text=research_replay_prompt,
             ),
             candidates=selected,
             distinct_documents=len({item.document_id for item in evidence}),
@@ -375,7 +384,16 @@ class RetrievalService:
             stages=stages,
             channels_used=[],
             evidence=[],
-            replay=QueryReplay(original_query=request.query, replay_text=""),
+            replay=QueryReplay(
+                original_query=request.query,
+                replay_text="",
+                research_replay_text=render_research_replay_prompt(
+                    FinalSynthesisContext(
+                        original_query=request.query,
+                        evidence=[],
+                    )
+                ),
+            ),
             candidates=[],
             distinct_documents=0,
             provenance_complete=False,

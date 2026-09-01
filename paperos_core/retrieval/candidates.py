@@ -130,12 +130,13 @@ class Evidence(BaseModel):
 
 
 class QueryReplay(BaseModel):
-    """Exact final synthesis input, or empty replay_text when no LLM was called."""
+    """Exact internal synthesis input plus a portable broader-research prompt."""
 
     model_config = ConfigDict(extra="forbid")
 
     original_query: str
     replay_text: str
+    research_replay_text: str
 
 
 class RetrievalTrace(BaseModel):

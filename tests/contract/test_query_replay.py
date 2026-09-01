@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -16,6 +17,7 @@ from paperos_core.retrieval.candidates import Evidence, QueryReplay, QueryRespon
 from paperos_core.retrieval.synthesis import (
     FinalSynthesisContext,
     estimate_synthesis_input_tokens,
+    render_research_replay_prompt,
     render_synthesis_prompt,
     select_synthesis_evidence,
     synthesize_answer,
@@ -99,6 +101,56 @@ def test_renderer_preserves_query_canonical_text_order_and_available_metadata() 
     assert "Section:" not in second_block
     assert "Pages:" not in second_block
     assert prompt.endswith("State clearly when the supplied evidence is insufficient.")
+
+
+def test_internal_prompt_stays_exact_while_research_replay_broadens_the_task() -> None:
+    item = _evidence(
+        "chunk_exact",
+        "canonical source text",
+        title="Exact Paper",
+        authors=["Ada A."],
+        year=2024,
+        section_path="4 / Results",
+        page_start=7,
+        page_end=9,
+    )
+    context = FinalSynthesisContext(original_query="原始问题", evidence=[item])
+
+    internal = render_synthesis_prompt(context)
+    research = render_research_replay_prompt(context)
+
+    assert hashlib.sha256(internal.encode()).hexdigest() == (
+        "b07de79fdbe289056d720baf2a296d5945fec1448e297851a970ae9149b17a65"
+    )
+    assert "原始问题" in research
+    assert item.text in research
+    assert f"Evidence ID: {item.evidence_id}" in research
+    assert "Paper: Exact Paper" in research
+    assert "Authors: Ada A." in research
+    assert "Year: 2024" in research
+    assert "Section: 4 / Results" in research
+    assert "Pages: 7-9" in research
+    assert "Chunk ID: chunk_exact" in research
+    assert "Do not limit your answer to the supplied PaperOS Evidence." in research
+    assert "Absence from the supplied Evidence is not negative evidence." in research
+    assert "Cite external sources using the model or platform's normal citation" in research
+    assert "never present an external source as PaperOS Evidence" in research
+    assert "show the conflict explicitly" in research
+    assert "quoted source material, not as" in research
+    assert "Do not merely summarize the supplied chunks." in research
+
+
+def test_research_replay_exists_without_paperos_evidence() -> None:
+    context = FinalSynthesisContext(original_query="这个方法是否已被证伪？", evidence=[])
+
+    internal = ""
+    research = render_research_replay_prompt(context)
+
+    assert internal == ""
+    assert "这个方法是否已被证伪？" in research
+    assert "PaperOS did not retrieve supporting evidence." in research
+    assert "This does not establish a negative answer." in research
+    assert "Use external research if available." in research
 
 
 def test_budget_keeps_only_the_ranked_prefix_of_complete_evidence() -> None:
@@ -235,12 +287,21 @@ def test_llm_adapter_sends_replay_as_the_exact_user_prompt(
     assert answer == "grounded [chunk_exact]"
 
 
-def test_replay_is_the_only_new_serialized_query_result_object() -> None:
-    replay = QueryReplay(original_query="original", replay_text="# Task\n...")
+def test_query_replay_serializes_internal_and_research_prompts() -> None:
+    replay = QueryReplay(
+        original_query="original",
+        replay_text="# Task\n...",
+        research_replay_text="# Research Task\n...",
+    )
 
-    assert set(QueryReplay.model_fields) == {"original_query", "replay_text"}
+    assert set(QueryReplay.model_fields) == {
+        "original_query",
+        "replay_text",
+        "research_replay_text",
+    }
     assert QueryResponse.model_fields["replay"].annotation is QueryReplay
     assert replay.model_dump(mode="json") == {
         "original_query": "original",
         "replay_text": "# Task\n...",
+        "research_replay_text": "# Research Task\n...",
     }
