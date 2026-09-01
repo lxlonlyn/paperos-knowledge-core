@@ -37,6 +37,7 @@ _RECOVERABLE_PARSE_RUN_STATUSES = (
     ParseRunStatus.SUBMITTED,
     ParseRunStatus.RUNNING,
 )
+OPERATION_ID_REQUEST_OPTION = "_paperos_operational_job_id"
 
 
 class ParserArtifactRepository:
@@ -167,6 +168,65 @@ class ParserArtifactRepository:
             raise SourceRegistryError(f"ParseRun '{run_id}' does not exist.", affected=run_id)
         return self._run_from_row(row)
 
+    def find_replay_run(
+        self,
+        source_file_id: str,
+        *,
+        operation_id: str,
+    ) -> ParseRun | None:
+        """Find the durable parser checkpoint for one logical operation."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM parse_runs WHERE source_file_id = ? "
+                "ORDER BY created_at DESC, id DESC",
+                (source_file_id,),
+            ).fetchall()
+        for row in rows:
+            run = self._run_from_row(row)
+            if run.request_options.get(OPERATION_ID_REQUEST_OPTION) != operation_id:
+                continue
+            if run.status == ParseRunStatus.FAILED:
+                return None
+            if run.provider_task_id is not None or run.artifact_manifest_path.is_file():
+                return run
+        return None
+
+    def durable_result_artifacts(
+        self,
+        parse_run: ParseRun,
+    ) -> list[ParserArtifact] | None:
+        """Return a fully persisted provider result, or None before its commit marker."""
+
+        manifest_path = parse_run.artifact_manifest_path
+        if not manifest_path.is_file():
+            return None
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ParserArtifactValidationError(
+                "Parser artifact manifest cannot be read.",
+                affected=manifest_path,
+            ) from exc
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("parse_run_id") != parse_run.id
+            or manifest.get("source_file_id") != parse_run.source_file_id
+            or manifest.get("provider_task_id") != parse_run.provider_task_id
+        ):
+            raise ParserArtifactValidationError(
+                "Parser artifact manifest does not match its ParseRun.",
+                affected=manifest_path,
+            )
+        artifacts = self.list_artifacts(parse_run.id)
+        if not artifacts:
+            raise ParserArtifactValidationError(
+                "Parser artifact manifest has no registered artifacts.",
+                affected=parse_run.id,
+            )
+        self.verify_artifact_checksums(parse_run.id)
+        return artifacts
+
     def recover_interrupted_runs(self) -> int:
         """Mark non-terminal parse attempts left by a prior process as interrupted."""
 
@@ -188,6 +248,8 @@ class ParserArtifactRepository:
         run_id: str,
         *,
         status: ParseRunStatus,
+        provider: str | None = None,
+        backend: str | None = None,
         provider_task_id: str | None = None,
         provider_model: str | None = None,
         error_code: str | None = None,
@@ -205,11 +267,14 @@ class ParserArtifactRepository:
             connection.execute(
                 """
                 UPDATE parse_runs
-                SET status = ?, completed_at = ?, provider_task_id = ?,
+                SET provider = ?, backend = ?, status = ?, completed_at = ?,
+                    provider_task_id = ?,
                     provider_model = ?, error_code = ?, error_message = ?, raw_metadata = ?
                 WHERE id = ?
                 """,
                 (
+                    provider or current.provider,
+                    backend or current.backend,
                     status.value,
                     completed_at.isoformat() if completed_at else None,
                     provider_task_id or current.provider_task_id,

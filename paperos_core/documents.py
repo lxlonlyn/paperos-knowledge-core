@@ -135,12 +135,18 @@ class DocumentService:
             raw_pdf_path=source.storage_path,
         )
 
-    async def reprocess(self, document_id: str) -> dict[str, object]:
+    async def reprocess(
+        self,
+        document_id: str,
+        *,
+        operation_id: str | None = None,
+    ) -> dict[str, object]:
         detail = self.inspect(document_id)
         active = self.canonical_repository.get_bundle(detail.canonical_snapshot_id)
         result = await self.ingestion.ingest_pdf_to_knowledge(
             detail.raw_pdf_path,
             dataset=active.snapshot.dataset_id,
+            operation_id=operation_id,
         )
         return result.public_dict()
 

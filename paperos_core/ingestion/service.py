@@ -7,14 +7,18 @@ from typing import TYPE_CHECKING, Any
 
 from paperos_core.adapters.mineru.client import MinerUClient
 from paperos_core.adapters.mineru.mapper import MinerUCanonicalMapper
+from paperos_core.adapters.mineru.schemas import MinerUTask
 from paperos_core.config import RuntimeSettings
 from paperos_core.domain.canonical import CanonicalIngestionResult
-from paperos_core.domain.documents import IngestionJob, IngestionResult, SourceFile
+from paperos_core.domain.documents import IngestionJob, IngestionResult, SourceFile, utc_now
 from paperos_core.domain.enums import IngestionJobStatus, ParseRunStatus
 from paperos_core.domain.parsing import ParsedIngestionResult
-from paperos_core.errors import InvalidDatasetError, PaperOSError
+from paperos_core.errors import InvalidDatasetError, MinerUProviderError, PaperOSError
 from paperos_core.ingestion.canonical_repository import CanonicalRepository
-from paperos_core.ingestion.parser_artifacts import ParserArtifactRepository
+from paperos_core.ingestion.parser_artifacts import (
+    OPERATION_ID_REQUEST_OPTION,
+    ParserArtifactRepository,
+)
 from paperos_core.ingestion.registry import SourceRegistry
 from paperos_core.ingestion.validation import validate_pdf
 
@@ -84,32 +88,125 @@ class IngestionService:
         dataset: str | None = None,
         user_metadata: dict[str, Any] | None = None,
         requested_options: dict[str, Any] | None = None,
+        operation_id: str | None = None,
     ) -> ParsedIngestionResult:
         """Run genuine PDF intake through the live parser artifact stage."""
+        options = dict(requested_options or {})
+        if operation_id is not None:
+            options[OPERATION_ID_REQUEST_OPTION] = operation_id
+        provider_options = {
+            key: value
+            for key, value in options.items()
+            if key != OPERATION_ID_REQUEST_OPTION
+        }
         intake = self.ingest_pdf(
             path,
             dataset=dataset,
             user_metadata=user_metadata,
-            requested_options=requested_options,
+            requested_options=options,
         )
         source = intake.source_file
-        options = requested_options or {}
         backend = str(options.get("model_version") or self.config.mineru.preferred_backend)
         if backend == "auto":
             backend = "vlm"
-        parse_run = self.parser_artifacts.create_parse_run(
-            source,
-            provider=self.mineru.provider.name,
-            backend=backend,
-            request_options=options,
+        parse_run = (
+            self.parser_artifacts.find_replay_run(
+                source.id,
+                operation_id=operation_id,
+            )
+            if operation_id is not None
+            else None
         )
+        resumed = parse_run is not None
+        if parse_run is None:
+            parse_run = self.parser_artifacts.create_parse_run(
+                source,
+                provider=self.mineru.provider.name,
+                backend=backend,
+                request_options=options,
+            )
         self.registry.update_job(
             intake.job.id,
             status=IngestionJobStatus.PARSING,
-            current_operation="submitting_to_mineru",
+            current_operation=(
+                "resuming_mineru_task" if resumed else "submitting_to_mineru"
+            ),
         )
         try:
-            result = await self.mineru.parse_pdf(source, request_options=requested_options)
+            durable_artifacts = self.parser_artifacts.durable_result_artifacts(
+                parse_run
+            )
+            if durable_artifacts is not None:
+                if parse_run.status != ParseRunStatus.COMPLETED:
+                    parse_run = self.parser_artifacts.update_parse_run(
+                        parse_run.id,
+                        status=ParseRunStatus.COMPLETED,
+                    )
+                self.registry.update_job(
+                    intake.job.id,
+                    status=IngestionJobStatus.NORMALIZING,
+                    current_operation="awaiting_canonical_transformation",
+                )
+                return ParsedIngestionResult(
+                    source_file_id=source.id,
+                    ingestion_job_id=intake.job.id,
+                    duplicate_source=intake.duplicate,
+                    parse_run=parse_run,
+                    artifacts=durable_artifacts,
+                )
+
+            if parse_run.provider_task_id is None:
+                task = await self.mineru.submit_pdf(
+                    source,
+                    request_options=provider_options,
+                )
+                parse_run = self.parser_artifacts.update_parse_run(
+                    parse_run.id,
+                    status=ParseRunStatus.SUBMITTED,
+                    provider=task.provider,
+                    backend=task.backend,
+                    provider_task_id=task.task_id,
+                    provider_model=task.backend,
+                    raw_metadata={
+                        **task.raw_metadata,
+                        "_paperos_checkpoint": {
+                            "state": "submitted",
+                            "updated_at": utc_now().isoformat(),
+                        },
+                    },
+                )
+            else:
+                if parse_run.provider != self.mineru.provider.name:
+                    raise MinerUProviderError(
+                        "The retained MinerU task belongs to a different provider.",
+                        affected=parse_run.provider_task_id,
+                        retryable=False,
+                    )
+                task = MinerUTask(
+                    provider=parse_run.provider,
+                    task_id=parse_run.provider_task_id,
+                    state="submitted",
+                    backend=parse_run.backend,
+                    data_id=source.id,
+                    raw_metadata=parse_run.raw_metadata or {},
+                )
+                parse_run = self.parser_artifacts.update_parse_run(
+                    parse_run.id,
+                    status=ParseRunStatus.SUBMITTED,
+                    raw_metadata={
+                        **(parse_run.raw_metadata or {}),
+                        "_paperos_checkpoint": {
+                            "state": "resumed",
+                            "updated_at": utc_now().isoformat(),
+                        },
+                    },
+                )
+
+            task, poll_history = await self.mineru.poll_task(task)
+            result = await self.mineru.fetch_result(
+                task,
+                poll_history=poll_history,
+            )
             parse_run = self.parser_artifacts.update_parse_run(
                 parse_run.id,
                 status=ParseRunStatus.RUNNING,
@@ -161,6 +258,7 @@ class IngestionService:
         dataset: str | None = None,
         user_metadata: dict[str, Any] | None = None,
         requested_options: dict[str, Any] | None = None,
+        operation_id: str | None = None,
     ) -> KnowledgeIngestionResult:
         """Run genuine PDF intake through the complete knowledge pipeline."""
         if self.knowledge_pipeline is None:
@@ -172,6 +270,7 @@ class IngestionService:
             dataset=dataset,
             user_metadata=user_metadata,
             requested_options=requested_options,
+            operation_id=operation_id,
         )
         self.registry.update_job(
             canonical.parsed.ingestion_job_id,
@@ -208,6 +307,7 @@ class IngestionService:
         dataset: str | None = None,
         user_metadata: dict[str, Any] | None = None,
         requested_options: dict[str, Any] | None = None,
+        operation_id: str | None = None,
     ) -> CanonicalIngestionResult:
         """Run genuine PDF intake through canonical transformation."""
         parsed = await self.ingest_pdf_to_parser(
@@ -215,6 +315,7 @@ class IngestionService:
             dataset=dataset,
             user_metadata=user_metadata,
             requested_options=requested_options,
+            operation_id=operation_id,
         )
         try:
             source = self.registry.get_source(parsed.source_file_id)

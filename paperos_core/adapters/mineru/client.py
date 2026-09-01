@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from paperos_core.adapters.mineru.providers import MinerUProvider
-from paperos_core.adapters.mineru.schemas import MinerUParseResult
+from paperos_core.adapters.mineru.schemas import MinerUParseResult, MinerUTask
 from paperos_core.config import MinerUSettings
 from paperos_core.domain.documents import SourceFile
 from paperos_core.errors import MinerUParseError, MinerUTimeoutError
@@ -21,7 +21,22 @@ class MinerUClient:
     async def parse_pdf(
         self, source: SourceFile, *, request_options: dict[str, Any] | None = None
     ) -> MinerUParseResult:
-        task = await self.provider.submit_pdf(source, request_options=request_options or {})
+        task = await self.submit_pdf(source, request_options=request_options)
+        task, history = await self.poll_task(task)
+        return await self.fetch_result(task, poll_history=history)
+
+    async def submit_pdf(
+        self, source: SourceFile, *, request_options: dict[str, Any] | None = None
+    ) -> MinerUTask:
+        return await self.provider.submit_pdf(
+            source,
+            request_options=request_options or {},
+        )
+
+    async def poll_task(
+        self,
+        task: MinerUTask,
+    ) -> tuple[MinerUTask, list[dict[str, Any]]]:
         started = time.monotonic()
         history: list[dict[str, Any]] = [
             {
@@ -48,13 +63,21 @@ class MinerUClient:
                 }
             )
             if task.state == "done":
-                return await self.provider.fetch_result(task, poll_history=history)
+                return task, history
             if task.state == "failed":
                 raise MinerUParseError(
                     f"MinerU task failed: {task.error_message or 'unknown failure'}",
                     affected=task.task_id,
                     details={"provider_error_code": task.error_code},
                 )
+
+    async def fetch_result(
+        self,
+        task: MinerUTask,
+        *,
+        poll_history: list[dict[str, Any]],
+    ) -> MinerUParseResult:
+        return await self.provider.fetch_result(task, poll_history=poll_history)
 
     async def aclose(self) -> None:
         await self.provider.aclose()

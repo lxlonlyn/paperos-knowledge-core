@@ -267,6 +267,11 @@ class MinerUProviderError(PaperOSError):
     retryable = True
 
 
+class MinerUTaskUnavailableError(MinerUProviderError):
+    code = "mineru_task_unavailable"
+    retryable = False
+
+
 class MinerUParseError(PaperOSError):
     code = "mineru_parse_failure"
 

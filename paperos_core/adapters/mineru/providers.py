@@ -19,6 +19,7 @@ from paperos_core.errors import (
     MinerUParseError,
     MinerUProviderError,
     MinerUQuotaError,
+    MinerUTaskUnavailableError,
 )
 
 logger = logging.getLogger(__name__)
@@ -279,11 +280,20 @@ class MinerUCloudProvider:
         )
 
     async def get_task_status(self, task: MinerUTask) -> MinerUTask:
-        response = await self._request(
-            "GET",
-            f"{self.endpoint}/api/v4/extract-results/batch/{task.task_id}",
-            headers=self._headers,
-        )
+        try:
+            response = await self._request(
+                "GET",
+                f"{self.endpoint}/api/v4/extract-results/batch/{task.task_id}",
+                headers=self._headers,
+            )
+        except MinerUProviderError as exc:
+            if exc.details.get("http_status") in {404, 410}:
+                raise MinerUTaskUnavailableError(
+                    "The retained MinerU task no longer exists or has expired.",
+                    affected=task.task_id,
+                    details={"http_status": exc.details["http_status"]},
+                ) from exc
+            raise
         payload = self._payload(response)
         data = payload.get("data")
         results = data.get("extract_result") if isinstance(data, dict) else None

@@ -1027,8 +1027,10 @@ class _ReplayIngestionProbe:
         path: Path,
         *,
         dataset: str | None = None,
+        operation_id: str | None = None,
     ) -> object:
         _require(path == self.source_path, "Reprocess changed the retained source path")
+        _require(operation_id is None, "Direct reprocess unexpectedly set an operation ID")
         self.reprocess_dataset = dataset
         self.repository.activate_reprocessed(dataset)
         return SimpleNamespace(public_dict=lambda: {"dataset_id": dataset})

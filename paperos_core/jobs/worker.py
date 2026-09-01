@@ -90,6 +90,7 @@ class BackgroundWorker:
                     Path(str(job.payload["path"])),
                     dataset=job.payload.get("dataset"),
                     user_metadata=job.payload.get("metadata"),
+                    operation_id=job.id,
                 )
                 payload = result.public_dict()
             elif job.job_type == "improve":
@@ -99,7 +100,8 @@ class BackgroundWorker:
                 payload = report.public_dict()
             elif job.job_type == "reprocess":
                 payload = await self.documents.reprocess(
-                    str(job.payload["document_id"])
+                    str(job.payload["document_id"]),
+                    operation_id=job.id,
                 )
             else:
                 raise ValueError(f"Unsupported operational job type: {job.job_type}")
