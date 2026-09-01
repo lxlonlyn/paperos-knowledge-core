@@ -113,6 +113,8 @@ def _save_query_history(
     expand_context: bool,
     expand_graph: bool,
 ) -> None:
+    """Persist one query execution and its external-research replay artifact."""
+
     history_root = settings.data_dir / "query_history"
     history_id = f"history_{uuid.uuid4().hex}"
     replay = payload.get("replay")

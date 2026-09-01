@@ -373,7 +373,13 @@ def test_query_text_modes_and_history(
         )
         == 0
     )
-    assert capsys.readouterr().out == expected
+    output = capsys.readouterr()
+    assert output.out == expected
+    assert [(method, path) for method, path, _kwargs in fake.calls] == [
+        ("POST", "/api/v1/query")
+    ]
+    if not output_flag:
+        assert "Research Replay" not in output.out
 
     history_path = settings.data_dir / "query_history" / "queries.jsonl"
     entry = json.loads(history_path.read_text(encoding="utf-8"))
@@ -399,6 +405,7 @@ def test_repeated_query_response_identity_keeps_distinct_replays(
         {"data": {"directory": tmp_path / "data"}}
     )
     monkeypatch.setattr(agent_client, "load_settings", lambda: settings)
+    query_clients: list[_FakeClient] = []
 
     for research_replay_text in ("Replay A", "Replay B"):
         fake = _FakeClient(
@@ -417,9 +424,17 @@ def test_repeated_query_response_identity_keeps_distinct_replays(
                 )
             ]
         )
+        query_clients.append(fake)
         _install_client(monkeypatch, fake)
         assert agent_client.run(["query", "Same request"]) == 0
         capsys.readouterr()
+
+    assert sum(len(client.calls) for client in query_clients) == 2
+    assert all(
+        [(method, path) for method, path, _kwargs in client.calls]
+        == [("POST", "/api/v1/query")]
+        for client in query_clients
+    )
 
     history_path = settings.data_dir / "query_history" / "queries.jsonl"
     records = [
@@ -437,6 +452,89 @@ def test_repeated_query_response_identity_keeps_distinct_replays(
     second_replay = settings.data_dir / "query_history" / second["replay_file"]
     assert first_replay.read_text(encoding="utf-8") == "Replay A"
     assert second_replay.read_text(encoding="utf-8") == "Replay B"
+
+
+def test_no_evidence_query_still_saves_research_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = RuntimeSettings.model_validate(
+        {"data": {"directory": tmp_path / "data"}}
+    )
+    monkeypatch.setattr(agent_client, "load_settings", lambda: settings)
+    no_evidence_answer = "No PaperOS evidence was retrieved."
+    research_replay = (
+        "Original question: unresolved?\n"
+        "PaperOS did not retrieve supporting evidence.\n"
+        "This does not establish a negative answer."
+    )
+    payload = _query_payload(
+        replay_text="",
+        research_replay_text=research_replay,
+    )
+    payload["answer"] = no_evidence_answer
+    payload["answer_model"] = "paperos/no-evidence"
+    fake = _FakeClient(
+        [
+            (
+                "POST",
+                "/api/v1/query",
+                _response("POST", "/api/v1/query", payload),
+            )
+        ]
+    )
+    _install_client(monkeypatch, fake)
+
+    assert agent_client.run(["query", "unresolved?"]) == 0
+
+    output = capsys.readouterr()
+    assert output.out == f"{no_evidence_answer}\n"
+    assert research_replay not in output.out
+    assert [(method, path) for method, path, _kwargs in fake.calls] == [
+        ("POST", "/api/v1/query")
+    ]
+    history_path = settings.data_dir / "query_history" / "queries.jsonl"
+    record = json.loads(history_path.read_text(encoding="utf-8"))
+    replay_path = settings.data_dir / "query_history" / record["replay_file"]
+    assert replay_path.read_text(encoding="utf-8") == research_replay
+
+
+def test_history_failure_warns_without_retrying_successful_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = RuntimeSettings.model_validate(
+        {"data": {"directory": tmp_path / "data"}}
+    )
+    monkeypatch.setattr(agent_client, "load_settings", lambda: settings)
+
+    def fail_history(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected history failure")
+
+    monkeypatch.setattr(agent_client, "_save_query_history", fail_history)
+    fake = _FakeClient(
+        [
+            (
+                "POST",
+                "/api/v1/query",
+                _response("POST", "/api/v1/query", _query_payload()),
+            )
+        ]
+    )
+    _install_client(monkeypatch, fake)
+
+    assert agent_client.run(["query", "Question?"]) == 0
+
+    output = capsys.readouterr()
+    assert output.out == "Evidence-bound answer.\n"
+    assert output.err == (
+        "paperos warning: query history was not saved (OSError).\n"
+    )
+    assert [(method, path) for method, path, _kwargs in fake.calls] == [
+        ("POST", "/api/v1/query")
+    ]
 
 
 def test_query_json_and_typed_http_error(
@@ -460,6 +558,15 @@ def test_query_json_and_typed_http_error(
     _install_client(monkeypatch, query)
     assert agent_client.run(["query", "Question?", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == _query_payload()
+    assert [(method, path) for method, path, _kwargs in query.calls] == [
+        ("POST", "/api/v1/query")
+    ]
+    history_path = settings.data_dir / "query_history" / "queries.jsonl"
+    record = json.loads(history_path.read_text(encoding="utf-8"))
+    replay_path = settings.data_dir / "query_history" / record["replay_file"]
+    assert replay_path.read_text(encoding="utf-8") == (
+        "# Research Replay\n\nContinue the research."
+    )
 
     error_client = _FakeClient(
         [
